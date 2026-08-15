@@ -1,0 +1,277 @@
+//! The two error shapes, and the code catalog.
+//!
+//! P-1 item 5 (`reference/fixtures/05-error-catalog.http`) established that AgentMail returns
+//! **two structurally different** error bodies, and a clone must reproduce both:
+//!
+//! 1. **Auth layer** (missing or unusable credential) → a bare gateway body with only `message`:
+//!    `401 {"message":"Unauthorized"}` / `403 {"message":"Forbidden"}`. This holds even for a
+//!    *well-formed but unknown* `am_` key, so it is not merely a malformed-token path.
+//! 2. **Application layer** → the full envelope `{name, code, message, fix?, docs?}`, plus
+//!    per-code extras (`errors[]` on `validation_error`, `suggestions[]` on `already_exists`).
+//!
+//! Clients are told to branch on `code`; `name`/`message` retain legacy pre-`code` values.
+
+use serde::{Deserialize, Serialize};
+
+/// Bare body returned by the auth layer. Carries `message` and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewayError {
+    pub message: String,
+}
+
+impl GatewayError {
+    pub fn unauthorized() -> Self {
+        Self { message: "Unauthorized".into() }
+    }
+    pub fn forbidden() -> Self {
+        Self { message: "Forbidden".into() }
+    }
+}
+
+/// One entry of `validation_error`'s `errors` array. Observed shape: `{code, path[], message}`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValidationIssue {
+    pub code: String,
+    /// JSON-pointer-ish path as an array; observed empty for whole-body rules.
+    pub path: Vec<serde_json::Value>,
+    pub message: String,
+}
+
+impl ValidationIssue {
+    pub fn custom(message: impl Into<String>) -> Self {
+        Self { code: "custom".into(), path: Vec::new(), message: message.into() }
+    }
+}
+
+/// The application-layer error envelope.
+///
+/// Field order matches the live responses. Optional members are omitted entirely when absent —
+/// never emitted as `null` or `""` (observed: `sub_type` omitted, not blanked).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ErrorEnvelope {
+    /// Legacy human name, e.g. `NotFoundError`, `AlreadyExistsError`, `ValidationError`.
+    pub name: String,
+    /// The stable machine key. **Branch on this**, not on `name`/`message`.
+    pub code: ErrorCode,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<ValidationIssue>,
+    /// `already_exists` on inbox creation returns available alternatives here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs: Option<String>,
+}
+
+impl ErrorEnvelope {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            name: code.legacy_name().to_owned(),
+            code,
+            message: message.into(),
+            errors: Vec::new(),
+            suggestions: Vec::new(),
+            fix: None,
+            docs: Some(code.docs_url()),
+        }
+    }
+    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(fix.into());
+        self
+    }
+    pub fn with_suggestions(mut self, s: Vec<String>) -> Self {
+        self.suggestions = s;
+        self
+    }
+    pub fn with_issues(mut self, e: Vec<ValidationIssue>) -> Self {
+        self.errors = e;
+        self
+    }
+    /// HTTP status this code is served with.
+    pub fn status(&self) -> u16 {
+        self.code.status()
+    }
+}
+
+/// The documented code catalog (docs.agentmail.to/errors), with statuses corrected where the
+/// live API disagreed with the docs — see the note on [`ErrorCode::AlreadyExists`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    // --- 401 (emitted as the bare GatewayError body, not this envelope) ---
+    MissingAuthorization,
+    InvalidTokenType,
+    UnknownApiKey,
+    Unauthorized,
+    // --- 403 ---
+    MissingPermission,
+    PermissionEscalation,
+    UnrestrictedKeyRequired,
+    Forbidden,
+    MessageRejected,
+    /// **Observed at HTTP 403** for a duplicate inbox username, with `suggestions[]`.
+    /// The docs' `resource_taken`/409 and the SDK-derived 422 were both wrong
+    /// (`reference/fixtures/05-error-catalog.http`).
+    AlreadyExists,
+    ResourceTaken,
+    LimitExceeded,
+    DomainNotVerified,
+    CannotDelete,
+    // --- 400 / 404 / 422 ---
+    ValidationError,
+    NotFound,
+    Unprocessable,
+    QueryRangeTooWide,
+    // --- 409 ---
+    Conflict,
+    RaceCondition,
+    ResourceDeleting,
+    // --- 429 / 5xx ---
+    RateLimitExceeded,
+    ServiceUnavailable,
+    InternalError,
+}
+
+impl ErrorCode {
+    pub fn status(self) -> u16 {
+        use ErrorCode::*;
+        match self {
+            MissingAuthorization | InvalidTokenType | UnknownApiKey | Unauthorized => 401,
+            MissingPermission
+            | PermissionEscalation
+            | UnrestrictedKeyRequired
+            | Forbidden
+            | MessageRejected
+            | AlreadyExists
+            | ResourceTaken
+            | LimitExceeded
+            | DomainNotVerified
+            | CannotDelete => 403,
+            ValidationError | QueryRangeTooWide => 400,
+            NotFound => 404,
+            Unprocessable => 422,
+            Conflict | RaceCondition | ResourceDeleting => 409,
+            RateLimitExceeded => 429,
+            ServiceUnavailable => 503,
+            InternalError => 500,
+        }
+    }
+
+    /// The legacy `name` field paired with each code in live responses.
+    pub fn legacy_name(self) -> &'static str {
+        use ErrorCode::*;
+        match self {
+            NotFound => "NotFoundError",
+            AlreadyExists => "AlreadyExistsError",
+            ValidationError => "ValidationError",
+            Conflict | RaceCondition | ResourceDeleting => "ConflictError",
+            Unprocessable => "UnprocessableError",
+            MessageRejected => "MessageRejectedError",
+            RateLimitExceeded => "RateLimitError",
+            InternalError | ServiceUnavailable => "InternalError",
+            _ => "Error",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        use ErrorCode::*;
+        match self {
+            MissingAuthorization => "missing_authorization",
+            InvalidTokenType => "invalid_token_type",
+            UnknownApiKey => "unknown_api_key",
+            Unauthorized => "unauthorized",
+            MissingPermission => "missing_permission",
+            PermissionEscalation => "permission_escalation",
+            UnrestrictedKeyRequired => "unrestricted_key_required",
+            Forbidden => "forbidden",
+            MessageRejected => "message_rejected",
+            AlreadyExists => "already_exists",
+            ResourceTaken => "resource_taken",
+            LimitExceeded => "limit_exceeded",
+            DomainNotVerified => "domain_not_verified",
+            CannotDelete => "cannot_delete",
+            ValidationError => "validation_error",
+            NotFound => "not_found",
+            Unprocessable => "unprocessable",
+            QueryRangeTooWide => "query_range_too_wide",
+            Conflict => "conflict",
+            RaceCondition => "race_condition",
+            ResourceDeleting => "resource_deleting",
+            RateLimitExceeded => "rate_limit_exceeded",
+            ServiceUnavailable => "service_unavailable",
+            InternalError => "internal_error",
+        }
+    }
+
+    pub fn docs_url(self) -> String {
+        format!("https://docs.agentmail.to/errors#{}", self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gateway_body_is_message_only() {
+        // Live: no auth -> 401 {"message":"Unauthorized"}; bad key -> 403 {"message":"Forbidden"}.
+        assert_eq!(
+            serde_json::to_string(&GatewayError::unauthorized()).unwrap(),
+            r#"{"message":"Unauthorized"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&GatewayError::forbidden()).unwrap(),
+            r#"{"message":"Forbidden"}"#
+        );
+    }
+
+    #[test]
+    fn not_found_envelope_matches_live_capture() {
+        let live = r#"{"name":"NotFoundError","code":"not_found","message":"Inbox not found",
+            "fix":"No inbox with the given identifier is visible to this credential.",
+            "docs":"https://docs.agentmail.to/errors#not_found"}"#;
+        let parsed: ErrorEnvelope = serde_json::from_str(live).unwrap();
+        assert_eq!(parsed.code, ErrorCode::NotFound);
+        assert_eq!(parsed.status(), 404);
+        assert!(parsed.errors.is_empty() && parsed.suggestions.is_empty());
+    }
+
+    #[test]
+    fn already_exists_is_403_with_suggestions() {
+        // Live capture: duplicate inbox username.
+        let live = r#"{"name":"AlreadyExistsError","code":"already_exists",
+            "message":"Inbox already exists","fix":"...",
+            "suggestions":["amk-probe4991","amk-probe6813","amk-probe9732"],
+            "docs":"https://docs.agentmail.to/errors#already_exists"}"#;
+        let parsed: ErrorEnvelope = serde_json::from_str(live).unwrap();
+        assert_eq!(parsed.code, ErrorCode::AlreadyExists);
+        assert_eq!(parsed.status(), 403, "observed 403, not 409/422");
+        assert_eq!(parsed.suggestions.len(), 3);
+    }
+
+    #[test]
+    fn validation_error_carries_code_path_message_issues() {
+        let live = r#"{"name":"ValidationError","code":"validation_error",
+            "message":"Request validation failed",
+            "errors":[{"code":"custom","path":[],"message":"to, cc, or bcc must be specified"}],
+            "fix":"...","docs":"https://docs.agentmail.to/errors#validation_error"}"#;
+        let parsed: ErrorEnvelope = serde_json::from_str(live).unwrap();
+        assert_eq!(parsed.status(), 400);
+        assert_eq!(parsed.errors[0].code, "custom");
+        assert!(parsed.errors[0].path.is_empty());
+    }
+
+    #[test]
+    fn empty_extras_are_omitted_never_emitted_as_empty() {
+        let e = ErrorEnvelope::new(ErrorCode::NotFound, "Inbox not found");
+        // Check for the KEYS, not substrings: the docs URL legitimately contains "errors".
+        let v: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert!(!v.contains_key("errors"), "empty errors[] must be omitted: {v:?}");
+        assert!(!v.contains_key("suggestions"), "empty suggestions[] must be omitted: {v:?}");
+        assert!(!v.contains_key("fix"), "absent fix must be omitted: {v:?}");
+        assert_eq!(v.keys().collect::<Vec<_>>(), ["code", "docs", "message", "name"]);
+    }
+}

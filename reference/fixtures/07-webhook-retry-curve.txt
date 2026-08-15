@@ -3,7 +3,7 @@
 # Question: does AgentMail OVERRIDE the Svix default retry schedule?
 # Svix OSS default gaps between consecutive attempts: 5s, 5m, 30m, 2h, 5h, 10h, 10h (immediate first attempt).
 # Each svix-id below is ONE event's own retry chain; deltas are gaps between CONSECUTIVE attempts of THAT chain.
-# total attempts across all chains: 19 ; distinct events (svix-ids): 4
+# total attempts across all chains: 20 ; distinct events (svix-ids): 4
 #   [IN-FLIGHT — full curve needs ~T+20h to capture the two 10h retries]
 
 ## event msg_3HwIMgrDhRnHtUDw6GAIE2nWCtj  (5 attempts)
@@ -22,12 +22,13 @@
 #   4 | 2026-08-15 06:31:47 | 0h33m56s      | 0h30m00s        | ~OK
 #   5 | 2026-08-15 08:18:40 | 1h46m53s      | 2h00m00s        | ~OK
 
-## event msg_3HwLBWOzmBXya8xa9bPW83gu3d1  (4 attempts)
+## event msg_3HwLBWOzmBXya8xa9bPW83gu3d1  (5 attempts)
 #  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
 #   1 | 2026-08-15 06:07:29 | (first attempt) | immediate       | -
 #   2 | 2026-08-15 06:07:34 | 0h00m05s      | 0h00m05s        | ~OK
 #   3 | 2026-08-15 06:11:46 | 0h04m12s      | 0h05m00s        | DIFF
 #   4 | 2026-08-15 06:41:01 | 0h29m15s      | 0h30m00s        | ~OK
+#   5 | 2026-08-15 08:59:52 | 2h18m51s      | 2h00m00s        | DIFF
 
 ## event msg_3HwLQPnrB4N72YNkXNeS7A454ox  (5 attempts)
 #  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
