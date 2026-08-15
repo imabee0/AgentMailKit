@@ -226,7 +226,9 @@ pub async fn list(
         Some(c) => (Some(c.timestamp), Some(c.thread_id.0)),
         None => (None, None),
     };
-    let fetch_limit = query.limit as i64 + 1;
+    // See the identical comment in `messages::list`: `query.limit` is an unclamped `u64`, so
+    // `limit: u64::MAX` or `limit: i64::MAX as u64` must not overflow or wrap `fetch_limit`.
+    let fetch_limit = query.limit.saturating_add(1).min(i64::MAX as u64) as i64;
 
     let rows = sqlx::query(sql)
         .bind(filter.organization_id().as_str())

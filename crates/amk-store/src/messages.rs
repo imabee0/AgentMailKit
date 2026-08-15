@@ -265,7 +265,15 @@ pub async fn list(
         None => (None, None, None),
     };
     // Fetch one extra row to know whether a next page exists, without a second round trip.
-    let fetch_limit = query.limit as i64 + 1;
+    // `query.limit` is a bare `u64` with no upstream clamp (`amk_types::page::ListParams.limit`
+    // is `Option<u64>` straight off the query string), so `limit: u64::MAX` or `limit: i64::MAX as
+    // u64` must not overflow `i64` — `saturating_add` plus a `min` against `i64::MAX` keeps
+    // `fetch_limit` a valid, always-at-least-as-large `LIMIT` instead of wrapping to a negative or
+    // zero value (which `LIMIT 0` would silently render as an empty page, indistinguishable from
+    // an empty mailbox) or panicking on overflow. `has_more` stays correct: `rows.len() as u64 >
+    // query.limit` is false whenever `fetch_limit` saturated, because it can never fetch strictly
+    // more rows than fit in the table.
+    let fetch_limit = query.limit.saturating_add(1).min(i64::MAX as u64) as i64;
 
     let rows = sqlx::query(sql)
         .bind(filter.organization_id().as_str())

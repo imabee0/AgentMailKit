@@ -2551,3 +2551,277 @@ async fn thread_list_with_limit_zero_returns_an_empty_page_without_panicking() {
     assert_eq!(page.items, Vec::new());
     assert!(page.next.is_none());
 }
+
+// --- Round 4, R1: `fetch_limit = query.limit as i64 + 1` overflowed at the top of u64's range —
+// `limit: u64::MAX` wrapped `as i64` to -1, so +1 produced `LIMIT 0` (a real mailbox reading as
+// empty, indistinguishable from actually being empty); `limit: i64::MAX as u64` overflowed `i64`
+// on the `+1` and panicked. `query.limit` is an unclamped `u64` all the way from the wire
+// (`amk_types::page::ListParams.limit: Option<u64>`), so both extremes are reachable. ---
+
+#[tokio::test]
+async fn list_with_u64_max_limit_returns_every_visible_row_not_an_empty_page() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+    for (id, when) in [
+        ("<a@x>", "2026-08-15T05:00:01.000Z"),
+        ("<b@x>", "2026-08-15T05:00:02.000Z"),
+        ("<c@x>", "2026-08-15T05:00:03.000Z"),
+    ] {
+        messages::insert(&pool, new_message(&inbox, &org, pod, thread_id, id, &["sent"], when))
+            .await
+            .unwrap();
+    }
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let page = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery { limit: u64::MAX, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        page.items.len(),
+        3,
+        "a mailbox holding three rows must not answer empty for limit: u64::MAX"
+    );
+    assert!(page.next.is_none(), "every row fit on one page");
+}
+
+#[tokio::test]
+async fn list_with_i64_max_as_u64_limit_returns_every_visible_row_without_panicking() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox, &org, pod, thread_id, "<a@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let page = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery {
+            limit: i64::MAX as u64,
+            direction: SortDirection::Ascending,
+            cursor: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 1, "must not panic and must not answer empty");
+}
+
+#[tokio::test]
+async fn thread_list_with_u64_max_limit_returns_every_visible_row_not_an_empty_page() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    for (id, when) in [
+        ("<a@x>", "2026-08-15T05:00:01.000Z"),
+        ("<b@x>", "2026-08-15T05:00:02.000Z"),
+        ("<c@x>", "2026-08-15T05:00:03.000Z"),
+    ] {
+        let thread_id = ThreadId::new_random();
+        threads::insert(&pool, new_thread(&inbox, &org, pod, thread_id, &["received"], when, id))
+            .await
+            .unwrap();
+    }
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let page = threads::list(
+        &pool,
+        &filter,
+        &[],
+        ListThreadsQuery { limit: u64::MAX, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 3, "three threads must not answer empty for limit: u64::MAX");
+    assert!(page.next.is_none());
+}
+
+#[tokio::test]
+async fn thread_list_with_i64_max_as_u64_limit_returns_every_visible_row_without_panicking() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<a@x>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let page = threads::list(
+        &pool,
+        &filter,
+        &[],
+        ListThreadsQuery {
+            limit: i64::MAX as u64,
+            direction: SortDirection::Ascending,
+            cursor: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 1, "must not panic and must not answer empty");
+}
+
+// --- Round 4, R2: the round-3 three-column `ORDER BY` had no test that could distinguish it from
+// a mismatched or reordered one — every existing tie test varies exactly one tiebreak column, so
+// `(timestamp, inbox_id, message_id)` and `(timestamp, message_id, inbox_id)` reduce to the same
+// comparison. This probe varies BOTH at once, so the two orderings genuinely disagree on which row
+// comes first: inbox "aaa…" holds the lexicographically-LATE message_id `<z@x>`, inbox "bbb…"
+// holds the lexicographically-EARLY `<a@x>`, both at the identical millisecond. Walked at the pod
+// mount (inbox_id unpinned) with limit: 1 in both directions, asserting the exact order the SQL
+// declares — not just "both seen once", since a dropped-vs-reordered row are different failure
+// shapes worth telling apart in the assertion. ---
+
+#[tokio::test]
+async fn list_at_the_pod_mount_agrees_with_order_by_when_both_tiebreak_columns_differ() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox_a = support::seed_inbox(&pool, &org, pod, "aaa").await;
+    let inbox_b = support::seed_inbox(&pool, &org, pod, "bbb").await;
+    assert!(
+        inbox_a.as_str() < inbox_b.as_str(),
+        "seed ordering assumption: local part alone decides it, regardless of the random suffix"
+    );
+
+    let t_a = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox_a, &org, pod, t_a, &["received"], "2026-08-15T05:00:00.000Z", "<z@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox_a, &org, pod, t_a, "<z@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+    let t_b = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox_b, &org, pod, t_b, &["received"], "2026-08-15T05:00:00.000Z", "<a@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox_b, &org, pod, t_b, "<a@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = pod_filter(&org, pod);
+
+    // Ascending: (timestamp, inbox_id, message_id) puts inbox_a's row first, since "aaa…" <
+    // "bbb…" dominates the tie regardless of message_id. A tiebreak that instead sorted by
+    // message_id first (`<a@x>` < `<z@x>`) would put inbox_b's row first — the disagreement this
+    // test exists to catch.
+    let asc = |cursor| ListMessagesQuery { limit: 1, direction: SortDirection::Ascending, cursor };
+    let asc_p1 = messages::list(&pool, &filter, &[], asc(None))
+        .await
+        .unwrap();
+    assert_eq!(asc_p1.items.len(), 1);
+    assert_eq!(
+        asc_p1.items[0].inbox_id, inbox_a,
+        "ascending: inbox_id, not message_id, must decide the first tiebreak"
+    );
+    let asc_cursor = MessageCursor::decode(
+        asc_p1.next.as_deref().expect("a second row remains"),
+        filter.inbox_id(),
+    )
+    .unwrap();
+    let asc_p2 = messages::list(&pool, &filter, &[], asc(Some(asc_cursor)))
+        .await
+        .unwrap();
+    assert_eq!(
+        asc_p2.items.len(),
+        1,
+        "ascending: the second row must not be silently dropped by an ORDER BY that disagrees \
+         with the WHERE clause's resumption predicate"
+    );
+    assert_eq!(asc_p2.items[0].inbox_id, inbox_b);
+    assert!(asc_p2.next.is_none());
+
+    // Descending: the mirror image — inbox_b ("bbb…") sorts first descending.
+    let desc =
+        |cursor| ListMessagesQuery { limit: 1, direction: SortDirection::Descending, cursor };
+    let desc_p1 = messages::list(&pool, &filter, &[], desc(None))
+        .await
+        .unwrap();
+    assert_eq!(desc_p1.items.len(), 1);
+    assert_eq!(desc_p1.items[0].inbox_id, inbox_b);
+    let desc_cursor = MessageCursor::decode(
+        desc_p1.next.as_deref().expect("a second row remains"),
+        filter.inbox_id(),
+    )
+    .unwrap();
+    let desc_p2 = messages::list(&pool, &filter, &[], desc(Some(desc_cursor)))
+        .await
+        .unwrap();
+    assert_eq!(
+        desc_p2.items.len(),
+        1,
+        "descending: the second row must not be silently dropped"
+    );
+    assert_eq!(desc_p2.items[0].inbox_id, inbox_a);
+    assert!(desc_p2.next.is_none());
+}
