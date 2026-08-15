@@ -68,16 +68,28 @@ case "$TOOL" in
 esac
 [ -n "$FILE" ] || exit 0
 
+# Is this write subject to the implementer rules?
+#
+# Either the writer is working inside a worktree (CWD) or the write LANDS in one (FILE). Checking
+# CWD alone left a hole: an agent whose shell sat in the primary checkout could write straight into
+# a worktree and skip every rule below. Checking FILE alone would be wrong too — an implementer
+# writing to an absolute path outside its worktree is exactly what rule 3 exists to catch. So:
+# either condition makes the write an implementer write.
+#
+# The orchestrator merges by copying worktree files INTO the primary checkout, which writes primary
+# paths from a primary CWD, and is unaffected.
+IN_WORKTREE=0
+case "$CWD" in */.claude/worktrees/*) IN_WORKTREE=1 ;; esac
+case "$FILE" in */.claude/worktrees/*) IN_WORKTREE=1 ;; esac
+
 # 1. The plan and its registers are orchestrator-only. A subagent that edits the contract it is
 #    being judged against has silently redefined "correct".
 case "$FILE" in
   *"$PLAN_GLOB"|*/.claude/plans/*)
-    case "$CWD" in
-      */.claude/worktrees/*)
-        deny "The plan is the contract and is ORCHESTRATOR-ONLY.
+    if [ "$IN_WORKTREE" -eq 1 ]; then
+      deny "The plan is the contract and is ORCHESTRATOR-ONLY.
 If the plan is wrong or ambiguous, STOP and report it — do not edit it."
-        ;;
-    esac
+    fi
     ;;
 esac
 
@@ -86,13 +98,11 @@ esac
 #    workers restart from the new base.
 case "$FILE" in
   */crates/amk-types/*)
-    case "$CWD" in
-      */.claude/worktrees/*)
-        deny "amk-types is FROZEN for implementer agents (plan: five non-negotiables #2).
+    if [ "$IN_WORKTREE" -eq 1 ]; then
+      deny "amk-types is FROZEN for implementer agents (plan: five non-negotiables #2).
 Every other crate's correctness is downstream of these shapes.
 If you need a type that does not exist, STOP and report — do not add it."
-        ;;
-    esac
+    fi
     ;;
 esac
 

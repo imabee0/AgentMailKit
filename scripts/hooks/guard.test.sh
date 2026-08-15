@@ -46,6 +46,13 @@ check 2 "git reset from a worktree" \
 check 2 "git -C redirect from a worktree" \
   "$(j Bash "" "$WT" "" "git -C /home/imma/projects/AgentMailKit commit -am wip")"
 
+# The hole that CWD-only detection left: a writer sitting in the primary checkout writing INTO a
+# worktree skipped every implementer rule.
+check 2 "amk-types write INTO a worktree from a primary-checkout cwd" \
+  "$(j Write "$WT/crates/amk-types/src/ids.rs" "$ORCH" "pub struct X;")"
+check 2 "plan write INTO a worktree path from a primary cwd" \
+  "$(j Edit "$WT/.claude/plans/download-agents-mail-sdk-drifting-frog.md" "$ORCH" "text")"
+
 echo "== MUST PASS (exit 0) =="
 check 0 "subagent writes its own crate" \
   "$(j Write "$WT/crates/amk-core/src/scope.rs" "$WT" "pub struct Scope;")"
