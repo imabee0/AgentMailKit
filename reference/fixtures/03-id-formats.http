@@ -1,0 +1,46 @@
+# Fixture 03 — ID formats (A1). Captured 2026-08-15 ~05:40Z, live api.agentmail.to.
+# Throwaway pod 9047724b-2879-416b-8424-82ef81ab9397, inbox amk-probe@agentmail.to.
+
+## organization_id / pod_id / inbox_id (from create responses)
+organization_id : 133c9cbe-f996-4094-a8d5-0c6603e022ea   (UUID v4)
+pod_id          : 9047724b-2879-416b-8424-82ef81ab9397   (UUID v4)
+inbox_id        : amk-probe@agentmail.to                 (== email address, used verbatim as path param)
+
+## thread_id
+thread_id       : c1197a89-02ad-4bdf-8461-c03136b481aa   (UUID v4)
+
+## message_id — THE KEY FINDING
+POST /v0/inboxes/amk-probe@agentmail.to/messages/send  ->  SendMessageResponse:
+{"message_id":"<010001a003ef6970-1732f5b7-5c17-485b-92fa-52ccd78a0004-000000@email.amazonses.com>","thread_id":"c1197a89-02ad-4bdf-8461-c03136b481aa"}
+
+- message_id is an RFC 5322 angle-bracket Message-ID: <local-part@email.amazonses.com>
+- It is the AWS SES OUTBOUND Message-ID (@email.amazonses.com) — i.e. HEADER-DERIVED
+  from the SES send, NOT minted by AgentMail. Inbound mail will carry the sender's
+  own Message-ID (to be confirmed with a swaks inbound; see 09-*).
+- Contains '<', '>', and '@' — all must be percent-encoded in a path segment:
+  path form: %3C010001a003ef6970-1732f5b7-5c17-485b-92fa-52ccd78a0004-000000%40email.amazonses.com%3E
+  round-trip GET /messages/<enc>/raw returned 200 with the decoded id echoed. CONFIRMED.
+
+## Extra response fields NOT in the Fern SDK types (SDK parses with passthrough)
+On MessageItem in a list response, live API additionally returns:
+  organization_id, pod_id, smtp_id
+e.g. "smtp_id":"rubgu1m5dvksbo540fukt0e60jvj5oelrltfobjm"  (SES-side id, also used in the CDN raw path)
+=> amk MessageItem must EMIT organization_id + pod_id + smtp_id for a clean conformance diff,
+   even though the SDK does not type them.
+
+## Pagination boundary (A1/A4 partial)
+GET /messages?limit=1 with exactly 1 message in the inbox -> response has NO next_page_token
+(count:1, limit:1, messages:[...]).  => token is ABSENT on the last page, not empty-string.
+Full multi-page token shape still needs >=2 messages; see 04-pagination.http.
+
+## Raw list envelope (verbatim, limit=1)
+{"count":1,"limit":1,"messages":[{"organization_id":"133c9cbe-...","pod_id":"9047724b-...",
+"inbox_id":"amk-probe@agentmail.to","thread_id":"c1197a89-...","message_id":"<...@email.amazonses.com>",
+"labels":["sent"],"timestamp":"2026-08-15T05:40:16.825Z","from":"AMK Probe <amk-probe@agentmail.to>",
+"to":["amk-probe@agentmail.to"],"subject":"AMK probe A1 baseline",
+"preview":"probe body for id-format capture\n\n--\nSent via AgentMail",
+"smtp_id":"rubgu1m5dvksbo540fukt0e60jvj5oelrltfobjm","size":1269,
+"updated_at":"...","created_at":"..."}]}
+
+Note: a self-send (to == from == inbox) is stored labeled ["sent"] only (no separate
+received copy observed in-inbox). A genuine message.received requires external inbound.

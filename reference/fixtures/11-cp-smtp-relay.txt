@@ -1,0 +1,43 @@
+Item 11 — control-plane SMTP relay target (prod.db, OVH k3s node)
+Captured 2026-08-15 via read-only SSH; sqlite3 opened mode=ro; no secret
+columns selected (ciphertext length/presence only).
+
+DB location (from local manifest, confirmed on host):
+/home/imma/projects/appsynergy-rs/ops/k3s/33-control-plane-storage.yaml:16
+  local: {path: /var/lib/docker/volumes/appsynergy-cp-data/_data}
+
+$ ssh root@144.217.66.212 'ls -la /var/lib/docker/volumes/appsynergy-cp-data/_data/prod.db*'
+-rw-rw-r-- 1 10001 10001 3246714880 Aug 15 04:34 prod.db
+-rw-rw-r-- 1 10001 10001      32768 Aug 15 04:36 prod.db-shm
+-rw-rw-r-- 1 10001 10001    4853392 Aug 15 04:36 prod.db-wal
+-rw-rw-r-- 1 root  10001 3154493440 Jul 30 21:43 prod.db.bak-a32-20260730T214301Z
+
+Table/columns from local source: appsynergy-rs
+app/src/platform/settings/email_get.rs:101-113 — single-row table
+email_settings (id=1): enabled, smtp_host, smtp_port, smtp_username,
+smtp_password_ct (AEAD BLOB), from_address, from_name, use_tls, updated_at.
+
+$ ssh ... sqlite3 "file:/var/lib/docker/volumes/appsynergy-cp-data/_data/prod.db?mode=ro" \
+    "SELECT id, enabled, smtp_host, smtp_port, smtp_username IS NOT NULL,
+            length(smtp_password_ct), from_address, from_name, use_tls, updated_at
+     FROM email_settings WHERE id=1;"
+id  enabled  smtp_host        smtp_port  username_present  password_ct_len  from_address           from_name   use_tls  updated_at
+1   1        m.appsynergy.io  587        1                 NULL             noreply@appsynergy.io  APPSYNERGY  0        2025-11-12T12:32:35Z
+
+$ ssh ... sqlite3 ... "SELECT smtp_username IS NOT NULL, length(smtp_username),
+    smtp_password_ct IS NOT NULL, coalesce(length(smtp_password_ct),0) FROM email_settings WHERE id=1;"
+username_present  username_len  password_ct_present  password_ct_len_bytes
+1                 21            0                    0
+
+CONCLUSION
+- Relay target: m.appsynergy.io:587 (SMTP submission), enabled=1, from
+  "APPSYNERGY <noreply@appsynergy.io>", username present (21 chars),
+  use_tls=0, smtp_password_ct NULL (no stored credential).
+- Per app/src/platform/notifications/transport.rs:179-181,
+  from_email_settings() returns Ok(None) when smtp_password_ct IS NULL, so the
+  control-plane email transport is currently NOT constructed — email
+  notifications effectively disabled despite enabled=1.
+- use_tls==0 maps to lettre builder_dangerous (plaintext, transport.rs:190-191);
+  use_tls==1 would map to starttls_relay. No implicit-TLS (465) path exists.
+- Cutover consequence: nothing to break (transport already inert); repoint
+  post-cutover with a real credential + use_tls=1 against amk submission.

@@ -1,0 +1,1079 @@
+### agent/types/agent_signup_request.py
+class AgentSignupRequest(UncheckedBaseModel):
+    human_email: str
+    username: str
+    source: Optional[str] = None
+    referrer: Optional[str] = None
+### agent/types/agent_signup_response.py
+class AgentSignupResponse(UncheckedBaseModel):
+    organization_id: str
+    inbox_id: str
+    api_key: str
+### agent/types/agent_verify_request.py
+class AgentVerifyRequest(UncheckedBaseModel):
+    otp_code: str
+### agent/types/agent_verify_response.py
+class AgentVerifyResponse(UncheckedBaseModel):
+    verified: bool
+### api_keys/types/api_key.py
+class ApiKey(UncheckedBaseModel):
+    api_key_id: ApiKeyId
+    prefix: Prefix
+    name: Name
+    pod_id: Optional[str] = None
+    inbox_id: Optional[str] = None
+    used_at: Optional[dt.datetime] = None
+    permissions: Optional[ApiKeyPermissions] = None
+    created_at: CreatedAt
+### api_keys/types/api_key_id.py
+ApiKeyId = str
+### api_keys/types/api_key_permissions.py
+class ApiKeyPermissions(UncheckedBaseModel):
+    inbox_read: Optional[bool] = None
+    inbox_create: Optional[bool] = None
+    inbox_update: Optional[bool] = None
+    inbox_delete: Optional[bool] = None
+    message_read: Optional[bool] = None
+    message_send: Optional[bool] = None
+    message_update: Optional[bool] = None
+    message_delete: Optional[bool] = None
+    label_spam_read: Optional[bool] = None
+    label_blocked_read: Optional[bool] = None
+    label_unauthenticated_read: Optional[bool] = None
+    label_trash_read: Optional[bool] = None
+    draft_read: Optional[bool] = None
+    draft_create: Optional[bool] = None
+    draft_update: Optional[bool] = None
+    draft_delete: Optional[bool] = None
+    draft_send: Optional[bool] = None
+    webhook_read: Optional[bool] = None
+    webhook_create: Optional[bool] = None
+    webhook_update: Optional[bool] = None
+    webhook_delete: Optional[bool] = None
+    domain_read: Optional[bool] = None
+    domain_create: Optional[bool] = None
+    domain_update: Optional[bool] = None
+    domain_delete: Optional[bool] = None
+    list_entry_read: Optional[bool] = None
+    list_entry_create: Optional[bool] = None
+    list_entry_delete: Optional[bool] = None
+    metrics_read: Optional[bool] = None
+    api_key_read: Optional[bool] = None
+    api_key_create: Optional[bool] = None
+    api_key_update: Optional[bool] = None
+    api_key_delete: Optional[bool] = None
+    pod_read: Optional[bool] = None
+    pod_create: Optional[bool] = None
+    pod_delete: Optional[bool] = None
+### api_keys/types/create_api_key_request.py
+class CreateApiKeyRequest(UncheckedBaseModel):
+    name: Optional[Name] = None
+    permissions: Optional[ApiKeyPermissions] = None
+### api_keys/types/create_api_key_response.py
+class CreateApiKeyResponse(UncheckedBaseModel):
+    api_key_id: ApiKeyId
+    api_key: str
+    prefix: Prefix
+    name: Name
+    pod_id: Optional[str] = None
+    inbox_id: Optional[str] = None
+    permissions: Optional[ApiKeyPermissions] = None
+    created_at: CreatedAt
+### api_keys/types/create_public_key_request.py
+class CreatePublicKeyRequest(UncheckedBaseModel):
+    public_key: PublicJwk
+    name: Optional[str] = None
+    scope: Optional[PublicKeyScope] = None
+    expires_at: Optional[dt.datetime] = None
+### api_keys/types/created_at.py
+CreatedAt = dt.datetime
+### api_keys/types/inbox_public_key_scope.py
+class InboxPublicKeyScope(UncheckedBaseModel):
+    id: str
+### api_keys/types/list_api_keys_response.py
+class ListApiKeysResponse(UncheckedBaseModel):
+    count: Count
+    next_page_token: Optional[PageToken] = None
+    api_keys: List[ApiKey]
+### api_keys/types/list_public_keys_response.py
+class ListPublicKeysResponse(UncheckedBaseModel):
+    count: Count
+    next_page_token: Optional[PageToken] = None
+    public_keys: List[PublicKeyCredential]
+### api_keys/types/name.py
+Name = str
+### api_keys/types/organization_public_key_scope.py
+class OrganizationPublicKeyScope(UncheckedBaseModel):
+    (no fields)
+### api_keys/types/pod_public_key_scope.py
+class PodPublicKeyScope(UncheckedBaseModel):
+    id: uuid.UUID
+### api_keys/types/prefix.py
+Prefix = str
+### api_keys/types/public_jwk.py
+class PublicJwk(UncheckedBaseModel):
+    kty: Literal["EC"] = "EC"
+    crv: Literal["P-256"] = "P-256"
+    x: PublicJwkCoordinate
+    y: PublicJwkCoordinate
+### api_keys/types/public_jwk_coordinate.py
+PublicJwkCoordinate = str
+### api_keys/types/public_key_credential.py
+class PublicKeyCredential(UncheckedBaseModel):
+    api_key_id: uuid.UUID
+    type: Literal["public_key"] = pydantic.Field(default="public_key")
+    name: Name
+    public_key: PublicKeyMaterial
+    scope: PublicKeyScope
+    expires_at: Optional[dt.datetime] = None
+    revoked_at: Optional[dt.datetime] = None
+    created_at: dt.datetime
+    updated_at: dt.datetime
+### api_keys/types/public_key_material.py
+class PublicKeyMaterial(UncheckedBaseModel):
+    jwk: PublicJwk
+    fingerprint: str
+### api_keys/types/public_key_scope.py
+class PublicKeyScope_Organization(UncheckedBaseModel):
+    type: Literal["organization"] = "organization"
+class PublicKeyScope_Pod(UncheckedBaseModel):
+    type: Literal["pod"] = "pod"
+    id: uuid.UUID
+class PublicKeyScope_Inbox(UncheckedBaseModel):
+    type: Literal["inbox"] = "inbox"
+    id: str
+PublicKeyScope = typing_extensions.Annotated[ Union[PublicKeyScope_Organization, PublicKeyScope_Pod, PublicKeyScope_Inbox], UnionMetadata(discriminant="type"), ]
+### api_keys/types/revoke_all_agent_id_sign_in_keys_response.py
+class RevokeAllAgentIdSignInKeysResponse(UncheckedBaseModel):
+    previous_generation: int
+    current_generation: int
+    revoked_at: dt.datetime
+### api_keys/types/update_public_key_name_request.py
+class UpdatePublicKeyNameRequest(UncheckedBaseModel):
+    name: str
+### attachments/types/attachment.py
+class Attachment(UncheckedBaseModel):
+    attachment_id: AttachmentId
+    filename: Optional[AttachmentFilename] = None
+    size: AttachmentSize
+    content_type: Optional[AttachmentContentType] = None
+    content_disposition: Optional[AttachmentContentDisposition] = None
+    content_id: Optional[AttachmentContentId] = None
+### attachments/types/attachment_content_disposition.py
+AttachmentContentDisposition = Union[Literal["inline", "attachment"], Any]
+### attachments/types/attachment_content_id.py
+AttachmentContentId = str
+### attachments/types/attachment_content_type.py
+AttachmentContentType = str
+### attachments/types/attachment_filename.py
+AttachmentFilename = str
+### attachments/types/attachment_id.py
+AttachmentId = str
+### attachments/types/attachment_response.py
+class AttachmentResponse(UncheckedBaseModel):
+    attachment_id: AttachmentId
+    filename: Optional[AttachmentFilename] = None
+    size: AttachmentSize
+    content_type: Optional[AttachmentContentType] = None
+    content_disposition: Optional[AttachmentContentDisposition] = None
+    content_id: Optional[AttachmentContentId] = None
+    download_url: str
+    expires_at: dt.datetime
+### attachments/types/attachment_size.py
+AttachmentSize = int
+### attachments/types/send_attachment.py
+class SendAttachment(UncheckedBaseModel):
+    filename: Optional[AttachmentFilename] = None
+    content_type: Optional[AttachmentContentType] = None
+    content_disposition: Optional[AttachmentContentDisposition] = None
+    content_id: Optional[AttachmentContentId] = None
+    content: Optional[str] = None
+    url: Optional[str] = None
+### auth/types/identity.py
+class Identity(UncheckedBaseModel):
+    scope_type: ScopeType
+    scope_id: str
+    organization_id: OrganizationId
+    pod_id: Optional[str] = None
+    inbox_id: Optional[str] = None
+    api_key_id: Optional[str] = None
+### auth/types/scope_type.py
+ScopeType = Union[Literal["organization", "pod", "inbox"], Any]
+### domains/types/create_domain_request.py
+class CreateDomainRequest(UncheckedBaseModel):
+    domain: DomainName
+    feedback_enabled: Optional[FeedbackEnabled] = None
+    subdomains_enabled: Optional[SubdomainsEnabled] = None
+### domains/types/domain.py
+class Domain(UncheckedBaseModel):
+    pod_id: Optional[PodId] = None
+    domain_id: DomainId
+    domain: DomainName
+    status: Status
+    feedback_enabled: FeedbackEnabled
+    subdomains_enabled: SubdomainsEnabled
+    records: List[VerificationRecord]
+    client_id: Optional[ClientId] = None
+    updated_at: dt.datetime
+    created_at: dt.datetime
+### domains/types/domain_id.py
+DomainId = str
+### domains/types/domain_item.py
+class DomainItem(UncheckedBaseModel):
+    pod_id: Optional[PodId] = None
+    domain_id: DomainId
+    domain: DomainName
+    feedback_enabled: FeedbackEnabled
+    subdomains_enabled: SubdomainsEnabled
+    client_id: Optional[ClientId] = None
+    updated_at: dt.datetime
+    created_at: dt.datetime
+### domains/types/domain_name.py
+DomainName = str
+### domains/types/feedback_enabled.py
+FeedbackEnabled = bool
+### domains/types/list_domains_response.py
+class ListDomainsResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    domains: List[DomainItem]
+### domains/types/record_status.py
+RecordStatus = Union[Literal["MISSING", "INVALID", "VALID"], Any]
+### domains/types/record_type.py
+RecordType = Union[Literal["TXT", "CNAME", "MX"], Any]
+### domains/types/status.py
+Status = VerificationStatus
+### domains/types/subdomains_enabled.py
+SubdomainsEnabled = bool
+### domains/types/update_domain_request.py
+class UpdateDomainRequest(UncheckedBaseModel):
+    feedback_enabled: Optional[FeedbackEnabled] = None
+    subdomains_enabled: Optional[SubdomainsEnabled] = None
+### domains/types/verification_record.py
+class VerificationRecord(UncheckedBaseModel):
+    type: RecordType
+    name: str
+    value: str
+    status: RecordStatus
+    priority: Optional[int] = None
+### domains/types/verification_status.py
+VerificationStatus = Union[ Literal["NOT_STARTED", "PENDING", "INVALID", "FAILED", "VERIFYING", "VERIFIED"], Any ]
+### drafts/types/create_draft_request.py
+class CreateDraftRequest(UncheckedBaseModel):
+    labels: Optional[DraftLabels] = None
+    reply_to: Optional[DraftReplyTo] = None
+    to: Optional[DraftTo] = None
+    cc: Optional[DraftCc] = None
+    bcc: Optional[DraftBcc] = None
+    subject: Optional[DraftSubject] = None
+    text: Optional[DraftText] = None
+    html: Optional[DraftHtml] = None
+    attachments: Optional[List[SendAttachment]] = None
+    in_reply_to: Optional[DraftInReplyTo] = None
+    forward_of: Optional[DraftForwardOf] = None
+    reply_all: Optional[DraftReplyAll] = None
+    send_at: Optional[DraftSendAt] = None
+    client_id: Optional[DraftClientId] = None
+### drafts/types/draft.py
+class Draft(UncheckedBaseModel):
+    inbox_id: InboxId
+    draft_id: DraftId
+    client_id: Optional[DraftClientId] = None
+    labels: DraftLabels
+    reply_to: Optional[DraftReplyTo] = None
+    to: Optional[DraftTo] = None
+    cc: Optional[DraftCc] = None
+    bcc: Optional[DraftBcc] = None
+    subject: Optional[DraftSubject] = None
+    preview: Optional[DraftPreview] = None
+    text: Optional[DraftText] = None
+    html: Optional[DraftHtml] = None
+    attachments: Optional[DraftAttachments] = None
+    in_reply_to: Optional[DraftInReplyTo] = None
+    forward_of: Optional[DraftForwardOf] = None
+    references: Optional[List[str]] = None
+    send_status: Optional[DraftSendStatus] = None
+    send_at: Optional[DraftSendAt] = None
+    updated_at: DraftUpdatedAt
+    created_at: dt.datetime
+### drafts/types/draft_attachments.py
+DraftAttachments = List[Attachment]
+### drafts/types/draft_bcc.py
+DraftBcc = List[str]
+### drafts/types/draft_cc.py
+DraftCc = List[str]
+### drafts/types/draft_forward_of.py
+DraftForwardOf = str
+### drafts/types/draft_html.py
+DraftHtml = str
+### drafts/types/draft_id.py
+DraftId = str
+### drafts/types/draft_in_reply_to.py
+DraftInReplyTo = str
+### drafts/types/draft_item.py
+class DraftItem(UncheckedBaseModel):
+    inbox_id: InboxId
+    draft_id: DraftId
+    labels: DraftLabels
+    to: Optional[DraftTo] = None
+    cc: Optional[DraftCc] = None
+    bcc: Optional[DraftBcc] = None
+    subject: Optional[DraftSubject] = None
+    preview: Optional[DraftPreview] = None
+    attachments: Optional[DraftAttachments] = None
+    in_reply_to: Optional[DraftInReplyTo] = None
+    forward_of: Optional[DraftForwardOf] = None
+    send_status: Optional[DraftSendStatus] = None
+    send_at: Optional[DraftSendAt] = None
+    updated_at: DraftUpdatedAt
+### drafts/types/draft_labels.py
+DraftLabels = List[str]
+### drafts/types/draft_preview.py
+DraftPreview = str
+### drafts/types/draft_reply_all.py
+DraftReplyAll = bool
+### drafts/types/draft_reply_to.py
+DraftReplyTo = List[str]
+### drafts/types/draft_send_at.py
+DraftSendAt = dt.datetime
+### drafts/types/draft_send_status.py
+DraftSendStatus = Union[Literal["scheduled", "sending", "failed"], Any]
+### drafts/types/draft_subject.py
+DraftSubject = str
+### drafts/types/draft_text.py
+DraftText = str
+### drafts/types/draft_to.py
+DraftTo = List[str]
+### drafts/types/draft_updated_at.py
+DraftUpdatedAt = dt.datetime
+### drafts/types/list_drafts_response.py
+class ListDraftsResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    drafts: List[DraftItem]
+### drafts/types/update_draft_request.py
+class UpdateDraftRequest(UncheckedBaseModel):
+    reply_to: Optional[DraftReplyTo] = None
+    to: Optional[DraftTo] = None
+    cc: Optional[DraftCc] = None
+    bcc: Optional[DraftBcc] = None
+    subject: Optional[DraftSubject] = None
+    text: Optional[DraftText] = None
+    html: Optional[DraftHtml] = None
+    add_attachments: Optional[List[SendAttachment]] = None
+    remove_attachments: Optional[List[AttachmentId]] = None
+    add_labels: Optional[DraftLabels] = None
+    remove_labels: Optional[DraftLabels] = None
+    send_at: Optional[DraftSendAt] = None
+### environment.py
+class AgentMailEnvironment():
+    PROD: AgentMailEnvironment
+    PROD_X_402: AgentMailEnvironment
+    PROD_MPP: AgentMailEnvironment
+    EU_PROD: AgentMailEnvironment
+### errors/conflict_error.py
+class ConflictError(ApiError):
+    (no fields)
+### errors/is_taken_error.py
+class IsTakenError(ApiError):
+    (no fields)
+### errors/not_found_error.py
+class NotFoundError(ApiError):
+    (no fields)
+### errors/unprocessable_error.py
+class UnprocessableError(ApiError):
+    (no fields)
+### errors/validation_error.py
+class ValidationError(ApiError):
+    (no fields)
+### events/types/bounce.py
+class Bounce(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    message_id: MessageId
+    timestamp: Timestamp
+    type: str
+    sub_type: str
+    recipients: List[Recipient]
+### events/types/complaint.py
+class Complaint(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    message_id: MessageId
+    timestamp: Timestamp
+    type: str
+    sub_type: str
+    recipients: List[str]
+### events/types/delivery.py
+class Delivery(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    message_id: MessageId
+    timestamp: Timestamp
+    recipients: List[str]
+### events/types/domain_verified_event.py
+class DomainVerifiedEvent(UncheckedBaseModel):
+    type: Literal["event"] = "event"
+    event_type: Literal["domain.verified"] = "domain.verified"
+    event_id: EventId
+    domain: Domain
+### events/types/event_id.py
+EventId = str
+### events/types/event_type.py
+EventType = Union[ Literal[ "message.received", "message.received.spam", "message.received.blocked", "message.received.unauthenticated", "message.sent", "message.delivered", "message.bounced", "message.complained", "message.rejected", "domain.verified", ], Any, ]
+### events/types/event_types.py
+EventTypes = List[EventType]
+### events/types/inbox_ids.py
+InboxIds = List[str]
+### events/types/message_bounced_event.py
+class MessageBouncedEvent(UncheckedBaseModel):
+    type: Literal["event"] = "event"
+    event_type: Literal["message.bounced"] = "message.bounced"
+    event_id: EventId
+    bounce: Bounce
+### events/types/message_complained_event.py
+class MessageComplainedEvent(UncheckedBaseModel):
+    type: Literal["event"] = "event"
+    event_type: Literal["message.complained"] = "message.complained"
+    event_id: EventId
+    complaint: Complaint
+### events/types/message_delivered_event.py
+class MessageDeliveredEvent(UncheckedBaseModel):
+    type: Literal["event"] = "event"
+    event_type: Literal["message.delivered"] = "message.delivered"
+    event_id: EventId
+    delivery: Delivery
+### events/types/message_received_event.py
+class MessageReceivedEvent(UncheckedBaseModel):
+    type: Literal["event"] = "event"
+    event_type: MessageReceivedEventType
+    event_id: EventId
+    message: Message
+    thread: ThreadItem
+### events/types/message_received_event_type.py
+MessageReceivedEventType = Union[ Literal[ "message.received", "message.received.spam", "message.received.blocked", "message.received.unauthenticated" ], Any, ]
+### events/types/message_rejected_event.py
+class MessageRejectedEvent(UncheckedBaseModel):
+    type: Literal["event"] = "event"
+    event_type: Literal["message.rejected"] = "message.rejected"
+    event_id: EventId
+    reject: Reject
+### events/types/message_sent_event.py
+class MessageSentEvent(UncheckedBaseModel):
+    type: Literal["event"] = "event"
+    event_type: Literal["message.sent"] = "message.sent"
+    event_id: EventId
+    send: Send
+### events/types/pod_ids.py
+PodIds = List[str]
+### events/types/recipient.py
+class Recipient(UncheckedBaseModel):
+    address: str
+    status: str
+### events/types/reject.py
+class Reject(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    message_id: MessageId
+    timestamp: Timestamp
+    reason: str
+### events/types/send.py
+class Send(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    message_id: MessageId
+    timestamp: Timestamp
+    recipients: List[str]
+### events/types/timestamp.py
+Timestamp = dt.datetime
+### inbox_events/types/inbox_event.py
+class InboxEvent(UncheckedBaseModel):
+    organization_id: OrganizationId
+    pod_id: str
+    inbox_id: InboxId
+    event_id: InboxEventId
+    event_type: InboxEventType
+    message_id: str
+    label: str
+    event_at: dt.datetime
+    created_at: dt.datetime
+### inbox_events/types/inbox_event_id.py
+InboxEventId = str
+### inbox_events/types/inbox_event_type.py
+InboxEventType = Union[Literal["label.added", "label.removed"], Any]
+### inbox_events/types/list_inbox_events_response.py
+class ListInboxEventsResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    events: List[InboxEvent]
+### inboxes/types/create_inbox_request.py
+class CreateInboxRequest(UncheckedBaseModel):
+    username: Optional[str] = None
+    domain: Optional[str] = None
+    display_name: Optional[DisplayName] = None
+    client_id: Optional[ClientId] = None
+    metadata: Optional[Metadata] = None
+### inboxes/types/display_name.py
+DisplayName = str
+### inboxes/types/email.py
+Email = str
+### inboxes/types/inbox.py
+class Inbox(UncheckedBaseModel):
+    pod_id: PodId
+    inbox_id: InboxId
+    email: Email
+    display_name: Optional[DisplayName] = None
+    client_id: Optional[ClientId] = None
+    metadata: Optional[Metadata] = None
+    updated_at: dt.datetime
+    created_at: dt.datetime
+### inboxes/types/inbox_id.py
+InboxId = str
+### inboxes/types/list_inboxes_response.py
+class ListInboxesResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    inboxes: List[Inbox]
+### inboxes/types/metadata.py
+Metadata = Dict[str, MetadataValue]
+### inboxes/types/metadata_value.py
+MetadataValue = Union[str, float, bool]
+### inboxes/types/update_inbox_request.py
+class UpdateInboxRequest(UncheckedBaseModel):
+    display_name: Optional[DisplayName] = None
+    metadata: Optional[UpdateMetadata] = None
+### inboxes/types/update_metadata.py
+UpdateMetadata = Dict[str, Optional[MetadataValue]]
+### lists/types/create_list_entry_request.py
+class CreateListEntryRequest(UncheckedBaseModel):
+    entry: str
+    reason: Optional[str] = None
+### lists/types/direction.py
+Direction = Union[Literal["send", "receive", "reply"], Any]
+### lists/types/entry_type.py
+EntryType = Union[Literal["email", "domain"], Any]
+### lists/types/list_entry.py
+class ListEntry(ListEntryBase):
+    (no fields)
+### lists/types/list_entry_base.py
+class ListEntryBase(UncheckedBaseModel):
+    entry: str
+    organization_id: OrganizationId
+    reason: Optional[str] = None
+    direction: Direction
+    list_type: ListType
+    entry_type: EntryType
+    created_at: dt.datetime
+    read_only: Optional[bool] = None
+### lists/types/list_list_entries_response.py
+class ListListEntriesResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    entries: List[ListEntry]
+### lists/types/list_type.py
+ListType = Union[Literal["allow", "block"], Any]
+### lists/types/pod_list_entry.py
+class PodListEntry(ListEntryBase):
+    pod_id: str
+    inbox_id: Optional[str] = None
+### lists/types/pod_list_list_entries_response.py
+class PodListListEntriesResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    entries: List[PodListEntry]
+### messages/errors/message_rejected_error.py
+class MessageRejectedError(ApiError):
+    (no fields)
+### messages/types/addresses.py
+Addresses = Union[str, List[str]]
+### messages/types/batch_get_messages_message_ids.py
+BatchGetMessagesMessageIds = List[MessageId]
+### messages/types/batch_get_messages_request.py
+class BatchGetMessagesRequest(UncheckedBaseModel):
+    message_ids: BatchGetMessagesMessageIds
+### messages/types/batch_get_messages_response.py
+class BatchGetMessagesResponse(UncheckedBaseModel):
+    limit: Limit
+    count: Count
+    messages: List[Message]
+### messages/types/batch_update_messages_message_ids.py
+BatchUpdateMessagesMessageIds = List[MessageId]
+### messages/types/batch_update_messages_request.py
+class BatchUpdateMessagesRequest(UncheckedBaseModel):
+    message_ids: BatchUpdateMessagesMessageIds
+    add_labels: Optional[UpdateMessageLabels] = None
+    remove_labels: Optional[UpdateMessageLabels] = None
+### messages/types/batch_update_messages_response.py
+class BatchUpdateMessagesResponse(UncheckedBaseModel):
+    limit: Limit
+    count: Count
+    updates: List[UpdateMessageResponse]
+### messages/types/list_messages_response.py
+class ListMessagesResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    messages: List[MessageItem]
+### messages/types/message.py
+class Message(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    message_id: MessageId
+    labels: MessageLabels
+    timestamp: MessageTimestamp
+    from_: typing_extensions.Annotated[MessageFrom, FieldMetadata(alias="from"), pydantic.Field(alias="from")]
+    reply_to: Optional[List[str]] = None
+    to: MessageTo
+    cc: Optional[MessageCc] = None
+    bcc: Optional[MessageBcc] = None
+    subject: Optional[MessageSubject] = None
+    preview: Optional[MessagePreview] = None
+    text: Optional[MessageText] = None
+    html: Optional[MessageHtml] = None
+    extracted_text: Optional[str] = None
+    extracted_html: Optional[str] = None
+    attachments: Optional[MessageAttachments] = None
+    in_reply_to: Optional[MessageInReplyTo] = None
+    references: Optional[MessageReferences] = None
+    headers: Optional[MessageHeaders] = None
+    size: MessageSize
+    updated_at: MessageUpdatedAt
+    created_at: MessageCreatedAt
+### messages/types/message_attachments.py
+MessageAttachments = List[Attachment]
+### messages/types/message_bcc.py
+MessageBcc = List[str]
+### messages/types/message_cc.py
+MessageCc = List[str]
+### messages/types/message_created_at.py
+MessageCreatedAt = dt.datetime
+### messages/types/message_from.py
+MessageFrom = str
+### messages/types/message_headers.py
+MessageHeaders = Dict[str, str]
+### messages/types/message_html.py
+MessageHtml = str
+### messages/types/message_id.py
+MessageId = str
+### messages/types/message_in_reply_to.py
+MessageInReplyTo = str
+### messages/types/message_item.py
+class MessageItem(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    message_id: MessageId
+    labels: MessageLabels
+    timestamp: MessageTimestamp
+    from_: typing_extensions.Annotated[MessageFrom, FieldMetadata(alias="from"), pydantic.Field(alias="from")]
+    to: MessageTo
+    cc: Optional[MessageCc] = None
+    bcc: Optional[MessageBcc] = None
+    subject: Optional[MessageSubject] = None
+    preview: Optional[MessagePreview] = None
+    attachments: Optional[MessageAttachments] = None
+    in_reply_to: Optional[MessageInReplyTo] = None
+    references: Optional[MessageReferences] = None
+    headers: Optional[MessageHeaders] = None
+    size: MessageSize
+    updated_at: MessageUpdatedAt
+    created_at: MessageCreatedAt
+### messages/types/message_labels.py
+MessageLabels = List[str]
+### messages/types/message_preview.py
+MessagePreview = str
+### messages/types/message_references.py
+MessageReferences = List[str]
+### messages/types/message_reply_to.py
+MessageReplyTo = List[str]
+### messages/types/message_size.py
+MessageSize = int
+### messages/types/message_subject.py
+MessageSubject = str
+### messages/types/message_text.py
+MessageText = str
+### messages/types/message_timestamp.py
+MessageTimestamp = dt.datetime
+### messages/types/message_to.py
+MessageTo = List[str]
+### messages/types/message_updated_at.py
+MessageUpdatedAt = dt.datetime
+### messages/types/raw_message_response.py
+class RawMessageResponse(UncheckedBaseModel):
+    message_id: MessageId
+    size: MessageSize
+    download_url: str
+    expires_at: dt.datetime
+### messages/types/reply_all.py
+ReplyAll = bool
+### messages/types/reply_all_message_request.py
+class ReplyAllMessageRequest(UncheckedBaseModel):
+    labels: Optional[MessageLabels] = None
+    reply_to: Optional[SendMessageReplyTo] = None
+    text: Optional[MessageText] = None
+    html: Optional[MessageHtml] = None
+    attachments: Optional[SendMessageAttachments] = None
+    headers: Optional[SendMessageHeaders] = None
+### messages/types/reply_to_message_request.py
+class ReplyToMessageRequest(UncheckedBaseModel):
+    labels: Optional[MessageLabels] = None
+    reply_to: Optional[SendMessageReplyTo] = None
+    to: Optional[SendMessageTo] = None
+    cc: Optional[SendMessageCc] = None
+    bcc: Optional[SendMessageBcc] = None
+    reply_all: Optional[ReplyAll] = None
+    text: Optional[MessageText] = None
+    html: Optional[MessageHtml] = None
+    attachments: Optional[SendMessageAttachments] = None
+    headers: Optional[SendMessageHeaders] = None
+### messages/types/search_message_highlights.py
+class SearchMessageHighlights(UncheckedBaseModel):
+    from_: typing_extensions.Annotated[ Optional[List[str]], FieldMetadata(alias="from"), pydantic.Field(alias="from", description="Matched fragments from the sender address."), ] = None
+    recipients: Optional[List[str]] = None
+    subject: Optional[List[str]] = None
+    text: Optional[List[str]] = None
+### messages/types/search_message_item.py
+class SearchMessageItem(MessageItem):
+    highlights: Optional[SearchMessageHighlights] = None
+### messages/types/search_messages_response.py
+class SearchMessagesResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    messages: List[SearchMessageItem]
+### messages/types/send_message_attachments.py
+SendMessageAttachments = List[SendAttachment]
+### messages/types/send_message_bcc.py
+SendMessageBcc = Addresses
+### messages/types/send_message_cc.py
+SendMessageCc = Addresses
+### messages/types/send_message_headers.py
+SendMessageHeaders = Dict[str, str]
+### messages/types/send_message_reply_to.py
+SendMessageReplyTo = Addresses
+### messages/types/send_message_request.py
+class SendMessageRequest(UncheckedBaseModel):
+    labels: Optional[MessageLabels] = None
+    reply_to: Optional[SendMessageReplyTo] = None
+    to: Optional[SendMessageTo] = None
+    cc: Optional[SendMessageCc] = None
+    bcc: Optional[SendMessageBcc] = None
+    subject: Optional[MessageSubject] = None
+    text: Optional[MessageText] = None
+    html: Optional[MessageHtml] = None
+    attachments: Optional[SendMessageAttachments] = None
+    headers: Optional[SendMessageHeaders] = None
+### messages/types/send_message_response.py
+class SendMessageResponse(UncheckedBaseModel):
+    message_id: MessageId
+    thread_id: ThreadId
+### messages/types/send_message_to.py
+SendMessageTo = Addresses
+### messages/types/update_message_labels.py
+UpdateMessageLabels = Union[str, List[str]]
+### messages/types/update_message_request.py
+class UpdateMessageRequest(UncheckedBaseModel):
+    add_labels: Optional[UpdateMessageLabels] = None
+    remove_labels: Optional[UpdateMessageLabels] = None
+### messages/types/update_message_response.py
+class UpdateMessageResponse(UncheckedBaseModel):
+    message_id: MessageId
+    labels: MessageLabels
+### metrics/types/descending.py
+Descending = bool
+### metrics/types/end.py
+End = dt.datetime
+### metrics/types/metric_bucket.py
+class MetricBucket(UncheckedBaseModel):
+    timestamp: dt.datetime
+    count: int
+### metrics/types/metric_event_type.py
+MetricEventType = Union[ Literal[ "message.received", "message.received.spam", "message.received.blocked", "message.received.unauthenticated", "message.sent", "message.delivered", "message.bounced", "message.complained", "message.rejected", "domain.verified", ], Any, ]
+### metrics/types/metric_event_types.py
+MetricEventTypes = List[MetricEventType]
+### metrics/types/metric_limit.py
+MetricLimit = int
+### metrics/types/period.py
+Period = int
+### metrics/types/query_metrics_response.py
+QueryMetricsResponse = Dict[MetricEventType, List[MetricBucket]]
+### metrics/types/query_usage_response.py
+QueryUsageResponse = Dict[UsageType, List[UsagePoint]]
+### metrics/types/start.py
+Start = dt.datetime
+### metrics/types/usage_point.py
+class UsagePoint(UncheckedBaseModel):
+    timestamp: dt.datetime
+    value: int
+### metrics/types/usage_type.py
+UsageType = Union[ Literal["storage_bytes", "message_count", "thread_count", "inbox_count", "pod_count", "domain_count"], Any, ]
+### metrics/types/usage_types.py
+UsageTypes = List[UsageType]
+### organizations/types/organization.py
+class Organization(UncheckedBaseModel):
+    organization_id: OrganizationId
+    inbox_count: int
+    domain_count: int
+    inbox_limit: Optional[int] = None
+    domain_limit: Optional[int] = None
+    billing_id: Optional[str] = None
+    billing_type: Optional[str] = None
+    billing_subscription_id: Optional[str] = None
+    authentication_id: Optional[str] = None
+    authentication_type: Optional[str] = None
+    updated_at: dt.datetime
+    created_at: dt.datetime
+### pods/types/create_pod_request.py
+class CreatePodRequest(UncheckedBaseModel):
+    name: Optional[Name] = None
+    client_id: Optional[ClientId] = None
+### pods/types/list_pods_response.py
+class ListPodsResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    pods: List[Pod]
+### pods/types/name.py
+Name = str
+### pods/types/pod.py
+class Pod(UncheckedBaseModel):
+    pod_id: PodId
+    name: Name
+    updated_at: dt.datetime
+    created_at: dt.datetime
+    client_id: Optional[ClientId] = None
+### pods/types/pod_id.py
+PodId = str
+### threads/types/list_threads_response.py
+class ListThreadsResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    threads: List[ThreadItem]
+### threads/types/search_thread_highlights.py
+class SearchThreadHighlights(UncheckedBaseModel):
+    from_: typing_extensions.Annotated[ Optional[List[str]], FieldMetadata(alias="from"), pydantic.Field(alias="from", description="Matched fragments from a sender address in the thread."), ] = None
+    recipients: Optional[List[str]] = None
+    subject: Optional[List[str]] = None
+    text: Optional[List[str]] = None
+### threads/types/search_thread_item.py
+class SearchThreadItem(ThreadItem):
+    highlights: Optional[SearchThreadHighlights] = None
+### threads/types/search_threads_response.py
+class SearchThreadsResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    threads: List[SearchThreadItem]
+### threads/types/thread.py
+class Thread(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    labels: ThreadLabels
+    timestamp: ThreadTimestamp
+    received_timestamp: Optional[ThreadReceivedTimestamp] = None
+    sent_timestamp: Optional[ThreadSentTimestamp] = None
+    senders: ThreadSenders
+    recipients: ThreadRecipients
+    subject: Optional[ThreadSubject] = None
+    preview: Optional[ThreadPreview] = None
+    attachments: Optional[ThreadAttachments] = None
+    last_message_id: ThreadLastMessageId
+    message_count: ThreadMessageCount
+    size: ThreadSize
+    updated_at: ThreadUpdatedAt
+    created_at: ThreadCreatedAt
+    messages: List[Message]
+### threads/types/thread_attachments.py
+ThreadAttachments = List[Attachment]
+### threads/types/thread_created_at.py
+ThreadCreatedAt = dt.datetime
+### threads/types/thread_id.py
+ThreadId = str
+### threads/types/thread_item.py
+class ThreadItem(UncheckedBaseModel):
+    inbox_id: InboxId
+    thread_id: ThreadId
+    labels: ThreadLabels
+    timestamp: ThreadTimestamp
+    received_timestamp: Optional[ThreadReceivedTimestamp] = None
+    sent_timestamp: Optional[ThreadSentTimestamp] = None
+    senders: ThreadSenders
+    recipients: ThreadRecipients
+    subject: Optional[ThreadSubject] = None
+    preview: Optional[ThreadPreview] = None
+    attachments: Optional[ThreadAttachments] = None
+    last_message_id: ThreadLastMessageId
+    message_count: ThreadMessageCount
+    size: ThreadSize
+    updated_at: ThreadUpdatedAt
+    created_at: ThreadCreatedAt
+### threads/types/thread_labels.py
+ThreadLabels = List[str]
+### threads/types/thread_last_message_id.py
+ThreadLastMessageId = str
+### threads/types/thread_message_count.py
+ThreadMessageCount = int
+### threads/types/thread_preview.py
+ThreadPreview = str
+### threads/types/thread_received_timestamp.py
+ThreadReceivedTimestamp = dt.datetime
+### threads/types/thread_recipients.py
+ThreadRecipients = List[str]
+### threads/types/thread_senders.py
+ThreadSenders = List[str]
+### threads/types/thread_sent_timestamp.py
+ThreadSentTimestamp = dt.datetime
+### threads/types/thread_size.py
+ThreadSize = int
+### threads/types/thread_subject.py
+ThreadSubject = str
+### threads/types/thread_timestamp.py
+ThreadTimestamp = dt.datetime
+### threads/types/thread_updated_at.py
+ThreadUpdatedAt = dt.datetime
+### threads/types/update_thread_request.py
+class UpdateThreadRequest(UncheckedBaseModel):
+    add_labels: Optional[List[str]] = None
+    remove_labels: Optional[List[str]] = None
+### threads/types/update_thread_response.py
+class UpdateThreadResponse(UncheckedBaseModel):
+    thread_id: ThreadId
+    labels: ThreadLabels
+### types/after.py
+After = dt.datetime
+### types/ascending.py
+Ascending = bool
+### types/before.py
+Before = dt.datetime
+### types/count.py
+Count = int
+### types/error_code.py
+ErrorCode = str
+### types/error_docs.py
+ErrorDocs = str
+### types/error_fix.py
+ErrorFix = str
+### types/error_message.py
+ErrorMessage = str
+### types/error_name.py
+ErrorName = str
+### types/error_response.py
+class ErrorResponse(UncheckedBaseModel):
+    name: ErrorName
+    code: Optional[ErrorCode] = None
+    message: ErrorMessage
+    fix: Optional[ErrorFix] = None
+    docs: Optional[ErrorDocs] = None
+### types/include_blocked.py
+IncludeBlocked = bool
+### types/include_spam.py
+IncludeSpam = bool
+### types/include_trash.py
+IncludeTrash = bool
+### types/include_unauthenticated.py
+IncludeUnauthenticated = bool
+### types/labels.py
+Labels = List[str]
+### types/limit.py
+Limit = int
+### types/organization_id.py
+OrganizationId = str
+### types/page_token.py
+PageToken = str
+### types/query.py
+Query = str
+### types/validation_error_response.py
+class ValidationErrorResponse(UncheckedBaseModel):
+    name: ErrorName
+    code: Optional[ErrorCode] = None
+    message: Optional[ErrorMessage] = None
+    errors: Any
+    fix: Optional[ErrorFix] = None
+    docs: Optional[ErrorDocs] = None
+### webhooks/events/types/svix_id.py
+SvixId = str
+### webhooks/events/types/svix_signature.py
+SvixSignature = str
+### webhooks/events/types/svix_timestamp.py
+SvixTimestamp = dt.datetime
+### webhooks/types/create_inbox_webhook_request.py
+class CreateInboxWebhookRequest(UncheckedBaseModel):
+    url: Url
+    event_types: CreateWebhookEventTypes
+    client_id: Optional[ClientId] = None
+    headers: Optional[WebhookHeaders] = None
+### webhooks/types/create_pod_webhook_request.py
+class CreatePodWebhookRequest(CreateInboxWebhookRequest):
+    inbox_ids: Optional[InboxIds] = None
+### webhooks/types/create_webhook_event_types.py
+CreateWebhookEventTypes = EventTypes
+### webhooks/types/create_webhook_request.py
+class CreateWebhookRequest(CreatePodWebhookRequest):
+    pod_ids: Optional[PodIds] = None
+### webhooks/types/list_webhooks_response.py
+class ListWebhooksResponse(UncheckedBaseModel):
+    count: Count
+    limit: Optional[Limit] = None
+    next_page_token: Optional[PageToken] = None
+    webhooks: List[Webhook]
+### webhooks/types/update_inbox_webhook_request.py
+class UpdateInboxWebhookRequest(UncheckedBaseModel):
+    event_types: Optional[UpdateWebhookEventTypes] = None
+### webhooks/types/update_pod_webhook_request.py
+class UpdatePodWebhookRequest(UpdateInboxWebhookRequest):
+    add_inbox_ids: Optional[InboxIds] = None
+    remove_inbox_ids: Optional[InboxIds] = None
+### webhooks/types/update_webhook_event_types.py
+UpdateWebhookEventTypes = EventTypes
+### webhooks/types/update_webhook_headers_request.py
+class UpdateWebhookHeadersRequest(UncheckedBaseModel):
+    headers: Optional[WebhookHeaders] = None
+    remove_headers: Optional[List[str]] = None
+### webhooks/types/update_webhook_request.py
+class UpdateWebhookRequest(UpdatePodWebhookRequest):
+    add_pod_ids: Optional[PodIds] = None
+    remove_pod_ids: Optional[PodIds] = None
+### webhooks/types/url.py
+Url = str
+### webhooks/types/webhook.py
+class Webhook(UncheckedBaseModel):
+    webhook_id: WebhookId
+    url: Url
+    event_types: Optional[EventTypes] = None
+    pod_ids: Optional[PodIds] = None
+    inbox_ids: Optional[InboxIds] = None
+    secret: str
+    enabled: bool
+    updated_at: dt.datetime
+    created_at: dt.datetime
+    client_id: Optional[ClientId] = None
+### webhooks/types/webhook_header_names_response.py
+class WebhookHeaderNamesResponse(UncheckedBaseModel):
+    header_names: List[str]
+### webhooks/types/webhook_headers.py
+WebhookHeaders = Dict[str, str]
+### webhooks/types/webhook_id.py
+WebhookId = str
+### websockets/types/error.py
+class Error(UncheckedBaseModel):
+    type: Literal["error"] = "error"
+    name: ErrorName
+    message: ErrorMessage
+### websockets/types/subscribe.py
+class Subscribe(UncheckedBaseModel):
+    type: Literal["subscribe"] = "subscribe"
+    event_types: Optional[EventTypes] = None
+    inbox_ids: Optional[InboxIds] = None
+    pod_ids: Optional[PodIds] = None
+### websockets/types/subscribed.py
+class Subscribed(UncheckedBaseModel):
+    type: Literal["subscribed"] = "subscribed"
+    event_types: Optional[EventTypes] = None
+    inbox_ids: Optional[InboxIds] = None
+    pod_ids: Optional[PodIds] = None

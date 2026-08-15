@@ -1,0 +1,19 @@
+ITEM A10 case (d) — near-identical subject (one word changed) vs EXACT-duplicate subject
+Same sender dave@probe.test, NO In-Reply-To/References.
+Question: does an exact-duplicate subject group? does a one-word-different subject?
+Captured 2026-08-15. RUN = d64ee47e. Inbox amk-probe@agentmail.to.
+
+--- SENDS ---
+ d0 subject "AMKthreadD d64ee47e alpha"  mid <d0-...>  SMTP 250 v5o8rm90piafc14ap9ho1nua6784pg7moadgido1
+ d1 subject "AMKthreadD d64ee47e alpha"  mid <d1-...>  (EXACT duplicate of d0)  SMTP 250 jl4juntrma07nv1oko5h5apt9mm31f4anh7troo1
+ d2 subject "AMKthreadD d64ee47e beta"   mid <d2-...>  (one word changed)       SMTP 250 k47eh1lq8o82to3drcjuhp4lbqvi7bspk261s801
+
+--- OBSERVED thread_id ---
+ d0 "AMKthreadD d64ee47e alpha" -> 16562ebc-fb18-419c-9f42-e666e07db9ca
+ d1 "AMKthreadD d64ee47e alpha" -> ae4e1dc2-5b08-4a8f-a3c4-157758efc1af   (DIFFERENT from d0, though subject IDENTICAL)
+ d2 "AMKthreadD d64ee47e beta"  -> 23171cc2-36be-4143-b7b8-6742c59078ba   (DIFFERENT)
+
+OBSERVED: d0 and d1 have byte-identical subject AND identical sender AND no References ->
+still SEPARATE threads. One-word-different d2 is also separate (as expected).
+=> Neither exact-duplicate subject nor near-identical subject groups. Consistent with (b)/(c):
+   grouping requires an In-Reply-To/References Message-ID chain, not subject equality.

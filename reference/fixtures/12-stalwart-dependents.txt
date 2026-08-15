@@ -1,0 +1,38 @@
+Item 12 — every current Stalwart dependent, from config (not memory)
+Captured 2026-08-15: live k8s objects on root@144.217.66.212 (read-only
+kubectl) + local repo greps. Secret VALUES never read; names only.
+
+DEPENDENTS TABLE
+dependent                             | protocol                                            | config source                                                                            | target host
+--------------------------------------+-----------------------------------------------------+------------------------------------------------------------------------------------------+---------------------------
+bulwark webmail (Deploy mail/bulwark) | JMAP (HTTPS)                                        | k8s Deploy mail/bulwark: envFrom secret bulwark-env; hostAliases m.appsynergy.io->64.112.14.64; mail-deploy-20260724/docs/webmail.env.example: JMAP_SERVER_URL, NEXT_PUBLIC_JMAP_SERVER_URL | https://m.appsynergy.io
+control-plane app (ns control-plane)  | SMTP submission                                     | email_settings id=1 in prod.db (fixture 11); appsynergy-rs app/src/platform/notifications/transport.rs:152-208 | m.appsynergy.io:587 (currently inert: no stored password)
+external MUAs / mobile clients        | IMAP(143/993), submission(587/465), ManageSieve(4190), SMTP MX(25) | k8s Deploy mail/mail stalwart container ports; appsynergy-rs ops/k3s/36-mail.yaml:69-72 | m.appsynergy.io (64.112.14.64 via pub-mail Multus net)
+keel (template, NOT deployed)         | SMTP submission or JMAP (selectable)                | keel/src/config.rs:205-217 (KEEL_SMTP_*/KEEL_STALWART_*); default provider Log           | none configured (env defaults empty)
+combly (template, NOT deployed)       | SMTP submission or JMAP (selectable)                | combly/src/config.rs (same shape, COMBLY_*)                                              | none configured
+mellify (template, NOT deployed)      | SMTP submission or JMAP (selectable)                | mellify/server/src/config.rs:224-233 (MELLIFY_*)                                          | none configured
+
+NON-DEPENDENTS verified from config (negatives):
+- gitea: /var/lib/docker/volumes/gitea-config/_data/app.ini — 0 lines matching
+  mailer|smtp; no mail sending configured.
+- alertmanager: am-config volume = configMap prom-config; all-namespace configmap
+  scan for smtp|m.appsynergy.io|jmap|:587|:465 matched ONLY mail/caddy-config.
+- ci (act-runner...), router, wg, dns, kube-*: env-name scan over all
+  deploy/sts/cronjob containers found no SMTP/JMAP/MAIL/STALWART/IMAP env names
+  anywhere except mail/bulwark (envFrom bulwark-env).
+
+EVIDENCE (commands + trimmed output)
+$ kubectl get deploy,sts,cronjob -A -o json | <python: env names + envFrom filter>
+Deployment mail/bulwark container=bulwark env-names=[] envFrom=['bulwark-env']  (only hit cluster-wide)
+$ kubectl get secrets -A | grep -iE "mail|smtp|bulwark"
+mail   bulwark-env   Opaque   8   15d   (names only; values never read)
+$ kubectl get svc,endpoints -n mail
+service/bulwark ClusterIP None <none> 3000/TCP; endpoints/bulwark 10.42.0.59:3000
+
+CONCLUSION
+- Live dependents: Bulwark webmail (JMAP) + the inert control-plane SMTP path.
+  External MUAs use IMAP/submission/sieve on the mail pod's ports.
+- keel/combly/mellify are undeployed templates (default provider Log).
+- Repoint burden at cutover is minimal: CP email_settings only (and only once a
+  credential is added). Bulwark/JMAP/ManageSieve/admin-SPA/WebAuthn retire with
+  Stalwart (no AgentMail-model equivalent; IMAP gap user-accepted).

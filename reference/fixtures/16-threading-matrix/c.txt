@@ -1,0 +1,32 @@
+ITEM A10 case (c) — subject-PREFIX normalization (Re/RE/Fwd/FW/AW/[list]/trailing-ws)
+All from the SAME sender carol@probe.test, NO In-Reply-To/References. Base subject "AMKthreadC d64ee47e".
+Question: which prefix variants land in the same thread as the base?
+Captured 2026-08-15. RUN = d64ee47e. Inbox amk-probe@agentmail.to.
+
+--- SENDS (all: python3 /root/amksend.py --mailfrom carol@probe.test --headerfrom "Carol Probe <carol@probe.test>" --subject <S> --messageid <MID>) ---
+ c0 base      subject "AMKthreadC d64ee47e"        mid <c0-...>  SMTP 250 es1op4ldfnq17icbh54mcrfcsg2pi5937nfkqso1
+ c1 Re:       subject "Re: AMKthreadC d64ee47e"    mid <c1-...>  SMTP 250 gm7pp15gr0jo74ggqofim49qn1csaibvfp7dpog1
+ c2 RE:       subject "RE: AMKthreadC d64ee47e"    mid <c2-...>  SMTP 250 hf4o9qtp025qa0bspql412tjm99sugrle4885f01
+ c3 Fwd:      subject "Fwd: AMKthreadC d64ee47e"   mid <c3-...>  SMTP 250 rsd1va97jr0p3g5btdpavgaj6f94tgnku9rubmo1
+ c4 FW:       subject "FW: AMKthreadC d64ee47e"    mid <c4-...>  SMTP 250 kppgok18chas6r1vk8s3ccqm9aljfesdgie0sc01
+ c5 AW:       subject "AW: AMKthreadC d64ee47e"    mid <c5-...>  SMTP 250 msu0uj2u9smg8jk5qvmglgbiuka8g11i7pkvnh81
+ c6 [list]    subject "[list] AMKthreadC d64ee47e" mid <c6-...>  SMTP 250 444h22n6rrhglbsdabs9b809ghivita39n054r01
+ c7 trail-ws  subject "AMKthreadC d64ee47e   "     mid <c7-...>  SMTP 250 rhe0hfgivrrun5o3jhpe1gusp4kb8e0e7vvmqko1
+
+--- OBSERVED thread_id per variant (from webhook message.received.unauthenticated payloads) ---
+ c0 base       "AMKthreadC d64ee47e"          -> 622b462e-8a6d-4dfd-adc7-11eb8346044a
+ c1 "Re:"      "Re: AMKthreadC d64ee47e"      -> f40fb118-78be-4f71-b64c-e03af3ca065c
+ c2 "RE:"      "RE: AMKthreadC d64ee47e"      -> 85c203ad-a7cb-4e23-86f1-9b53a5709e63
+ c3 "Fwd:"     "Fwd: AMKthreadC d64ee47e"     -> 9fbfedc9-f863-46a9-9ed1-dd8cd24ef7ae
+ c4 "FW:"      "FW: AMKthreadC d64ee47e"      -> 75de1ba4-a15e-4907-b015-d7e47f07d0f6
+ c5 "AW:"      "AW: AMKthreadC d64ee47e"      -> c693a38d-4d10-4ac2-ac2a-71817009c593
+ c6 "[list]"   "[list] AMKthreadC d64ee47e"   -> fead0d05-6141-401f-a849-8e934abaf0ea
+ c7 trail-ws   stored subject "AMKthreadC d64ee47e" (trailing whitespace STRIPPED on ingest)
+                                              -> 76080e4e-c422-47ed-837d-5c1a65c074e1
+
+OBSERVED: ALL 8 variants received DISTINCT thread_ids — NONE grouped, including:
+  - c7 (base + trailing whitespace, which normalized to the same visible subject as c0) vs c0 -> still different threads.
+  - c1 "Re:" vs c0 base -> different threads.
+=> Subject-prefix normalization is IRRELEVANT to grouping. Without an In-Reply-To/References
+   chain, every message (even identical/near-identical subject, same sender) opens its own thread.
+   NOTE: trailing whitespace was normalized away in the stored subject, but that did not cause grouping.

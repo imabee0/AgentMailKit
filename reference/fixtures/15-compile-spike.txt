@@ -1,0 +1,157 @@
+A12 COMPILE SPIKE — pinned crate versions vs assumed APIs
+Date: 2026-08-15  Toolchain: rustc/cargo 1.97.1
+Spike source: scratchpad amk-spike/ (single-crate workspace, compile-only probe; async fns defined, never run)
+Verdict: TESTED — `cargo build` exits 0 with the findings below applied.
+
+================================================================
+FINAL Cargo.toml
+================================================================
+[package]
+name = "amk-spike"
+version = "0.1.0"
+edition = "2021"
+
+# single-crate workspace
+[workspace]
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tower = "0.5"
+sqlx = { version = "0.9", features = ["postgres", "runtime-tokio", "chrono", "uuid"] }
+mail-parser = "0.11"
+mail-auth = "0.12"
+mail-send = "0.6"
+mail-builder = "0.4"
+smtp-proto = "0.2"
+hickory-resolver = "0.26"
+rmcp = { version = "3.1", features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+governor = "0.10"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+================================================================
+FINAL `cargo build` OUTPUT (exit 0)
+================================================================
+   Compiling amk-spike v0.1.0 (.../amk-spike)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+
+================================================================
+`cargo tree --depth 1` (resolved versions)
+================================================================
+amk-spike v0.1.0
+├── axum v0.8.9
+├── chrono v0.4.45
+├── governor v0.10.4
+├── hickory-resolver v0.26.1
+├── mail-auth v0.12.0
+├── mail-builder v0.4.4
+├── mail-parser v0.11.6
+├── mail-send v0.6.1
+├── rmcp v3.1.2
+├── serde v1.0.229
+├── serde_json v1.0.151
+├── smtp-proto v0.2.3
+├── sqlx v0.9.0
+├── tokio v1.53.1
+├── tower v0.5.3
+└── uuid v1.24.1
+
+All planned pins exist on crates.io and resolve. 13 compile errors on the
+first build with the assumed APIs; fixes below.
+
+================================================================
+API-MISMATCH FINDINGS (assumed X -> actual Y)
+================================================================
+F1. axum ws: ASSUMED axum = "0.8" exposes axum::extract::ws::WebSocketUpgrade.
+    ACTUAL: WebSocket support is behind the non-default "ws" feature.
+    Fix: axum = { version = "0.8", features = ["ws"] }. Handler shape confirmed:
+    async fn(State<Arc<S>>, ws: WebSocketUpgrade) -> impl IntoResponse { ws.on_upgrade(fn(WebSocket)) }.
+    Note: axum 0.8 route params are "/messages/{id}" (":id" is a runtime panic, not a compile error).
+
+F2. uuid in axum extractors: ASSUMED uuid features ["v4"] suffice.
+    ACTUAL: Path<uuid::Uuid> needs the uuid "serde" feature; without it the whole
+    handler fails an opaque `Handler<_, _> not implemented` E0277.
+    Fix: uuid = { version = "1", features = ["v4", "serde"] }.
+
+F3. mail-send 0.6: ASSUMED SmtpClientBuilder::new(host, port) is infallible.
+    ACTUAL: new() -> Result<SmtpClientBuilder<T>, String> (builds the TLS connector).
+    Chain: SmtpClientBuilder::new("host", 587)? .implicit_tls(false)
+           .credentials(("user","pass")).connect().await? ; client.send(message).await?.
+    connect()/credentials()/implicit_tls() names as assumed once past new().
+
+F4. mail-auth 0.12 DKIM signing key: ASSUMED RsaKey::<Sha256>::from_pkcs1_pem.
+    ACTUAL: canonical constructor is RsaKey::<Sha256>::from_key_der(rustls_pki_types::PrivateKeyDer).
+    from_rsa_pem / from_pkcs8_pem / from_der still exist but are #[deprecated since 0.7.4].
+    Signature::to_header() exists but requires importing trait mail_auth::common::headers::HeaderWriter.
+    DkimSigner::from_key(key).domain(..).selector(..).headers([..]).sign(&raw) as assumed.
+    Default features select the aws-lc-rs crypto backend + hickory DNS.
+
+F5. mail-auth 0.12 verification: compiled EXACTLY as assumed — record of real names:
+    MessageAuthenticator::new_cloudflare() (also new_system_conf etc.);
+    AuthenticatedMessage::parse(&[u8]) -> Option<_>;
+    .verify_dkim(&msg).await -> Vec<DkimOutput<'_>>, d.result() -> &DkimResult (Pass/Neutral/Fail/PermError/TempError/None);
+    .verify_spf(mail_auth::spf::verify::SpfParameters::verify_mail_from(ip, ehlo_domain, host_domain, sender)).await -> SpfOutput, .result() -> SpfResult;
+    .verify_dmarc(mail_auth::dmarc::verify::DmarcParameters::new(&msg, &dkim_outputs, "domain", &spf_output)).await -> DmarcOutput, .dkim_result()/.spf_result() -> &DmarcResult.
+
+F6. smtp-proto 0.2: parser-only confirmed — request/response parsing + serialization,
+    NO server/session engine (AgentMailKit must own the SMTP state machine).
+    ASSUMED Request::parse yields Request<String>. ACTUAL:
+    Request::<Cow<str>>::parse(&mut std::slice::Iter<'a, u8>) -> Result<Request<Cow<'a, str>>, Error>;
+    variants Ehlo{host}, Helo, Lhlo, Mail{from: MailFrom<T> (.address: Cow<str>)}, Rcpt{to: RcptTo<T>},
+    Bdat, Auth{mechanism: u64, initial_response}, Noop, ... Response<T: Display>::new(code, e1, e2, e3, msg)
+    plus EhloResponse for the reply side.
+
+F7. hickory-resolver 0.26 — three breaks vs the assumed (0.24/0.25-era) API:
+    a) ASSUMED Resolver::builder_tokio()?.build() infallible. ACTUAL build() -> Result:
+       let resolver: TokioResolver = Resolver::builder_tokio()?.build()?;
+    b) ASSUMED typed MxLookup/TxtLookup iterables. ACTUAL mx_lookup/txt_lookup
+       (macro-generated) return untyped Lookup; iterate lookup.answers() -> &[Record]
+       and match hickory_resolver::proto::rr::RData::{MX, TXT}.
+    c) ASSUMED accessor methods rec.data()/mx.preference()/mx.exchange(). ACTUAL these are
+       now public FIELDS: rec.data, mx.preference (u16), mx.exchange (Name, .to_utf8()).
+       TXT renders via Display (to_string()). No RData::as_mx()/as_txt() helpers.
+
+F8. rmcp 3.1 (resolved 3.1.2) — pin "3.1" is real; macros work; two naming breaks:
+    a) ASSUMED rmcp::handler::server::tool::Parameters. ACTUAL that path is private;
+       public path is rmcp::handler::server::wrapper::Parameters.
+    b) ASSUMED rmcp::model::Content. ACTUAL the content union is rmcp::model::ContentBlock
+       (MCP 2025-11-25 spec); CallToolResult::success(Vec<ContentBlock>); ContentBlock::text(..).
+    c) StreamableHttpService takes TWO generics <S, M: SessionManager>:
+       StreamableHttpService::<MailTools, LocalSessionManager>::new(
+           || Ok(MailTools::new()), LocalSessionManager::default().into(), Default::default())
+       and mounts into axum via Router::nest_service("/mcp", service).
+    Working tool shape (compiles):
+       struct with field tool_router: ToolRouter<Self>; #[tool_router] impl block;
+       #[tool(description = "...")] async fn f(&self, Parameters(req): Parameters<T>)
+           -> Result<CallToolResult, rmcp::ErrorData>  where T: Deserialize + rmcp::schemars::JsonSchema;
+       #[tool_handler] impl ServerHandler { fn get_info(&self) -> ServerInfo }.
+    Transports exposed by this feature set: transport-io -> rmcp::transport::stdio()
+    (serve via rmcp::ServiceExt::serve(stdio()).await, then .waiting().await);
+    transport-streamable-http-server -> StreamableHttpService/StreamableHttpServerConfig
+    (+ session managers via implied transport-streamable-http-server-session, e.g.
+    streamable_http_server::session::local::LocalSessionManager). No SSE server and no
+    websocket transport in this feature set (ws transport is commented out of rmcp 3.1.2 entirely).
+
+F9. Compiled exactly as assumed (no changes needed):
+    - sqlx 0.9.0: PgPoolOptions::new().max_connections(5).connect(dsn).await;
+      sqlx::query("... $1 $2").bind(Uuid).bind(DateTime<Utc>).fetch_optional(&pool).await;
+      Row::get("col") for Uuid and DateTime<Utc> with features ["postgres","runtime-tokio","chrono","uuid"].
+    - mail-parser 0.11.6: MessageParser::default().parse(&[u8]) -> Option<Message>;
+      msg.from()/to() -> Option<&Address>; subject()/message_id() -> Option<&str>;
+      in_reply_to()/references() -> &HeaderValue; msg.attachments() -> iterator of &MessagePart;
+      part.attachment_name() -> Option<&str> and part.content_type() require importing
+      trait mail_parser::MimeHeaders; part.contents() -> &[u8].
+    - mail-builder 0.4.4: MessageBuilder::new().from(("Name","addr")).to(vec![..])
+      .subject(..).text_body(..).attachment("application/pdf", "report.pdf", &[u8]);
+      accepted directly by mail-send's client.send(..).
+    - governor 0.10.4: RateLimiter::keyed(Quota::per_second(NonZeroU32)) and
+      limiter.check_key(&String) -> Result<(), NotUntil<..>>.
+    - tower 0.5.3: ServiceBuilder::new() as expected.
+
+================================================================
+Env note
+================================================================
+Registry network access worked from the sandbox (crates.io index + downloads); no blocker.

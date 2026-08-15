@@ -1,0 +1,91 @@
+Item 10 — DKIM keys (Stalwart, OVH k3s node 144.217.66.212)
+Captured 2026-08-15 via read-only SSH. Secret material never printed; key
+comparisons executed on-host, verdict-only output.
+
+$ ssh root@144.217.66.212 'ls -la /var/lib/docker/volumes/stalwart-data/_data/etc/dkim/'
+total 24
+drwxr-xr-x 1 root root  212 Apr 10 04:03 .
+drwxr-xr-x 1 root root  320 Jul 24 06:15 ..
+-rw-r--r-- 1 root root 1704 Apr 10 01:03 appsynergy.io.key
+-rw------- 1 root root 1679 Apr 10 04:03 appsynergy.io.rsa.key
+-rw-r--r-- 1 root root 1704 Apr 10 01:03 imabee.cloud.key
+-rw------- 1 root root 1675 Apr 10 04:03 imabee.cloud.rsa.key
+-rw-r--r-- 1 root root 1704 Apr 10 01:03 imabee.com.key
+-rw------- 1 root root 1679 Apr 10 04:03 imabee.com.rsa.key
+
+Per-file metadata (file(1), size, first line only where it is a PEM header):
+== appsynergy.io.key      size_bytes: 1704  file(1): OpenSSH private key (no password)  first_line: -----BEGIN PRIVATE KEY-----
+== appsynergy.io.rsa.key  size_bytes: 1679  file(1): PEM RSA private key                first_line: -----BEGIN RSA PRIVATE KEY-----
+== imabee.cloud.key       size_bytes: 1704  file(1): OpenSSH private key (no password)  first_line: -----BEGIN PRIVATE KEY-----
+== imabee.cloud.rsa.key   size_bytes: 1675  file(1): PEM RSA private key                first_line: -----BEGIN RSA PRIVATE KEY-----
+== imabee.com.key         size_bytes: 1704  file(1): OpenSSH private key (no password)  first_line: -----BEGIN PRIVATE KEY-----
+== imabee.com.rsa.key     size_bytes: 1679  file(1): PEM RSA private key                first_line: -----BEGIN RSA PRIVATE KEY-----
+(file(1)'s "OpenSSH private key" label on the .key files is a misdetection of
+PKCS#8 "BEGIN PRIVATE KEY"; openssl parses all six as RSA.)
+
+$ ssh ... 'for f in .../etc/dkim/*.key; do openssl pkey -in "$f" -noout -text | grep Private-Key; done'
+appsynergy.io.key       Private-Key: (2048 bit, 2 primes)
+appsynergy.io.rsa.key   Private-Key: (2048 bit, 2 primes)
+imabee.cloud.key        Private-Key: (2048 bit, 2 primes)
+imabee.cloud.rsa.key    Private-Key: (2048 bit, 2 primes)
+imabee.com.key          Private-Key: (2048 bit, 2 primes)
+imabee.com.rsa.key      Private-Key: (2048 bit, 2 primes)
+
+$ ssh ... 'grep -nE "dkim|selector" /var/lib/docker/volumes/stalwart-data/_data/etc/config.toml'
+(no output — zero matches)
+
+config.toml (secrets redacted) has no signature/DKIM section; relevant lines:
+    directory.internal.store = "rocksdb"
+    server.hostname = "m.appsynergy.io"
+    store.rocksdb.path = "/opt/stalwart/data"
+    storage.data = "rocksdb"
+
+DKIM config lives in Stalwart's internal RocksDB store. Read-only probes
+(strings over sst/blob/log; lz4 block compression truncates keys):
+
+$ ssh ... 'strings -a .../data/*.sst .../data/*.blob .../data/*.log | grep -aoE "signature\.[A-Za-z0-9._-]+" | sort -u'
+signature.appsynergy.io.canonicalization
+signature.imabee.ca.headers.3
+signature.imabee.cloud.headers.1
+signature.imabee.com.report
+(partial due to compression; note imabee.ca present with NO key file on disk)
+
+$ ssh ... 'strings ... | grep -ac "BEGIN RSA PRIVATE KEY"'
+4
+(count only — 4 RSA private keys embedded inline in the internal store)
+
+$ ssh ... 'strings ... | grep -aoE "%\{file:[^}]*\}%|/opt/stalwart/etc/dkim[^\"[:space:]]*"'
+(no output — the store does NOT reference the on-disk key files)
+
+Selector mapping (authoritative DNS zone repo + live DNS):
+appsynergy.io | TXT | s20260410._domainkey.appsynergy.io | v=DKIM1; k=rsa; p=<pubkey-elided>
+imabee.ca     | TXT | s20260410._domainkey.imabee.ca     | v=DKIM1; k=rsa; p=<pubkey-elided>
+imabee.cloud  | TXT | s20260410._domainkey.imabee.cloud  | v=DKIM1; k=rsa; p=<pubkey-elided>
+imabee.com    | TXT | s20260410._domainkey.imabee.com    | v=DKIM1; k=rsa; p=<pubkey-elided>
+
+$ dig +short TXT s20260410._domainkey.<dom>   (all four domains)
+record present for all four; zone-file p= == live-DNS p= : MATCH (len 392) x4
+
+On-host key<->DNS comparison (pipeline only, no temp files, verdicts only):
+etc/dkim on-disk files vs DNS p=:
+appsynergy.io.key MISMATCH   appsynergy.io.rsa.key MISMATCH
+imabee.cloud.key  MISMATCH   imabee.cloud.rsa.key  MISMATCH
+imabee.com.key    MISMATCH   imabee.com.rsa.key    MISMATCH
+imabee.ca: no key file on disk
+
+Store-embedded keys vs DNS p= (reconstructed in-memory on host via awk|openssl):
+embedded PEM blocks: 4
+store-embedded key #1 -> MATCHES DNS s20260410._domainkey.appsynergy.io
+store-embedded key #2 -> MATCHES DNS s20260410._domainkey.imabee.ca
+store-embedded key #3 -> MATCHES DNS s20260410._domainkey.imabee.cloud
+store-embedded key #4 -> MATCHES DNS s20260410._domainkey.imabee.com
+
+CONCLUSION
+- Live DKIM signing keys: 4x RSA-2048 (PKCS#1 PEM) embedded in Stalwart's
+  internal RocksDB store, one per domain (appsynergy.io, imabee.ca,
+  imabee.cloud, imabee.com), selector s20260410; each matches its published
+  DNS record exactly.
+- The six PEM files under etc/dkim/ are STALE artifacts: none matches DNS, the
+  store does not reference them, and imabee.ca (which signs) has no file there.
+- A4 (extraction mechanism: admin API export vs offline RocksDB read) is the
+  P-1 residual that resolves this into a usable migration path.

@@ -1,0 +1,23 @@
+# Fixture 04 — pagination (A1/A4). Live api.agentmail.to, throwaway inbox, 2 messages present.
+
+## GET /v0/inboxes/amk-probe@agentmail.to/messages?limit=1  (2 messages total)
+Envelope: {"count":1,"limit":1,"next_page_token":"<base64>","messages":[ ... 1 item ... ]}
+
+## THE FINDING — page_token is base64(JSON), a KEYSET CURSOR (not opaque-random)
+next_page_token base64-decodes to:
+{
+  "message_id": "<010001a003f312ac-3c80349e-0a97-4915-9dea-0d2764d7729a-000000@email.amazonses.com>",
+  "inbox_id": "amk-probe@agentmail.to",
+  "timestamp": "2026-08-15T05:44:16.768Z"
+}
+=> The cursor is the last-returned item's sort key: (message_id, inbox_id, timestamp).
+   amk can implement the same base64(JSON keyset) scheme for a byte-compatible token.
+   (SDKs treat the token as opaque, so exact bytes need not match — but the scheme is now known.)
+
+## Boundary behavior
+- With exactly 1 item total and limit=1: NO next_page_token (absent, not empty). Last page => field omitted.
+- With 2 items total and limit=1: next_page_token present (above).
+- ascending default: temporal; timestamp in the cursor is the tiebreaker key.
+
+## TODO (still open, non-blocking): fetch page 2 with this token to confirm it resumes AFTER the
+## cursor item and that an exhausted token omits next_page_token again. Covered when >2 msgs exist.

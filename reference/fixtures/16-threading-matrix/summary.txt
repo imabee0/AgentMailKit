@@ -1,0 +1,68 @@
+ITEM A10 — AgentMail inbound THREADING MATRIX — summary
+Captured 2026-08-15. RUN token = d64ee47e.
+Probe inbox amk-probe@agentmail.to (+ amk-probe2@agentmail.to for case e), pod 9047724b-2879-416b-8424-82ef81ab9397.
+Sender: OVH 144.217.66.212 (HELO server1.appsynergy.io), python smtplib -> SES MX inbound-smtp.us-east-1.amazonaws.com:25.
+All 18 inbound messages were accepted (SMTP 250) and stored labeled ["received","unread","unauthenticated"]
+(probe.test/other.test publish no SPF -> spf=none; OVH not authorized -> not authenticated). See fixture 09b.
+
+HOW thread_ids were read: unauthenticated received messages are EXCLUDED from the list endpoints
+(GET /messages and GET /threads both return count=0, even with ?labels=received|unauthenticated), but ARE
+retrievable individually. thread_ids came from the webhook message.received.unauthenticated payloads and,
+where no webhook fired (probe2), from GET /v0/inboxes/{inbox}/messages/{url-encoded-Message-ID}.
+
+================= RESULT MATRIX (message -> thread_id) =================
+CASE  subject                              From/Inbox                      In-Reply-To/Refs  thread_id            group?
+a1    "AMKthreadA d64ee47e"                alice@probe.test / probe        no                23d8a68d             \_ SAME
+a2    "Re: AMKthreadA d64ee47e"            alice@probe.test / probe        YES -> a1         23d8a68d             /  thread
+b     "AMKthreadA d64ee47e" (== a1)        bob@other.test  / probe         no                d563dfe0             new (own)
+c0    "AMKthreadC d64ee47e"                carol@probe.test / probe        no                622b462e             new
+c1    "Re: AMKthreadC d64ee47e"            carol@probe.test / probe        no                f40fb118             new
+c2    "RE: AMKthreadC d64ee47e"            carol@probe.test / probe        no                85c203ad             new
+c3    "Fwd: AMKthreadC d64ee47e"           carol@probe.test / probe        no                9fbfedc9             new
+c4    "FW: AMKthreadC d64ee47e"            carol@probe.test / probe        no                75de1ba4             new
+c5    "AW: AMKthreadC d64ee47e"            carol@probe.test / probe        no                c693a38d             new
+c6    "[list] AMKthreadC d64ee47e"         carol@probe.test / probe        no                fead0d05             new
+c7    "AMKthreadC d64ee47e   "(ws->strip)  carol@probe.test / probe        no                76080e4e             new
+d0    "AMKthreadD d64ee47e alpha"          dave@probe.test / probe         no                16562ebc             new
+d1    "AMKthreadD d64ee47e alpha" (==d0)   dave@probe.test / probe         no                ae4e1dc2             new
+d2    "AMKthreadD d64ee47e beta"           dave@probe.test / probe         no                23171cc2             new
+e1    "AMKthreadE d64ee47e"                eve@probe.test / probe          no                0fb5b5b3             new (inbox amk-probe)
+e2    "AMKthreadE d64ee47e" (== e1)        eve@probe.test / probe2         no                7041d590             new (inbox amk-probe2)
+f1    "" (empty)                           frank@probe.test / probe        no                d6cc9a91             new
+f2    "" (empty)                           frank@probe.test / probe        no                d7e7ddfe             new
+----> 17 DISTINCT threads across 18 messages. Only multi-message thread: 23d8a68d = {a1, a2}.
+
+================= INFERRED RULE SET (confidence: HIGH within tested conditions) =================
+R1. Grouping key = RFC Message-ID reference chain. A message joins an existing thread ONLY when it
+    carries In-Reply-To and/or References pointing at a Message-ID already in that inbox's thread
+    (case a). This was the sole join observed.
+R2. Subject is NOT a grouping key. Identical subjects (b, d0/d1), subject-prefix variants
+    Re/RE/Fwd/FW/AW/[list] (c), trailing-whitespace, and empty subjects (f) all produced SEPARATE
+    threads. Subject-prefix normalization does not exist for threading purposes here.
+R3. Correspondent (From) is NOT a grouping key, neither sufficient nor necessary: same-sender
+    same-subject messages did not merge (c,d,f); the reply that DID merge (a) happened to share a
+    sender, but merging is explained by R1, not the shared sender.
+R4. Threads are PER-INBOX. thread objects carry inbox_id; identical mail to a second inbox in the
+    same pod got a distinct thread with the other inbox_id (e). Threads never span inboxes.
+R5. Ingest normalization side-notes: trailing subject whitespace is stripped in the stored subject;
+    an empty subject is stored as an ABSENT "subject" field (not "").
+
+Net: AgentMail inbound threading == strict header-linkage (In-Reply-To/References), scoped per inbox.
+It behaves like RFC 5322 References threading, NOT Gmail-style subject+participant threading.
+
+================= DIMENSIONS THIS MATRIX DID NOT COVER (honest gaps) =================
+G1. In-Reply-To vs References in ISOLATION — case (a) sent BOTH; not determined which alone suffices,
+    nor whether a multi-hop References chain (A<-B<-C) transitively joins.
+G2. References pointing at a Message-ID in a DIFFERENT existing thread (thread MERGE behavior).
+G3. Reply whose References match but whose subject is unrelated (does header linkage override subject
+    mismatch — expected yes under R1, but untested).
+G4. AUTHENTICATED mail — every probe message was "unauthenticated" (OVH is in no relevant SPF and
+    signs no DKIM). Threading of authenticated mail was not exercised; assumed identical but unverified.
+G5. TIME WINDOW — whether identical-Message-ID-chain or same-subject grouping decays after a gap.
+    This is case (g), deliberately deferred (see g-window-bisect.sh). Closure horizon T+30d, non-blocking.
+G6. Malformed/duplicate Message-IDs, missing Message-ID (server-generated), and cross-pod grouping.
+G7. n=1 per cell (no repeat trials); results are deterministic-looking but not statistically repeated.
+
+================= case (g) =================
+NOT run. Ready-to-run background script written: g-window-bisect.sh (send identical-subject mail at
+T+5m,1h,6h,24h,3d,7d,14d,30d, record thread_id each). Long-tail; the orchestrator decides launch.

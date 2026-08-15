@@ -1,0 +1,42 @@
+ITEM A10 case (a) — CONTROL / baseline: In-Reply-To + References reply pair
+Captured 2026-08-15. RUN token = d64ee47e. Inbox = amk-probe@agentmail.to (pod 9047724b-...).
+Sender = OVH 144.217.66.212 (HELO server1.appsynergy.io) -> SES MX inbound-smtp.us-east-1.amazonaws.com:25
+All inbound landed labeled ["received","unread","unauthenticated"] (probe.test has no SPF -> spf=none).
+
+--- SEND (msg#1 root; sent in pilot) ---
+python3 /root/amksend.py --mailfrom alice@probe.test \
+  --headerfrom "Alice Probe <alice@probe.test>" \
+  --subject "AMKthreadA d64ee47e" --messageid "<a-root-d64ee47e@probe.test>" \
+  --body "case a root message"
+SMTP: MAILFROM 250 Ok | RCPT 250 Ok | DATA 250 OK 8l2fhojfocqd4rdaf0rfssbndm61175bnmria6o1
+
+--- SEND (msg#2 reply, In-Reply-To + References -> root Message-ID) ---
+python3 /root/amksend.py --mailfrom alice@probe.test \
+  --headerfrom "Alice Probe <alice@probe.test>" \
+  --subject "Re: AMKthreadA d64ee47e" --messageid "<a-reply-d64ee47e@probe.test>" \
+  --inreplyto "<a-root-d64ee47e@probe.test>" --references "<a-root-d64ee47e@probe.test>"
+SMTP: MAILFROM 250 Ok | RCPT 250 Ok | DATA 250 OK 4ju8f4f8hn2bpino21p3nprf57459m7euvv6okg1
+
+--- OBSERVED thread_id (verbatim webhook message.received.unauthenticated payloads) ---
+msg#1 root:
+{"event_type":"message.received.unauthenticated","message":{
+  "message_id":"<a-root-d64ee47e@probe.test>","subject":"AMKthreadA d64ee47e",
+  "from":"Alice Probe <alice@probe.test>","labels":["received","unread","unauthenticated"],
+  "thread_id":"23d8a68d-9c1b-41be-9677-acccf72e5dfe",
+  "headers":{"Authentication-Results":"amazonses.com; spf=none (spfCheck: 144.217.66.212 is neither permitted nor denied by domain of probe.test) client-ip=144.217.66.212; envelope-from=alice@probe.test; helo=server1.appsynergy.io; dmarc=none header.from=probe.test;"}}}
+
+msg#2 reply:
+{"event_type":"message.received.unauthenticated","message":{
+  "message_id":"<a-reply-d64ee47e@probe.test>","subject":"Re: AMKthreadA d64ee47e",
+  "in_reply_to":"<a-root-d64ee47e@probe.test>","references":["<a-root-d64ee47e@probe.test>"],
+  "labels":["received","unread","unauthenticated"],
+  "thread_id":"23d8a68d-9c1b-41be-9677-acccf72e5dfe"}}
+
+--- CONFIRMED via GET /v0/inboxes/amk-probe@agentmail.to/threads/23d8a68d-9c1b-41be-9677-acccf72e5dfe ---
+{"thread_id":"23d8a68d-9c1b-41be-9677-acccf72e5dfe","message_count":2,
+ "subject":"AMKthreadA d64ee47e","senders":["Alice Probe <alice@probe.test>"],
+ "last_message_id":"<a-reply-d64ee47e@probe.test>","labels":["received","unread","unauthenticated"]}
+
+OBSERVED: msg#1 and msg#2 share thread_id 23d8a68d (message_count=2). BASELINE HOLDS —
+a reply carrying In-Reply-To + References to the root Message-ID joins the root's thread.
+(This is the ONLY multi-message thread in the entire A10 matrix.)

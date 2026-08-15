@@ -1,0 +1,44 @@
+# Fixture 05 — error catalog (A8 + collision). Live api.agentmail.to, 2026-08-15.
+# THE KEY DISTINCTION: auth-layer failures return a BARE gateway body; app-layer
+# failures return the FULL envelope {name, code, message, fix?, docs?, ...}.
+
+## A8 — auth-layer (401/403) => BARE gateway JSON, NO code field. ASYMMETRY IS REAL.
+GET /v0/auth/me   Authorization: Bearer am_us_00000000000000000000000000000000   (WELL-FORMED, invalid)
+-> 403  {"message":"Forbidden"}
+GET /v0/auth/me   Authorization: Bearer not-a-real-key   (malformed)
+-> 403  {"message":"Forbidden"}
+GET /v0/inboxes   (no Authorization header)
+-> 401  {"message":"Unauthorized"}
+=> RESOLVED: a well-formed-but-invalid am_ key STILL returns the bare 403, NOT an envelope
+   with code:"unknown_api_key". The docs' unknown_api_key code does not surface to the client
+   as an app envelope on this path. P0 must implement:
+     - auth layer (missing/invalid credential): bare {"message":"Unauthorized"} 401 /
+       {"message":"Forbidden"} 403  (AWS API Gateway shape; no name/code/fix/docs)
+     - app layer (validation/state/not-found): full envelope (below)
+
+## Inbox username collision => already_exists / HTTP 403 (NOT resource_taken 409, NOT 422)
+POST /v0/pods/{pod}/inboxes  {"username":"amk-probe"}   (already exists)
+-> 403
+{"name":"AlreadyExistsError","code":"already_exists","message":"Inbox already exists",
+ "fix":"A inbox with these details already exists. ... retry with one of these currently
+  available usernames: amk-probe4991, amk-probe6813, amk-probe9732.",
+ "suggestions":["amk-probe4991","amk-probe6813","amk-probe9732"],
+ "docs":"https://docs.agentmail.to/errors#already_exists"}
+=> RESOLVED: collision code is `already_exists` at HTTP 403, with an extra `suggestions[]` field.
+   BOTH prior guesses wrong (docs said resource_taken/409; SDK-derived said 422).
+   P1 must build already_exists/403 + suggestions[].
+
+## not_found => full envelope, 404, fix string documents label-masking
+GET /v0/inboxes/nope@agentmail.to
+-> 404 {"name":"NotFoundError","code":"not_found","message":"Inbox not found",
+        "fix":"... scope (organization, pod, or inbox) ... restricted labels like spam or trash
+         are hidden without their label-read permission ...","docs":".../errors#not_found"}
+
+## validation_error => errors[] entries are {code, path[], message}  (path is a JSON-pointer array)
+POST /v0/inboxes/{inbox}/messages/send  {}
+-> 400
+{"name":"ValidationError","code":"validation_error","message":"Request validation failed",
+ "errors":[{"code":"custom","path":[],"message":"to, cc, or bcc must be specified"}],
+ "fix":"... Inspect the 'errors' array — each entry has a 'path' and 'message' ...",
+ "docs":"https://docs.agentmail.to/errors#validation_error"}
+=> B1 refined: errors[] entries carry `code` too, not just {path,message}. path is an array.

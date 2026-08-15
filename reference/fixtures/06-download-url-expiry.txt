@@ -1,0 +1,16 @@
+# Fixture 06 — download_url expiry (A3). Live api.agentmail.to raw-message CDN URL.
+# download_url host: cdn.agentmail.to ; scheme: CloudFront signed URL (Expires + Key-Pair-Id + Signature).
+# expires_at: 2026-08-15T06:41:55.197Z  (Unix Expires=1786776115) — ~1h after issue. CONFIRMED ~1h TTL.
+# (Signature value withheld from fixture — time-limited CDN token for throwaway content.)
+
+## GET #1 — before expiry (issued 2026-08-15T06:28:46Z)
+status: 200 ; body_bytes: 1269
+first line: List-Unsubscribe: <https://api.agentmail.to/v0/unsubscribe/xKHbJZqL2aXVB7Nb-DaH9w0StB0qtevtobkag3Nj5gfUQgMdxsB3JWjCHPB
+
+## (waiting 939s until ~150s past Expires)
+
+## GET #2 — after expiry (issued 2026-08-15T06:44:25Z)
+status: 403 ; body_bytes: 110
+body: <?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access denied</Message></Error>
+
+## VERDICT: raw download_url TTL ~= 1h (CloudFront signed). Pre/post-expiry statuses above.

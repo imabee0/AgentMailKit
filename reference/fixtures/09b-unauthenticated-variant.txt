@@ -1,0 +1,102 @@
+ITEM A14 — message.received.unauthenticated variant
+Captured 2026-08-15. RUN = d64ee47e. Inbox amk-probe@agentmail.to (pod 9047724b-...).
+Sender: OVH 144.217.66.212 (HELO server1.appsynergy.io), python smtplib -> SES MX
+inbound-smtp.us-east-1.amazonaws.com:25. Webhook 200-sink: webhook.site token 9416815d-... (Svix delivery).
+
+STATUS: CLOSED. Both A14 branches were observed:
+  (1) SPF=none, no DKIM  -> mail STORED, labeled "unauthenticated", event message.received.unauthenticated fires.
+  (2) SPF=fail (hardfail -all), no DKIM -> accepted at SES gateway (250) but then NOT visible / no event
+      (quarantined under a restricted label or dropped downstream).
+
+================= BRANCH (1): unauthenticated mail is STORED + labeled + fires the event =================
+Any sender domain with no SPF authorization and no DKIM produces this. 17 such messages were captured this
+run (all of A10's probe.test/other.test sends). Representative send + verbatim event below.
+
+--- SEND (spf=none: probe.test has no SPF record; OVH not authorized either way) ---
+python3 /root/amksend.py --mailfrom alice@probe.test \
+  --headerfrom "Alice Probe <alice@probe.test>" \
+  --subject "AMKthreadA d64ee47e" --messageid "<a-root-d64ee47e@probe.test>" --body "case a root message"
+SMTP: MAILFROM 250 Ok | RCPT 250 Ok | DATA 250 OK 8l2fhojfocqd4rdaf0rfssbndm61175bnmria6o1
+
+--- (1a) LABELS via API: GET /v0/inboxes/amk-probe@agentmail.to/messages/%3Ca-root-d64ee47e%40probe.test%3E ---
+{"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"9047724b-2879-416b-8424-82ef81ab9397",
+ "inbox_id":"amk-probe@agentmail.to","thread_id":"23d8a68d-9c1b-41be-9677-acccf72e5dfe",
+ "message_id":"<a-root-d64ee47e@probe.test>","labels":["received","unread","unauthenticated"],
+ "from":"Alice Probe <alice@probe.test>","to":["amk-probe@agentmail.to"], ...}
+  => labels include "unauthenticated"  (as expected)
+
+--- (1b) WEBHOOK message.received.unauthenticated — verbatim payload (webhook.site request content) ---
+{
+ "event_id": "97368688a99715a995b7513fffc50882",
+ "event_type": "message.received.unauthenticated",
+ "type": "event",
+ "message": {
+  "created_at": "2026-08-15T05:54:03.471Z",
+  "extracted_text": "case a root message",
+  "from": "Alice Probe <alice@probe.test>",
+  "from_": "Alice Probe <alice@probe.test>",
+  "headers": {
+   "Authentication-Results": "amazonses.com; spf=none (spfCheck: 144.217.66.212 is neither permitted nor denied by domain of probe.test) client-ip=144.217.66.212; envelope-from=alice@probe.test; helo=server1.appsynergy.io; dmarc=none header.from=probe.test;"
+  },
+  "inbox_id": "amk-probe@agentmail.to",
+  "labels": ["received", "unread", "unauthenticated"],
+  "message_id": "<a-root-d64ee47e@probe.test>",
+  "organization_id": "133c9cbe-f996-4094-a8d5-0c6603e022ea",
+  "pod_id": "9047724b-2879-416b-8424-82ef81ab9397",
+  "preview": "case a root message\n",
+  "size": 1919,
+  "smtp_id": "8l2fhojfocqd4rdaf0rfssbndm61175bnmria6o1",
+  "subject": "AMKthreadA d64ee47e",
+  "text": "case a root message\n",
+  "thread_id": "23d8a68d-9c1b-41be-9677-acccf72e5dfe",
+  "timestamp": "2026-08-15T05:54:03.000Z",
+  "to": ["amk-probe@agentmail.to"],
+  "updated_at": "2026-08-15T05:54:03.471Z"
+ },
+ "thread": {
+  "created_at": "2026-08-15T05:54:03.471Z",
+  "inbox_id": "amk-probe@agentmail.to",
+  "labels": ["received", "unread", "unauthenticated"],
+  "last_message_id": "<a-root-d64ee47e@probe.test>",
+  "message_count": 1,
+  ...
+ }
+}
+Webhook sink stats this run: 21 requests on the token = 17x message.received.unauthenticated + 2x message.delivered + 2x message.sent. Delivered via User-Agent "Svix-Webhooks/rolling".
+
+--- (1c) IMPORTANT visibility quirk (anti-abuse) ---
+Unauthenticated received messages are EXCLUDED from the list endpoints:
+  GET /v0/inboxes/amk-probe/messages            -> count=3 (only the "sent" ones)
+  GET /v0/inboxes/amk-probe/messages?labels=received       -> count=0
+  GET /v0/inboxes/amk-probe/messages?labels=unauthenticated-> count=0
+  GET /v0/inboxes/amk-probe/threads             -> count=0
+They ARE retrievable individually by id:
+  GET /v0/inboxes/amk-probe/messages/<url-encoded Message-ID>  -> full object (labels incl. unauthenticated)
+  GET /v0/inboxes/amk-probe/threads/<thread_id>                -> thread (message_count etc.)
+Consumers relying on the list endpoints will NOT see unauthenticated mail; they must consume the
+message.received.unauthenticated webhook (or GET by known id).
+
+================= BRANCH (2): SPF HARDFAIL (-all) — accepted at gateway, then hidden/dropped =================
+--- SEND (example.net publishes v=spf1 -all -> spf=fail; no DKIM) ---
+python3 /root/amksend.py --mailfrom probe@example.net \
+  --headerfrom "Probe Unauth <probe@example.net>" \
+  --subject "AMK-A14-unauth d64ee47e" --messageid "<a14-unauth-d64ee47e@example.net>"
+SMTP: MAILFROM 250 Ok | RCPT 250 Ok | DATA 250 OK kbtthm9s8o297egheajirgh67jek3jfqtkuqv481   (SES accepted)
+
+--- OBSERVED ---
+ - NO webhook event of any type for this Message-ID (0 of the 21 sink requests reference example.net).
+ - GET /v0/inboxes/amk-probe/messages/%3Ca14-unauth-d64ee47e%40example.net%3E ->
+   {"name":"NotFoundError","code":"not_found","message":"Message not found",
+    "fix":"...some resources (e.g. restricted labels like spam or trash) are hidden without their
+     label-read permission. The corresponding list endpoint returns only the ids visible to you."}
+ => Distinct handling from spf=none: an SPF HARDFAIL message is NOT surfaced (no event, not visible to
+    the inbox/pod credential). It was accepted by the SES SMTP gateway (250), so this is a POST-gateway
+    disposition, not an SMTP rejection. Most consistent with quarantine under a restricted label
+    (spam/trash) — but the exact disposition (spam-labeled-and-hidden vs. silently dropped) could not be
+    confirmed read-only, as this credential lacks spam/trash label-read permission.
+
+================= VERDICT (A14) =================
+message.received.unauthenticated is the event for senders that merely fail to authenticate (SPF=none /
+no DKIM / no DMARC pass): the message is stored, labeled ["received","unread","unauthenticated"], and the
+event fires with full payload (captured verbatim above). A stricter failure (SPF hardfail -all) is handled
+differently — accepted at the SMTP gateway but not surfaced (no event, hidden as restricted/spam or dropped).

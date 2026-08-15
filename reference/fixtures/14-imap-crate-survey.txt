@@ -1,0 +1,32 @@
+Item 14 — Rust IMAP *server* crate survey (A7)
+Captured 2026-08-15 via crates.io API (read-only research).
+
+VERDICT: No production-grade embeddable IMAP4rev1 SERVER library exists on
+crates.io. The credible path is to build a server from parser/serializer
+building blocks (imap-codec + imap-types) plus the imap-next sans-I/O flow.
+
+Not published at all (searched, 404 / no crate):
+- imap-server, wildmail, stalwart-imap, avalanche-imap
+  (Stalwart's IMAP server lives only in its AGPL monorepo, not as a crate)
+
+Servers that ARE published but are applications or toys:
+- crymap        2.0.1     standalone encrypted-store server binary   ~5.1k dl
+- hopf-imap     0.2.1     2026-08-13                                    37 dl
+- mailsis-imap  0.2.4                                                   89 dl
+- rusmes-server 0.1.2
+- kotva-mail    0.2.0
+- IMAPServer    0.2.0     abandoned 2019
+- samotop / mailin: SMTP-only (not IMAP)
+
+Building blocks (parser/serializer, NOT ready servers) — the real path:
+- imap-codec 2.0.0-alpha.9   parse client commands, serialize server responses  ~90k dl, updated 2026-07-19 (alpha)
+- imap-types 2.0.0-alpha.7   the type layer under imap-codec                     ~90k dl (alpha)
+- imap-next  0.3.4           sans-I/O server flow on top of imap-codec           credible server foundation
+- imap-proto 0.16.7          client-response-oriented (2.5M dl) — NOT a server engine
+
+IMPLICATION FOR THE PLAN
+- The IMAP phase (final, parked) assumption "no maintained embeddable Rust IMAP
+  server crate" is OBSERVED, not inferred.
+- Build the minimal IMAP4rev1 subset on imap-codec/imap-types/imap-next.
+- Alpha status of imap-codec/imap-types is a risk to re-check when that phase
+  actually starts (per Register standing rule: re-survey before the phase).

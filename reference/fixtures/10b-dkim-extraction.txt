@@ -1,0 +1,101 @@
+Item A4 / 10b — DKIM key EXPORT MECHANISM (running-server vs offline)
+Captured 2026-08-15. Read-only probe; no key material was emitted or written.
+Context: fixture 10-dkim-keys.txt established the 4 live RSA-2048 keys
+(selector s20260410) live in Stalwart's internal RocksDB config store as
+signature.<domain>.* entries, NOT in the stale etc/dkim/ files.
+
+DEPLOYMENT (corrects "docker volume" wording in fixture 10): Stalwart 0.15.5
+runs in k3s pod mail/mail-78cb9c8b87-8n59w, container `stalwart`, with a
+`caddy` sidecar; admin HTTP API reachable at https://m.appsynergy.io/api/...
+
+-- 1. Admin API endpoint is live, gated on admin auth ------------------------
+$ curl -s -w "\nHTTP %{http_code}\n" https://m.appsynergy.io/api/settings/list
+{"type":"about:blank","status":401,"title":"Unauthorized","detail":"You have to authenticate first."}
+HTTP 401
+(endpoint EXISTS on the running server; admin export requires the
+fallback-admin credential, which was not read — not available read-only)
+
+-- 2. Container binaries and help surface (help output only, nothing run) ----
+$ ssh root@144.217.66.212 'kubectl exec -n mail mail-78cb9c8b87-8n59w -c stalwart -- stalwart --version'
+0.15.5
+
+$ ... stalwart --help
+Usage: stalwart [OPTIONS]
+  -c, --config <PATH>              Start server with the specified configuration file
+  -e, --export <PATH>              Export all store data to a specific path
+  -i, --import <PATH>              Import store data from a specific path
+  -o, --console                    Open the store console
+  -I, --init <PATH>                Initialize a new server at a specific path
+
+$ ... ls /usr/local/bin
+entrypoint.sh
+stalwart
+stalwart-cli
+
+$ ... stalwart-cli --help        (talks HTTP to a RUNNING server: -u URL, -c credentials)
+Commands:
+  dkim    Manage DKIM signatures
+  import  Import JMAP accounts and Maildir/mbox mailboxes
+  export  Export JMAP accounts
+  server  Manage JMAP database
+  queue   Manage SMTP message queue
+  report  Manage SMTP DMARC/TLS report queue
+
+$ ... stalwart-cli server --help
+Commands:
+  database-maintenance  Perform database maintenance
+  reload-certificates   Reload TLS certificates
+  reload-config         Reload configuration
+  add-config            Create a new configuration key
+  delete-config         Delete a configuration key or prefix
+  list-config           List all configuration entries
+  healthcheck           Perform Healthcheck
+
+$ ... stalwart-cli server list-config --help
+Usage: stalwart-cli server list-config [PREFIX]
+Arguments:
+  [PREFIX]  Prefix to filter configuration entries by
+
+$ ... stalwart-cli dkim --help
+Commands:
+  create          Create DKIM signature
+  get-public-key  Get DKIM public key
+(get-public-key is public material only; private key comes via list-config)
+
+-- 3. Documentation corroboration -------------------------------------------
+stalw.art docs, DkimSignature object (https://stalw.art/docs/ref/object/dkim-signature/):
+DKIM signatures are managed objects (WebUI: Management > Domains > DKIM
+Signatures); shared field `privateKey` = PEM-encoded private key, part of the
+managed configuration surface. DKIM signing overview:
+https://stalw.art/docs/mta/authentication/dkim/sign/
+The webadmin edits signatures round-trip through the settings API, i.e. the
+running server serves signature.* config entries (incl. private-key) to an
+authenticated admin.
+
+-- MECHANISM MAP -------------------------------------------------------------
+(a) RUNNING server, no downtime:
+    - HTTP:  GET https://m.appsynergy.io/api/settings/list?prefix=signature.
+             (proven live, 401-gated; needs fallback-admin credential)
+    - CLI:   stalwart-cli -u https://m.appsynergy.io -c <fallback-admin> \
+               server list-config signature.
+             ("List all configuration entries" — the store where the 4 live
+             PEMs reside per fixture 10)
+(b) OFFLINE fallback:
+    - stalwart --export <PATH> = full store export by the MAIN binary opening
+      RocksDB directly; RocksDB is single-writer (LOCK file), so this requires
+      the daemon stopped — this is the downtime path.
+    - (stalwart-cli export = JMAP *account* data only; not config/keys.)
+
+-- VERDICT -------------------------------------------------------------------
+Outcome (a): the live DKIM private keys ARE exportable from the RUNNING
+server via the admin settings surface (HTTP /api/settings/list or
+stalwart-cli server list-config with prefix signature.), gated only on the
+fallback-admin credential. Not executed here (credential intentionally not
+read), so the response shape is doc-corroborated, not run-verified;
+confidence high — webadmin signature editing depends on it.
+
+P6 CONSEQUENCE: DKIM key export imposes NO downtime constraint on the
+cutover sequence. Keys can be pulled from the live server at any point before
+cutover with the fallback-admin credential; offline RocksDB read via
+`stalwart --export` (daemon stopped) remains the fallback only if that
+credential is unavailable.

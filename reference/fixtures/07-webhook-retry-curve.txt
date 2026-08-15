@@ -1,0 +1,41 @@
+# Fixture 07 — webhook retry curve (A2). Live: AgentMail (Svix) -> webhook.site sink returning HTTP 500.
+# Throwaway inbox amk-probe@agentmail.to, webhook ep_3HwIKMKzmbCirmu4p74HOjg3PZq [message.sent -> 500 sink].
+# Question: does AgentMail OVERRIDE the Svix default retry schedule?
+# Svix OSS default gaps between consecutive attempts: 5s, 5m, 30m, 2h, 5h, 10h, 10h (immediate first attempt).
+# Each svix-id below is ONE event's own retry chain; deltas are gaps between CONSECUTIVE attempts of THAT chain.
+# total attempts across all chains: 19 ; distinct events (svix-ids): 4
+#   [IN-FLIGHT — full curve needs ~T+20h to capture the two 10h retries]
+
+## event msg_3HwIMgrDhRnHtUDw6GAIE2nWCtj  (5 attempts)
+#  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
+#   1 | 2026-08-15 05:44:18 | (first attempt) | immediate       | -
+#   2 | 2026-08-15 05:44:23 | 0h00m05s      | 0h00m05s        | ~OK
+#   3 | 2026-08-15 05:50:07 | 0h05m44s      | 0h05m00s        | ~OK
+#   4 | 2026-08-15 06:14:51 | 0h24m44s      | 0h30m00s        | DIFF
+#   5 | 2026-08-15 08:28:35 | 2h13m44s      | 2h00m00s        | ~OK
+
+## event msg_3HwJHmr7xPiDlYaSqjNOQwFEUBT  (5 attempts)
+#  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
+#   1 | 2026-08-15 05:51:52 | (first attempt) | immediate       | -
+#   2 | 2026-08-15 05:51:58 | 0h00m06s      | 0h00m05s        | ~OK
+#   3 | 2026-08-15 05:57:51 | 0h05m53s      | 0h05m00s        | DIFF
+#   4 | 2026-08-15 06:31:47 | 0h33m56s      | 0h30m00s        | ~OK
+#   5 | 2026-08-15 08:18:40 | 1h46m53s      | 2h00m00s        | ~OK
+
+## event msg_3HwLBWOzmBXya8xa9bPW83gu3d1  (4 attempts)
+#  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
+#   1 | 2026-08-15 06:07:29 | (first attempt) | immediate       | -
+#   2 | 2026-08-15 06:07:34 | 0h00m05s      | 0h00m05s        | ~OK
+#   3 | 2026-08-15 06:11:46 | 0h04m12s      | 0h05m00s        | DIFF
+#   4 | 2026-08-15 06:41:01 | 0h29m15s      | 0h30m00s        | ~OK
+
+## event msg_3HwLQPnrB4N72YNkXNeS7A454ox  (5 attempts)
+#  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
+#   1 | 2026-08-15 06:09:28 | (first attempt) | immediate       | -
+#   2 | 2026-08-15 06:09:33 | 0h00m05s      | 0h00m05s        | ~OK
+#   3 | 2026-08-15 06:15:26 | 0h05m53s      | 0h05m00s        | DIFF
+#   4 | 2026-08-15 06:41:32 | 0h26m06s      | 0h30m00s        | ~OK
+#   5 | 2026-08-15 08:42:35 | 2h01m03s      | 2h00m00s        | ~OK
+
+# VERDICT (partial until full curve): consecutive gaps compared to the Svix default per event above.
+# If every gap reads ~OK, AgentMail uses the stock Svix schedule (no override).

@@ -1,0 +1,162 @@
+# A5 evidence probe: source-IP preservation through externalTrafficPolicy: Local NodePort
+# Date: 2026-08-15 (UTC). Target: single-node k3s, root@144.217.66.212 (appsynergy-server, v1.33.13+k3s1).
+# External vantage: this machine, public IP confirmed below. Throwaway ns amk-probe, deleted at end.
+
+## 0. External vantage IP confirmation
+
+$ curl -s -m 10 https://api.ipify.org
+45.233.219.186
+
+## 1. Manifest applied (via ssh root@144.217.66.212 'kubectl apply -f -')
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: amk-probe
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whoami
+  namespace: amk-probe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: whoami
+  template:
+    metadata:
+      labels:
+        app: whoami
+    spec:
+      containers:
+      - name: whoami
+        image: docker.io/traefik/whoami:v1.11
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: whoami
+  namespace: amk-probe
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    app: whoami
+  ports:
+  - port: 80
+    targetPort: 80
+
+# Output:
+namespace/amk-probe created
+deployment.apps/whoami created
+service/whoami created
+Waiting for deployment "whoami" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "whoami" rollout to finish: 0 of 1 updated replicas are available...
+deployment "whoami" successfully rolled out
+
+$ kubectl -n amk-probe get svc whoami -o wide
+NAME     TYPE       CLUSTER-IP    EXTERNAL-IP   PORT(S)        AGE   SELECTOR
+whoami   NodePort   10.43.148.9   <none>        80:31180/TCP   2s    app=whoami
+
+# => nodePort=31180, clusterIP=10.43.148.9
+
+## 2. EXTERNAL vantage: curl from 45.233.219.186 to the NodePort
+
+$ curl -m 10 -sv http://144.217.66.212:31180/
+*   Trying 144.217.66.212:31180...
+* Established connection to 144.217.66.212 (144.217.66.212 port 31180) from 192.168.101.7 port 44492
+* using HTTP/1.x
+> GET / HTTP/1.1
+> Host: 144.217.66.212:31180
+> User-Agent: curl/8.21.0
+> Accept: */*
+>
+* Request completely sent off
+< HTTP/1.1 200 OK
+< Date: Sat, 15 Aug 2026 05:50:11 GMT
+< Content-Length: 216
+< Content-Type: text/plain; charset=utf-8
+<
+Hostname: whoami-75f67fdff4-lsfpk
+IP: 127.0.0.1
+IP: ::1
+IP: 10.42.0.77
+IP: fe80::fc5f:6ff:fe65:5c7a
+RemoteAddr: 45.233.219.186:1027
+GET / HTTP/1.1
+Host: 144.217.66.212:31180
+User-Agent: curl/8.21.0
+Accept: */*
+
+EXIT=0
+
+# => Pod saw RemoteAddr 45.233.219.186 — the client's REAL public IP, unaltered.
+#    (Client was behind LAN NAT 192.168.101.7 -> 45.233.219.186; the public IP is what arrived.)
+#    NodePort 31180 was reachable from outside with no exposure.toml change — host firewall did not block it.
+
+## 3a. Contrast: curl NodePort from the server host itself
+
+$ ssh root@144.217.66.212 'curl -m 10 -s http://144.217.66.212:31180/'
+Hostname: whoami-75f67fdff4-lsfpk
+IP: 127.0.0.1
+IP: ::1
+IP: 10.42.0.77
+IP: fe80::fc5f:6ff:fe65:5c7a
+RemoteAddr: 10.42.0.1:64993
+GET / HTTP/1.1
+Host: 144.217.66.212:31180
+User-Agent: curl/8.21.0
+Accept: */*
+
+EXIT=0
+
+# => Host-originated traffic is SNATed to the CNI bridge gateway 10.42.0.1 (expected: ETP Local
+#    exempts only externally-sourced traffic; host/hairpin traffic still masquerades).
+
+## 3b. Contrast: curl ClusterIP from an in-cluster pod
+
+$ kubectl run probe-client --image=curlimages/curl --rm -i --restart=Never -n amk-probe -- curl -s -m 10 http://10.43.148.9/
+warning: couldn't attach to pod/probe-client, falling back to streaming logs: Internal error occurred: unable to upgrade connection: container probe-client not found in pod probe-client_amk-probe
+Hostname: whoami-75f67fdff4-lsfpk
+IP: 127.0.0.1
+IP: ::1
+IP: 10.42.0.77
+IP: fe80::fc5f:6ff:fe65:5c7a
+RemoteAddr: 10.42.0.78:36100
+GET / HTTP/1.1
+Host: 10.43.148.9
+User-Agent: curl/8.21.0
+Accept: */*
+
+pod "probe-client" deleted
+EXIT=0
+
+# => Pod-to-ClusterIP shows the client pod's own IP 10.42.0.78 (no SNAT pod-to-pod).
+#    (The "couldn't attach" warning is cosmetic; kubectl fell back to streaming logs.)
+
+## 4. VERDICT
+
+PROVEN. An external client's real public IP (45.233.219.186) reached the whoami pod unaltered
+through the externalTrafficPolicy: Local NodePort (31180) on the production single-node k3s at
+144.217.66.212. RemoteAddr in the pod = 45.233.219.186:1027. The NodePort was also reachable
+from the internet as-is (no exposure.toml entry needed for this port during the probe window).
+A5 is CLOSED positive: ETP-Local NodePort preserves source IP; the P6 Multus /32 fallback is
+NOT required on source-IP grounds.
+
+Caveats observed:
+- Host-originated (hairpin) connections to the NodePort are still SNATed (10.42.0.1) — expected.
+- Preservation applies because the single node always hosts the pod; ETP Local would drop traffic
+  on a node without a local endpoint (irrelevant here: single-node cluster).
+
+## 5. Cleanup
+
+$ ssh root@144.217.66.212 'kubectl delete ns amk-probe --timeout=120s; kubectl get ns amk-probe'
+namespace "amk-probe" deleted
+DELETE_EXIT=0
+Error from server (NotFound): namespaces "amk-probe" not found
+
+# => Namespace fully removed; NotFound confirms nothing left behind. No other namespace,
+#    firewall, or netpolicy config was touched.

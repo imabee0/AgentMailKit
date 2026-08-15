@@ -1,0 +1,24 @@
+ITEM A10 case (b) — subject IDENTICAL to case (a), NO In-Reply-To/References, DIFFERENT From
+Question: does subject alone group, or is correspondent overlap required?
+Captured 2026-08-15. RUN = d64ee47e. Inbox amk-probe@agentmail.to.
+
+--- SEND ---
+python3 /root/amksend.py --mailfrom bob@other.test \
+  --headerfrom "Bob Other <bob@other.test>" \
+  --subject "AMKthreadA d64ee47e" --messageid "<b-d64ee47e@other.test>"
+SMTP: 250 OK jgl8ir38pg3ofvd0aoo6kl5j5n651n7au57troo1
+
+--- OBSERVED (verbatim webhook message object) ---
+{"message_id":"<b-d64ee47e@other.test>","subject":"AMKthreadA d64ee47e",
+ "from":"Bob Other <bob@other.test>","labels":["received","unread","unauthenticated"],
+ "thread_id":"d563dfe0-5a06-4c04-9391-398f49abe673",
+ "headers":{"Authentication-Results":"amazonses.com; spf=none ... domain of other.test ... dmarc=none header.from=other.test;"}}
+
+RESULT:
+  case (a) root  subject "AMKthreadA d64ee47e"  from alice@probe.test  -> thread 23d8a68d
+  case (b)       subject "AMKthreadA d64ee47e"  from bob@other.test    -> thread d563dfe0-5a06-4c04-9391-398f49abe673  (DIFFERENT)
+
+OBSERVED: EXACT-same subject but different From and no References -> NEW, separate thread.
+=> Subject alone does NOT group. (And per cases c/d/f below, subject alone does not group
+   even when the From/correspondent IS the same — so correspondent overlap is neither
+   sufficient nor necessary; only an In-Reply-To/References header chain groups.)

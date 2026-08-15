@@ -1,0 +1,24 @@
+# Fixture 09 — event payloads (A9). Live, captured at a webhook.site 200 sink.
+# Envelope for all: {"type":"event","event_type":<name>,"event_id":<id>,<payload-key>:{...}}
+
+## event_id has TWO observed formats (NOT uniform across event types):
+#   message.delivered event_id = c8f7d8c0-e40c-45eb-8fc9-491127a619a2   (UUID v4)
+#   message.sent      event_id = 1a030f46544cd4764b70e51e3cdff899       (32 hex, no dashes)
+# => amk must not assume a single event_id format; match per event type or accept both.
+
+## message.sent  (payload key: "send")
+{"type":"event","event_type":"message.sent","event_id":"1a030f46544cd4764b70e51e3cdff899",
+ "send":{"organization_id":"133c9cbe-...","pod_id":"9047724b-...","inbox_id":"amk-probe@agentmail.to",
+         "thread_id":"5d52b0ae-...","message_id":"<...@email.amazonses.com>",
+         "recipients":["amk-probe@agentmail.to"],"timestamp":"2026-08-15T05:44:16.768Z"}}
+
+## message.delivered  (payload key: "delivery")
+{"type":"event","event_type":"message.delivered","event_id":"c8f7d8c0-e40c-45eb-8fc9-491127a619a2",
+ "delivery":{"organization_id":"133c9cbe-...","pod_id":"9047724b-...","inbox_id":"amk-probe@agentmail.to",
+             "thread_id":"5d52b0ae-...","message_id":"<...@email.amazonses.com>",
+             "recipients":["amk-probe@agentmail.to"],"timestamp":"2026-08-15T05:44:17.422Z"}}
+
+# NOTE: send/delivery objects include organization_id + pod_id (extra vs SDK types) — amk must emit them.
+# STILL OPEN (need external inbound; delegated to swaks subagent):
+#   message.received (+.unauthenticated variant -> A14), message.bounced, message.rejected.
+#   message.complained -> A11 (needs the FBL flow; blocked on user's Outlook address).

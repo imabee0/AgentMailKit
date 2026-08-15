@@ -1,0 +1,2578 @@
+C1-domain-shape.txt — Domain model pinned from desk sources ONLY.
+Evidence class: [SPEC:*] throughout — no live observation exists by design (Decision D1).
+Captured 2026-08-15. Each block labeled with its source, content verbatim/unsummarized.
+
+==============================================================================
+BLOCK 1 — [SPEC:openapi] https://docs.agentmail.to/openapi.json (sha of local copy below)
+==============================================================================
+
+-- components.schemas matching 'domain' (16):
+
+### type_domains:ClientId
+{
+  "type": "string",
+  "description": "Client ID of domain.",
+  "title": "ClientId"
+}
+
+### type_domains:CreateDomainRequest
+{
+  "type": "object",
+  "properties": {
+    "domain": {
+      "$ref": "#/components/schemas/type_domains:DomainName"
+    },
+    "feedback_enabled": {
+      "$ref": "#/components/schemas/type_domains:FeedbackEnabled"
+    },
+    "subdomains_enabled": {
+      "$ref": "#/components/schemas/type_domains:SubdomainsEnabled"
+    }
+  },
+  "required": [
+    "domain"
+  ],
+  "title": "CreateDomainRequest"
+}
+
+### type_domains:Domain
+{
+  "type": "object",
+  "properties": {
+    "pod_id": {
+      "$ref": "#/components/schemas/type_pods:PodId"
+    },
+    "domain_id": {
+      "$ref": "#/components/schemas/type_domains:DomainId"
+    },
+    "domain": {
+      "$ref": "#/components/schemas/type_domains:DomainName"
+    },
+    "status": {
+      "$ref": "#/components/schemas/type_domains:Status"
+    },
+    "feedback_enabled": {
+      "$ref": "#/components/schemas/type_domains:FeedbackEnabled"
+    },
+    "subdomains_enabled": {
+      "$ref": "#/components/schemas/type_domains:SubdomainsEnabled"
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/type_domains:VerificationRecord"
+      },
+      "description": "A list of DNS records required to verify the domain. Includes a\nwildcard MX record (`*.<domain>`) when `subdomains_enabled` is true."
+    },
+    "client_id": {
+      "$ref": "#/components/schemas/type_domains:ClientId"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Time at which the domain was last updated."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Time at which the domain was created."
+    }
+  },
+  "required": [
+    "domain_id",
+    "domain",
+    "status",
+    "feedback_enabled",
+    "subdomains_enabled",
+    "records",
+    "updated_at",
+    "created_at"
+  ],
+  "title": "Domain"
+}
+
+### type_domains:DomainId
+{
+  "type": "string",
+  "description": "The ID of the domain.",
+  "title": "DomainId"
+}
+
+### type_domains:DomainItem
+{
+  "type": "object",
+  "properties": {
+    "pod_id": {
+      "$ref": "#/components/schemas/type_pods:PodId"
+    },
+    "domain_id": {
+      "$ref": "#/components/schemas/type_domains:DomainId"
+    },
+    "domain": {
+      "$ref": "#/components/schemas/type_domains:DomainName"
+    },
+    "feedback_enabled": {
+      "$ref": "#/components/schemas/type_domains:FeedbackEnabled"
+    },
+    "subdomains_enabled": {
+      "$ref": "#/components/schemas/type_domains:SubdomainsEnabled"
+    },
+    "client_id": {
+      "$ref": "#/components/schemas/type_domains:ClientId"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Time at which the domain was last updated."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Time at which the domain was created."
+    }
+  },
+  "required": [
+    "domain_id",
+    "domain",
+    "feedback_enabled",
+    "subdomains_enabled",
+    "updated_at",
+    "created_at"
+  ],
+  "title": "DomainItem"
+}
+
+### type_domains:DomainName
+{
+  "type": "string",
+  "description": "The name of the domain (e.g., `example.com`).",
+  "title": "DomainName"
+}
+
+### type_domains:FeedbackEnabled
+{
+  "type": "boolean",
+  "description": "Bounce and complaint notifications are sent to your inboxes.",
+  "title": "FeedbackEnabled"
+}
+
+### type_domains:ListDomainsResponse
+{
+  "type": "object",
+  "properties": {
+    "count": {
+      "$ref": "#/components/schemas/type_:Count"
+    },
+    "limit": {
+      "$ref": "#/components/schemas/type_:Limit"
+    },
+    "next_page_token": {
+      "$ref": "#/components/schemas/type_:PageToken"
+    },
+    "domains": {
+      "type": "array",
+      "items": {
+        "$ref": "#/components/schemas/type_domains:DomainItem"
+      },
+      "description": "Ordered by `created_at` descending."
+    }
+  },
+  "required": [
+    "count",
+    "domains"
+  ],
+  "title": "ListDomainsResponse"
+}
+
+### type_domains:RecordStatus
+{
+  "type": "string",
+  "enum": [
+    "MISSING",
+    "INVALID",
+    "VALID"
+  ],
+  "title": "RecordStatus"
+}
+
+### type_domains:RecordType
+{
+  "type": "string",
+  "enum": [
+    "TXT",
+    "CNAME",
+    "MX"
+  ],
+  "title": "RecordType"
+}
+
+### type_domains:Status
+{
+  "$ref": "#/components/schemas/type_domains:VerificationStatus",
+  "description": "The verification status of the domain.",
+  "title": "Status"
+}
+
+### type_domains:SubdomainsEnabled
+{
+  "type": "boolean",
+  "description": "Allow inboxes on any subdomain of this domain. Adds a required wildcard MX\nrecord (`*.<domain>`) to `records`.",
+  "title": "SubdomainsEnabled"
+}
+
+### type_domains:UpdateDomainRequest
+{
+  "type": "object",
+  "properties": {
+    "feedback_enabled": {
+      "$ref": "#/components/schemas/type_domains:FeedbackEnabled"
+    },
+    "subdomains_enabled": {
+      "$ref": "#/components/schemas/type_domains:SubdomainsEnabled"
+    }
+  },
+  "description": "Provide at least one of `feedback_enabled` or `subdomains_enabled`. Omitted\nfields are left unchanged; an empty body is rejected. Enabling\n`subdomains_enabled` on a verified domain returns it to `PENDING` until the\nnewly-required wildcard MX record (`*.<domain>`) is published and verified.",
+  "title": "UpdateDomainRequest"
+}
+
+### type_domains:VerificationRecord
+{
+  "type": "object",
+  "properties": {
+    "type": {
+      "$ref": "#/components/schemas/type_domains:RecordType",
+      "description": "The type of the DNS record."
+    },
+    "name": {
+      "type": "string",
+      "description": "The name or host of the record."
+    },
+    "value": {
+      "type": "string",
+      "description": "The value of the record."
+    },
+    "status": {
+      "$ref": "#/components/schemas/type_domains:RecordStatus",
+      "description": "The verification status of this specific record."
+    },
+    "priority": {
+      "type": "integer",
+      "description": "The priority of the MX record."
+    }
+  },
+  "required": [
+    "type",
+    "name",
+    "value",
+    "status"
+  ],
+  "title": "VerificationRecord"
+}
+
+### type_domains:VerificationStatus
+{
+  "type": "string",
+  "enum": [
+    "NOT_STARTED",
+    "PENDING",
+    "INVALID",
+    "FAILED",
+    "VERIFYING",
+    "VERIFIED"
+  ],
+  "title": "VerificationStatus"
+}
+
+### type_events:DomainVerifiedEvent
+{
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "event"
+      ]
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "domain.verified"
+      ]
+    },
+    "event_id": {
+      "$ref": "#/components/schemas/type_events:EventId"
+    },
+    "domain": {
+      "$ref": "#/components/schemas/type_domains:Domain"
+    }
+  },
+  "required": [
+    "type",
+    "event_type",
+    "event_id",
+    "domain"
+  ],
+  "title": "DomainVerifiedEvent"
+}
+
+
+-- webhooks['domain-verified'] (verbatim):
+
+{
+  "post": {
+    "operationId": "domain-verified",
+    "summary": "Domain Verified",
+    "parameters": [
+      {
+        "name": "svix-id",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_webhooks/events:SvixId"
+        }
+      },
+      {
+        "name": "svix-signature",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_webhooks/events:SvixSignature"
+        }
+      },
+      {
+        "name": "svix-timestamp",
+        "in": "header",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_webhooks/events:SvixTimestamp"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Webhook received successfully"
+      }
+    },
+    "requestBody": {
+      "content": {
+        "application/json": {
+          "schema": {
+            "$ref": "#/components/schemas/type_events:DomainVerifiedEvent"
+          }
+        }
+      }
+    }
+  }
+}
+
+-- paths containing /domains (8), verbatim:
+
+### /v0/domains
+{
+  "get": {
+    "operationId": "list",
+    "summary": "List Domains",
+    "description": "**CLI:**\n```bash\nagentmail domains list\n```",
+    "tags": [
+      "domains"
+    ],
+    "parameters": [
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "$ref": "#/components/schemas/type_:Limit"
+        }
+      },
+      {
+        "name": "page_token",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "$ref": "#/components/schemas/type_:PageToken"
+        }
+      },
+      {
+        "name": "ascending",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "$ref": "#/components/schemas/type_:Ascending"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_domains:ListDomainsResponse"
+            }
+          }
+        }
+      }
+    }
+  },
+  "post": {
+    "operationId": "create",
+    "summary": "Create Domain",
+    "description": "**CLI:**\n```bash\nagentmail domains create --domain example.com\n```",
+    "tags": [
+      "domains"
+    ],
+    "parameters": [
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_domains:Domain"
+            }
+          }
+        }
+      },
+      "400": {
+        "description": "Error response with status 400",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ValidationErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "requestBody": {
+      "content": {
+        "application/json": {
+          "schema": {
+            "$ref": "#/components/schemas/type_domains:CreateDomainRequest"
+          }
+        }
+      }
+    }
+  }
+}
+
+### /v0/domains/{domain_id}
+{
+  "get": {
+    "operationId": "get",
+    "summary": "Get Domain",
+    "description": "**CLI:**\n```bash\nagentmail domains get --domain-id <domain_id>\n```",
+    "tags": [
+      "domains"
+    ],
+    "parameters": [
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_domains:Domain"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  },
+  "patch": {
+    "operationId": "update",
+    "summary": "Update Domain",
+    "description": "**CLI:**\n```bash\nagentmail domains update --domain-id <domain_id>\n```",
+    "tags": [
+      "domains"
+    ],
+    "parameters": [
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_domains:Domain"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "requestBody": {
+      "content": {
+        "application/json": {
+          "schema": {
+            "$ref": "#/components/schemas/type_domains:UpdateDomainRequest"
+          }
+        }
+      }
+    }
+  },
+  "delete": {
+    "operationId": "delete",
+    "summary": "Delete Domain",
+    "description": "**CLI:**\n```bash\nagentmail domains delete --domain-id <domain_id>\n```",
+    "tags": [
+      "domains"
+    ],
+    "parameters": [
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Successful response"
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+### /v0/domains/{domain_id}/verify
+{
+  "post": {
+    "operationId": "verify",
+    "summary": "Verify Domain",
+    "description": "**CLI:**\n```bash\nagentmail domains verify --domain-id <domain_id>\n```",
+    "tags": [
+      "domains"
+    ],
+    "parameters": [
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Successful response"
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+### /v0/domains/{domain_id}/zone-file
+{
+  "get": {
+    "operationId": "get-zone-file",
+    "summary": "Get Zone File",
+    "description": "**CLI:**\n```bash\nagentmail domains get-zone-file --domain-id <domain_id>\n```",
+    "tags": [
+      "domains"
+    ],
+    "parameters": [
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/octet-stream": {
+            "schema": {
+              "type": "string",
+              "format": "binary"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+### /v0/pods/{pod_id}/domains
+{
+  "get": {
+    "operationId": "list",
+    "summary": "List Domains",
+    "description": "**CLI:**\n```bash\nagentmail pods:domains list --pod-id <pod_id>\n```",
+    "tags": [
+      "pods > domains"
+    ],
+    "parameters": [
+      {
+        "name": "pod_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_pods:PodId"
+        }
+      },
+      {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "$ref": "#/components/schemas/type_:Limit"
+        }
+      },
+      {
+        "name": "page_token",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "$ref": "#/components/schemas/type_:PageToken"
+        }
+      },
+      {
+        "name": "ascending",
+        "in": "query",
+        "required": false,
+        "schema": {
+          "$ref": "#/components/schemas/type_:Ascending"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_domains:ListDomainsResponse"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  },
+  "post": {
+    "operationId": "create",
+    "summary": "Create Domain",
+    "description": "**CLI:**\n```bash\nagentmail pods:domains create --pod-id <pod_id> --domain example.com\n```",
+    "tags": [
+      "pods > domains"
+    ],
+    "parameters": [
+      {
+        "name": "pod_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_pods:PodId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_domains:Domain"
+            }
+          }
+        }
+      },
+      "400": {
+        "description": "Error response with status 400",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ValidationErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "requestBody": {
+      "content": {
+        "application/json": {
+          "schema": {
+            "$ref": "#/components/schemas/type_domains:CreateDomainRequest"
+          }
+        }
+      }
+    }
+  }
+}
+
+### /v0/pods/{pod_id}/domains/{domain_id}
+{
+  "get": {
+    "operationId": "get",
+    "summary": "Get Domain",
+    "description": "**CLI:**\n```bash\nagentmail pods:domains get --pod-id <pod_id> --domain-id <domain_id>\n```",
+    "tags": [
+      "pods > domains"
+    ],
+    "parameters": [
+      {
+        "name": "pod_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_pods:PodId"
+        }
+      },
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_domains:Domain"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  },
+  "patch": {
+    "operationId": "update",
+    "summary": "Update Domain",
+    "description": "**CLI:**\n```bash\nagentmail pods:domains update --pod-id <pod_id> --domain-id <domain_id>\n```",
+    "tags": [
+      "pods > domains"
+    ],
+    "parameters": [
+      {
+        "name": "pod_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_pods:PodId"
+        }
+      },
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_domains:Domain"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "requestBody": {
+      "content": {
+        "application/json": {
+          "schema": {
+            "$ref": "#/components/schemas/type_domains:UpdateDomainRequest"
+          }
+        }
+      }
+    }
+  },
+  "delete": {
+    "operationId": "delete",
+    "summary": "Delete Domain",
+    "description": "**CLI:**\n```bash\nagentmail pods:domains delete --pod-id <pod_id> --domain-id <domain_id>\n```",
+    "tags": [
+      "pods > domains"
+    ],
+    "parameters": [
+      {
+        "name": "pod_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_pods:PodId"
+        }
+      },
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Successful response"
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+### /v0/pods/{pod_id}/domains/{domain_id}/verify
+{
+  "post": {
+    "operationId": "verify",
+    "summary": "Verify Domain",
+    "description": "**CLI:**\n```bash\nagentmail pods:domains verify --pod-id <pod_id> --domain-id <domain_id>\n```",
+    "tags": [
+      "pods > domains"
+    ],
+    "parameters": [
+      {
+        "name": "pod_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_pods:PodId"
+        }
+      },
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Successful response"
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+### /v0/pods/{pod_id}/domains/{domain_id}/zone-file
+{
+  "get": {
+    "operationId": "get-zone-file",
+    "summary": "Get Zone File",
+    "description": "**CLI:**\n```bash\nagentmail pods:domains get-zone-file --pod-id <pod_id> --domain-id <domain_id>\n```",
+    "tags": [
+      "pods > domains"
+    ],
+    "parameters": [
+      {
+        "name": "pod_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_pods:PodId"
+        }
+      },
+      {
+        "name": "domain_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/type_domains:DomainId"
+        }
+      },
+      {
+        "name": "Authorization",
+        "in": "header",
+        "description": "Bearer authentication",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    ],
+    "responses": {
+      "200": {
+        "description": "Response with status 200",
+        "content": {
+          "application/octet-stream": {
+            "schema": {
+              "type": "string",
+              "format": "binary"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Error response with status 404",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/type_:ErrorResponse"
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+==============================================================================
+BLOCK 2 — [SPEC:sdk] agentmail-python v0.5.9 — domain + domain-event typed models (verbatim; generated client plumbing excluded)
+==============================================================================
+
+### FILE: agentmail-python/src/agentmail/domains/types/client_id.py
+# This file was auto-generated by Fern from our API Definition.
+
+ClientId = str
+
+### FILE: agentmail-python/src/agentmail/domains/types/create_domain_request.py
+# This file was auto-generated by Fern from our API Definition.
+
+import typing
+
+import pydantic
+from ...core.pydantic_utilities import IS_PYDANTIC_V2
+from ...core.unchecked_base_model import UncheckedBaseModel
+from .domain_name import DomainName
+from .feedback_enabled import FeedbackEnabled
+from .subdomains_enabled import SubdomainsEnabled
+
+
+class CreateDomainRequest(UncheckedBaseModel):
+    domain: DomainName
+    feedback_enabled: typing.Optional[FeedbackEnabled] = None
+    subdomains_enabled: typing.Optional[SubdomainsEnabled] = None
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+### FILE: agentmail-python/src/agentmail/domains/types/domain_id.py
+# This file was auto-generated by Fern from our API Definition.
+
+DomainId = str
+
+### FILE: agentmail-python/src/agentmail/domains/types/domain_item.py
+# This file was auto-generated by Fern from our API Definition.
+
+import datetime as dt
+import typing
+
+import pydantic
+from ...core.pydantic_utilities import IS_PYDANTIC_V2
+from ...core.unchecked_base_model import UncheckedBaseModel
+from ...pods.types.pod_id import PodId
+from .client_id import ClientId
+from .domain_id import DomainId
+from .domain_name import DomainName
+from .feedback_enabled import FeedbackEnabled
+from .subdomains_enabled import SubdomainsEnabled
+
+
+class DomainItem(UncheckedBaseModel):
+    pod_id: typing.Optional[PodId] = None
+    domain_id: DomainId
+    domain: DomainName
+    feedback_enabled: FeedbackEnabled
+    subdomains_enabled: SubdomainsEnabled
+    client_id: typing.Optional[ClientId] = None
+    updated_at: dt.datetime = pydantic.Field()
+    """
+    Time at which the domain was last updated.
+    """
+
+    created_at: dt.datetime = pydantic.Field()
+    """
+    Time at which the domain was created.
+    """
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+### FILE: agentmail-python/src/agentmail/domains/types/domain_name.py
+# This file was auto-generated by Fern from our API Definition.
+
+DomainName = str
+
+### FILE: agentmail-python/src/agentmail/domains/types/domain.py
+# This file was auto-generated by Fern from our API Definition.
+
+import datetime as dt
+import typing
+
+import pydantic
+from ...core.pydantic_utilities import IS_PYDANTIC_V2
+from ...core.unchecked_base_model import UncheckedBaseModel
+from ...pods.types.pod_id import PodId
+from .client_id import ClientId
+from .domain_id import DomainId
+from .domain_name import DomainName
+from .feedback_enabled import FeedbackEnabled
+from .status import Status
+from .subdomains_enabled import SubdomainsEnabled
+from .verification_record import VerificationRecord
+
+
+class Domain(UncheckedBaseModel):
+    pod_id: typing.Optional[PodId] = None
+    domain_id: DomainId
+    domain: DomainName
+    status: Status
+    feedback_enabled: FeedbackEnabled
+    subdomains_enabled: SubdomainsEnabled
+    records: typing.List[VerificationRecord] = pydantic.Field()
+    """
+    A list of DNS records required to verify the domain. Includes a
+    wildcard MX record (`*.<domain>`) when `subdomains_enabled` is true.
+    """
+
+    client_id: typing.Optional[ClientId] = None
+    updated_at: dt.datetime = pydantic.Field()
+    """
+    Time at which the domain was last updated.
+    """
+
+    created_at: dt.datetime = pydantic.Field()
+    """
+    Time at which the domain was created.
+    """
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+### FILE: agentmail-python/src/agentmail/domains/types/feedback_enabled.py
+# This file was auto-generated by Fern from our API Definition.
+
+FeedbackEnabled = bool
+
+### FILE: agentmail-python/src/agentmail/domains/types/list_domains_response.py
+# This file was auto-generated by Fern from our API Definition.
+
+import typing
+
+import pydantic
+from ...core.pydantic_utilities import IS_PYDANTIC_V2
+from ...core.unchecked_base_model import UncheckedBaseModel
+from ...types.count import Count
+from ...types.limit import Limit
+from ...types.page_token import PageToken
+from .domain_item import DomainItem
+
+
+class ListDomainsResponse(UncheckedBaseModel):
+    count: Count
+    limit: typing.Optional[Limit] = None
+    next_page_token: typing.Optional[PageToken] = None
+    domains: typing.List[DomainItem] = pydantic.Field()
+    """
+    Ordered by `created_at` descending.
+    """
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+### FILE: agentmail-python/src/agentmail/domains/types/record_status.py
+# This file was auto-generated by Fern from our API Definition.
+
+import typing
+
+RecordStatus = typing.Union[typing.Literal["MISSING", "INVALID", "VALID"], typing.Any]
+
+### FILE: agentmail-python/src/agentmail/domains/types/record_type.py
+# This file was auto-generated by Fern from our API Definition.
+
+import typing
+
+RecordType = typing.Union[typing.Literal["TXT", "CNAME", "MX"], typing.Any]
+
+### FILE: agentmail-python/src/agentmail/domains/types/status.py
+# This file was auto-generated by Fern from our API Definition.
+
+from .verification_status import VerificationStatus
+
+Status = VerificationStatus
+
+### FILE: agentmail-python/src/agentmail/domains/types/subdomains_enabled.py
+# This file was auto-generated by Fern from our API Definition.
+
+SubdomainsEnabled = bool
+
+### FILE: agentmail-python/src/agentmail/domains/types/update_domain_request.py
+# This file was auto-generated by Fern from our API Definition.
+
+import typing
+
+import pydantic
+from ...core.pydantic_utilities import IS_PYDANTIC_V2
+from ...core.unchecked_base_model import UncheckedBaseModel
+from .feedback_enabled import FeedbackEnabled
+from .subdomains_enabled import SubdomainsEnabled
+
+
+class UpdateDomainRequest(UncheckedBaseModel):
+    """
+    Provide at least one of `feedback_enabled` or `subdomains_enabled`. Omitted
+    fields are left unchanged; an empty body is rejected. Enabling
+    `subdomains_enabled` on a verified domain returns it to `PENDING` until the
+    newly-required wildcard MX record (`*.<domain>`) is published and verified.
+    """
+
+    feedback_enabled: typing.Optional[FeedbackEnabled] = None
+    subdomains_enabled: typing.Optional[SubdomainsEnabled] = None
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+### FILE: agentmail-python/src/agentmail/domains/types/verification_record.py
+# This file was auto-generated by Fern from our API Definition.
+
+import typing
+
+import pydantic
+from ...core.pydantic_utilities import IS_PYDANTIC_V2
+from ...core.unchecked_base_model import UncheckedBaseModel
+from .record_status import RecordStatus
+from .record_type import RecordType
+
+
+class VerificationRecord(UncheckedBaseModel):
+    type: RecordType = pydantic.Field()
+    """
+    The type of the DNS record.
+    """
+
+    name: str = pydantic.Field()
+    """
+    The name or host of the record.
+    """
+
+    value: str = pydantic.Field()
+    """
+    The value of the record.
+    """
+
+    status: RecordStatus = pydantic.Field()
+    """
+    The verification status of this specific record.
+    """
+
+    priority: typing.Optional[int] = pydantic.Field(default=None)
+    """
+    The priority of the MX record.
+    """
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+### FILE: agentmail-python/src/agentmail/domains/types/verification_status.py
+# This file was auto-generated by Fern from our API Definition.
+
+import typing
+
+VerificationStatus = typing.Union[
+    typing.Literal["NOT_STARTED", "PENDING", "INVALID", "FAILED", "VERIFYING", "VERIFIED"], typing.Any
+]
+
+### FILE: agentmail-python/src/agentmail/events/types/domain_verified_event.py
+# This file was auto-generated by Fern from our API Definition.
+
+import typing
+
+import pydantic
+from ...core.pydantic_utilities import IS_PYDANTIC_V2
+from ...core.unchecked_base_model import UncheckedBaseModel
+from ...domains.types.domain import Domain
+from .event_id import EventId
+
+
+class DomainVerifiedEvent(UncheckedBaseModel):
+    type: typing.Literal["event"] = "event"
+    event_type: typing.Literal["domain.verified"] = "domain.verified"
+    event_id: EventId
+    domain: Domain
+
+    if IS_PYDANTIC_V2:
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(extra="allow", frozen=True)  # type: ignore # Pydantic v2
+    else:
+
+        class Config:
+            frozen = True
+            smart_union = True
+            extra = pydantic.Extra.allow
+
+==============================================================================
+BLOCK 3 — [SPEC:sdk] agentmail-node v0.5.19 — domain + domain-event typed models AND wire serialization (verbatim)
+==============================================================================
+
+### FILE: agentmail-node/src/api/resources/domains/types/ClientId.ts
+// This file was auto-generated by Fern from our API Definition.
+
+/**
+ * Client ID of domain.
+ */
+export type ClientId = string;
+
+### FILE: agentmail-node/src/api/resources/domains/types/CreateDomainRequest.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../index.js";
+
+export interface CreateDomainRequest {
+    domain: AgentMail.DomainName;
+    feedbackEnabled?: AgentMail.FeedbackEnabled;
+    subdomainsEnabled?: AgentMail.SubdomainsEnabled;
+}
+
+### FILE: agentmail-node/src/api/resources/domains/types/DomainId.ts
+// This file was auto-generated by Fern from our API Definition.
+
+/**
+ * The ID of the domain.
+ */
+export type DomainId = string;
+
+### FILE: agentmail-node/src/api/resources/domains/types/DomainItem.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../index.js";
+
+export interface DomainItem {
+    podId?: AgentMail.pods.PodId;
+    domainId: AgentMail.DomainId;
+    domain: AgentMail.DomainName;
+    feedbackEnabled: AgentMail.FeedbackEnabled;
+    subdomainsEnabled: AgentMail.SubdomainsEnabled;
+    clientId?: AgentMail.ClientId;
+    /** Time at which the domain was last updated. */
+    updatedAt: Date;
+    /** Time at which the domain was created. */
+    createdAt: Date;
+}
+
+### FILE: agentmail-node/src/api/resources/domains/types/DomainName.ts
+// This file was auto-generated by Fern from our API Definition.
+
+/**
+ * The name of the domain (e.g., `example.com`).
+ */
+export type DomainName = string;
+
+### FILE: agentmail-node/src/api/resources/domains/types/Domain.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../index.js";
+
+export interface Domain {
+    podId?: AgentMail.pods.PodId;
+    domainId: AgentMail.DomainId;
+    domain: AgentMail.DomainName;
+    status: AgentMail.Status;
+    feedbackEnabled: AgentMail.FeedbackEnabled;
+    subdomainsEnabled: AgentMail.SubdomainsEnabled;
+    /**
+     * A list of DNS records required to verify the domain. Includes a
+     * wildcard MX record (`*.<domain>`) when `subdomains_enabled` is true.
+     */
+    records: AgentMail.VerificationRecord[];
+    clientId?: AgentMail.ClientId;
+    /** Time at which the domain was last updated. */
+    updatedAt: Date;
+    /** Time at which the domain was created. */
+    createdAt: Date;
+}
+
+### FILE: agentmail-node/src/api/resources/domains/types/FeedbackEnabled.ts
+// This file was auto-generated by Fern from our API Definition.
+
+/**
+ * Bounce and complaint notifications are sent to your inboxes.
+ */
+export type FeedbackEnabled = boolean;
+
+### FILE: agentmail-node/src/api/resources/domains/types/ListDomainsResponse.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../index.js";
+
+export interface ListDomainsResponse {
+    count: AgentMail.Count;
+    limit?: AgentMail.Limit;
+    nextPageToken?: AgentMail.PageToken;
+    /** Ordered by `created_at` descending. */
+    domains: AgentMail.DomainItem[];
+}
+
+### FILE: agentmail-node/src/api/resources/domains/types/RecordStatus.ts
+// This file was auto-generated by Fern from our API Definition.
+
+export const RecordStatus = {
+    Missing: "MISSING",
+    Invalid: "INVALID",
+    Valid: "VALID",
+} as const;
+export type RecordStatus = (typeof RecordStatus)[keyof typeof RecordStatus];
+
+### FILE: agentmail-node/src/api/resources/domains/types/RecordType.ts
+// This file was auto-generated by Fern from our API Definition.
+
+export const RecordType = {
+    Txt: "TXT",
+    Cname: "CNAME",
+    Mx: "MX",
+} as const;
+export type RecordType = (typeof RecordType)[keyof typeof RecordType];
+
+### FILE: agentmail-node/src/api/resources/domains/types/Status.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../index.js";
+
+/**
+ * The verification status of the domain.
+ */
+export type Status = AgentMail.VerificationStatus;
+
+### FILE: agentmail-node/src/api/resources/domains/types/SubdomainsEnabled.ts
+// This file was auto-generated by Fern from our API Definition.
+
+/**
+ * Allow inboxes on any subdomain of this domain. Adds a required wildcard MX
+ * record (`*.<domain>`) to `records`.
+ */
+export type SubdomainsEnabled = boolean;
+
+### FILE: agentmail-node/src/api/resources/domains/types/UpdateDomainRequest.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../index.js";
+
+/**
+ * Provide at least one of `feedback_enabled` or `subdomains_enabled`. Omitted
+ * fields are left unchanged; an empty body is rejected. Enabling
+ * `subdomains_enabled` on a verified domain returns it to `PENDING` until the
+ * newly-required wildcard MX record (`*.<domain>`) is published and verified.
+ */
+export interface UpdateDomainRequest {
+    feedbackEnabled?: AgentMail.FeedbackEnabled;
+    subdomainsEnabled?: AgentMail.SubdomainsEnabled;
+}
+
+### FILE: agentmail-node/src/api/resources/domains/types/VerificationRecord.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../index.js";
+
+export interface VerificationRecord {
+    /** The type of the DNS record. */
+    type: AgentMail.RecordType;
+    /** The name or host of the record. */
+    name: string;
+    /** The value of the record. */
+    value: string;
+    /** The verification status of this specific record. */
+    status: AgentMail.RecordStatus;
+    /** The priority of the MX record. */
+    priority?: number;
+}
+
+### FILE: agentmail-node/src/api/resources/domains/types/VerificationStatus.ts
+// This file was auto-generated by Fern from our API Definition.
+
+export const VerificationStatus = {
+    NotStarted: "NOT_STARTED",
+    Pending: "PENDING",
+    Invalid: "INVALID",
+    Failed: "FAILED",
+    Verifying: "VERIFYING",
+    Verified: "VERIFIED",
+} as const;
+export type VerificationStatus = (typeof VerificationStatus)[keyof typeof VerificationStatus];
+
+### FILE: agentmail-node/src/api/resources/events/types/DomainVerifiedEvent.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../index.js";
+
+export interface DomainVerifiedEvent {
+    type: "event";
+    eventType: "domain.verified";
+    eventId: AgentMail.EventId;
+    domain: AgentMail.Domain;
+}
+
+### FILE: agentmail-node/src/serialization/resources/events/types/DomainVerifiedEvent.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+import { Domain } from "../../domains/types/Domain.js";
+import { EventId } from "./EventId.js";
+
+export const DomainVerifiedEvent: core.serialization.ObjectSchema<
+    serializers.DomainVerifiedEvent.Raw,
+    AgentMail.DomainVerifiedEvent
+> = core.serialization.object({
+    type: core.serialization.stringLiteral("event"),
+    eventType: core.serialization.property("event_type", core.serialization.stringLiteral("domain.verified")),
+    eventId: core.serialization.property("event_id", EventId),
+    domain: Domain,
+});
+
+export declare namespace DomainVerifiedEvent {
+    export interface Raw {
+        type: "event";
+        event_type: "domain.verified";
+        event_id: EventId.Raw;
+        domain: Domain.Raw;
+    }
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/ClientId.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+
+export const ClientId: core.serialization.Schema<serializers.ClientId.Raw, AgentMail.ClientId> =
+    core.serialization.string();
+
+export declare namespace ClientId {
+    export type Raw = string;
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/CreateDomainRequest.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+import { DomainName } from "./DomainName.js";
+import { FeedbackEnabled } from "./FeedbackEnabled.js";
+import { SubdomainsEnabled } from "./SubdomainsEnabled.js";
+
+export const CreateDomainRequest: core.serialization.ObjectSchema<
+    serializers.CreateDomainRequest.Raw,
+    AgentMail.CreateDomainRequest
+> = core.serialization.object({
+    domain: DomainName,
+    feedbackEnabled: core.serialization.property("feedback_enabled", FeedbackEnabled.optional()),
+    subdomainsEnabled: core.serialization.property("subdomains_enabled", SubdomainsEnabled.optional()),
+});
+
+export declare namespace CreateDomainRequest {
+    export interface Raw {
+        domain: DomainName.Raw;
+        feedback_enabled?: FeedbackEnabled.Raw | null;
+        subdomains_enabled?: SubdomainsEnabled.Raw | null;
+    }
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/DomainId.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+
+export const DomainId: core.serialization.Schema<serializers.DomainId.Raw, AgentMail.DomainId> =
+    core.serialization.string();
+
+export declare namespace DomainId {
+    export type Raw = string;
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/DomainItem.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+import { PodId } from "../../pods/types/PodId.js";
+import { ClientId } from "./ClientId.js";
+import { DomainId } from "./DomainId.js";
+import { DomainName } from "./DomainName.js";
+import { FeedbackEnabled } from "./FeedbackEnabled.js";
+import { SubdomainsEnabled } from "./SubdomainsEnabled.js";
+
+export const DomainItem: core.serialization.ObjectSchema<serializers.DomainItem.Raw, AgentMail.DomainItem> =
+    core.serialization.object({
+        podId: core.serialization.property("pod_id", PodId.optional()),
+        domainId: core.serialization.property("domain_id", DomainId),
+        domain: DomainName,
+        feedbackEnabled: core.serialization.property("feedback_enabled", FeedbackEnabled),
+        subdomainsEnabled: core.serialization.property("subdomains_enabled", SubdomainsEnabled),
+        clientId: core.serialization.property("client_id", ClientId.optional()),
+        updatedAt: core.serialization.property("updated_at", core.serialization.date()),
+        createdAt: core.serialization.property("created_at", core.serialization.date()),
+    });
+
+export declare namespace DomainItem {
+    export interface Raw {
+        pod_id?: PodId.Raw | null;
+        domain_id: DomainId.Raw;
+        domain: DomainName.Raw;
+        feedback_enabled: FeedbackEnabled.Raw;
+        subdomains_enabled: SubdomainsEnabled.Raw;
+        client_id?: ClientId.Raw | null;
+        updated_at: string;
+        created_at: string;
+    }
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/DomainName.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+
+export const DomainName: core.serialization.Schema<serializers.DomainName.Raw, AgentMail.DomainName> =
+    core.serialization.string();
+
+export declare namespace DomainName {
+    export type Raw = string;
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/Domain.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+import { PodId } from "../../pods/types/PodId.js";
+import { ClientId } from "./ClientId.js";
+import { DomainId } from "./DomainId.js";
+import { DomainName } from "./DomainName.js";
+import { FeedbackEnabled } from "./FeedbackEnabled.js";
+import { Status } from "./Status.js";
+import { SubdomainsEnabled } from "./SubdomainsEnabled.js";
+import { VerificationRecord } from "./VerificationRecord.js";
+
+export const Domain: core.serialization.ObjectSchema<serializers.Domain.Raw, AgentMail.Domain> =
+    core.serialization.object({
+        podId: core.serialization.property("pod_id", PodId.optional()),
+        domainId: core.serialization.property("domain_id", DomainId),
+        domain: DomainName,
+        status: Status,
+        feedbackEnabled: core.serialization.property("feedback_enabled", FeedbackEnabled),
+        subdomainsEnabled: core.serialization.property("subdomains_enabled", SubdomainsEnabled),
+        records: core.serialization.list(VerificationRecord),
+        clientId: core.serialization.property("client_id", ClientId.optional()),
+        updatedAt: core.serialization.property("updated_at", core.serialization.date()),
+        createdAt: core.serialization.property("created_at", core.serialization.date()),
+    });
+
+export declare namespace Domain {
+    export interface Raw {
+        pod_id?: PodId.Raw | null;
+        domain_id: DomainId.Raw;
+        domain: DomainName.Raw;
+        status: Status.Raw;
+        feedback_enabled: FeedbackEnabled.Raw;
+        subdomains_enabled: SubdomainsEnabled.Raw;
+        records: VerificationRecord.Raw[];
+        client_id?: ClientId.Raw | null;
+        updated_at: string;
+        created_at: string;
+    }
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/FeedbackEnabled.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+
+export const FeedbackEnabled: core.serialization.Schema<serializers.FeedbackEnabled.Raw, AgentMail.FeedbackEnabled> =
+    core.serialization.boolean();
+
+export declare namespace FeedbackEnabled {
+    export type Raw = boolean;
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/ListDomainsResponse.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+import { Count } from "../../../types/Count.js";
+import { Limit } from "../../../types/Limit.js";
+import { PageToken } from "../../../types/PageToken.js";
+import { DomainItem } from "./DomainItem.js";
+
+export const ListDomainsResponse: core.serialization.ObjectSchema<
+    serializers.ListDomainsResponse.Raw,
+    AgentMail.ListDomainsResponse
+> = core.serialization.object({
+    count: Count,
+    limit: Limit.optional(),
+    nextPageToken: core.serialization.property("next_page_token", PageToken.optional()),
+    domains: core.serialization.list(DomainItem),
+});
+
+export declare namespace ListDomainsResponse {
+    export interface Raw {
+        count: Count.Raw;
+        limit?: Limit.Raw | null;
+        next_page_token?: PageToken.Raw | null;
+        domains: DomainItem.Raw[];
+    }
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/RecordStatus.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+
+export const RecordStatus: core.serialization.Schema<serializers.RecordStatus.Raw, AgentMail.RecordStatus> =
+    core.serialization.enum_(["MISSING", "INVALID", "VALID"]);
+
+export declare namespace RecordStatus {
+    export type Raw = "MISSING" | "INVALID" | "VALID";
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/RecordType.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+
+export const RecordType: core.serialization.Schema<serializers.RecordType.Raw, AgentMail.RecordType> =
+    core.serialization.enum_(["TXT", "CNAME", "MX"]);
+
+export declare namespace RecordType {
+    export type Raw = "TXT" | "CNAME" | "MX";
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/Status.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import type * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+import { VerificationStatus } from "./VerificationStatus.js";
+
+export const Status: core.serialization.Schema<serializers.Status.Raw, AgentMail.Status> = VerificationStatus;
+
+export declare namespace Status {
+    export type Raw = VerificationStatus.Raw;
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/SubdomainsEnabled.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+
+export const SubdomainsEnabled: core.serialization.Schema<
+    serializers.SubdomainsEnabled.Raw,
+    AgentMail.SubdomainsEnabled
+> = core.serialization.boolean();
+
+export declare namespace SubdomainsEnabled {
+    export type Raw = boolean;
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/UpdateDomainRequest.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+import { FeedbackEnabled } from "./FeedbackEnabled.js";
+import { SubdomainsEnabled } from "./SubdomainsEnabled.js";
+
+export const UpdateDomainRequest: core.serialization.ObjectSchema<
+    serializers.UpdateDomainRequest.Raw,
+    AgentMail.UpdateDomainRequest
+> = core.serialization.object({
+    feedbackEnabled: core.serialization.property("feedback_enabled", FeedbackEnabled.optional()),
+    subdomainsEnabled: core.serialization.property("subdomains_enabled", SubdomainsEnabled.optional()),
+});
+
+export declare namespace UpdateDomainRequest {
+    export interface Raw {
+        feedback_enabled?: FeedbackEnabled.Raw | null;
+        subdomains_enabled?: SubdomainsEnabled.Raw | null;
+    }
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/VerificationRecord.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+import { RecordStatus } from "./RecordStatus.js";
+import { RecordType } from "./RecordType.js";
+
+export const VerificationRecord: core.serialization.ObjectSchema<
+    serializers.VerificationRecord.Raw,
+    AgentMail.VerificationRecord
+> = core.serialization.object({
+    type: RecordType,
+    name: core.serialization.string(),
+    value: core.serialization.string(),
+    status: RecordStatus,
+    priority: core.serialization.number().optional(),
+});
+
+export declare namespace VerificationRecord {
+    export interface Raw {
+        type: RecordType.Raw;
+        name: string;
+        value: string;
+        status: RecordStatus.Raw;
+        priority?: number | null;
+    }
+}
+
+### FILE: agentmail-node/src/serialization/resources/domains/types/VerificationStatus.ts
+// This file was auto-generated by Fern from our API Definition.
+
+import type * as AgentMail from "../../../../api/index.js";
+import * as core from "../../../../core/index.js";
+import type * as serializers from "../../../index.js";
+
+export const VerificationStatus: core.serialization.Schema<
+    serializers.VerificationStatus.Raw,
+    AgentMail.VerificationStatus
+> = core.serialization.enum_(["NOT_STARTED", "PENDING", "INVALID", "FAILED", "VERIFYING", "VERIFIED"]);
+
+export declare namespace VerificationStatus {
+    export type Raw = "NOT_STARTED" | "PENDING" | "INVALID" | "FAILED" | "VERIFYING" | "VERIFIED";
+}
+
+==============================================================================
+BLOCK 4 — [SPEC:docs] https://docs.agentmail.to/custom-domains.md (verbatim, fetched 2026-08-15)
+==============================================================================
+> For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.agentmail.to/llms.txt. For full content including API reference and SDK examples, see https://docs.agentmail.to/llms-full.txt.
+
+# Using Custom Domains
+
+> A step-by-step guide to configuring your custom domain with AgentMail for enhanced branding and trust.
+
+## Why Use a Custom Domain?
+
+When you're deploying AI agents that send email at scale, deliverability and trust are paramount. While the default `@agentmail.to` domain is great for getting started, using your own custom domains is essential for production applications. It gives you control over your sending reputation and enables advanced strategies for high-volume outreach.
+
+#### Improved Deliverability
+
+Each domain builds its own sending reputation. By using your own domain, you
+control this reputation, which is the single most important factor in
+reaching the inbox.
+
+#### Scale with Multiple Domains
+
+For high-volume sending, register multiple domains (e.g., `mercor.com`,
+`usemercor.com`, `mercorapp.com`). Spreading email volume across them is a
+key strategy to maximize deliverability.
+
+## Setting Up Your Custom Domain
+
+Configuring your domain is a three-step process: add the domain via API, copy the provided records into your DNS provider, and wait for verification.
+
+#### 1. Create Domain & Get DNS Records
+
+Choose your preferred method to create a domain and get the required DNS records. AgentMail will register your domain and immediately return the full set of DNS records required for verification.
+
+#### Console
+
+Navigate to the [AgentMail Console](https://console.agentmail.to) and follow these steps:
+
+1. **Go to Domains Section**: Click on "Domains" in the left sidebar
+2. **Add New Domain**: Click "Add Domain" or "Create Domain" button
+3. **Enter Domain Name**: Type your domain name (e.g., `your-domain.com`)
+4. **Create Domain**: Click "Create" to register the domain
+
+#### SDK
+
+```bash title="cURL"
+curl -X POST https://api.agentmail.to/domains/your-domain.com \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+```python title="Python"
+from agentmail import AgentMail
+
+client = AgentMail(api_key="YOUR_API_KEY")
+
+# Create domain with default settings
+domain = client.domains.create("your-domain.com")
+
+# Or with custom feedback forwarding
+domain = client.domains.create(
+  "your-domain.com",
+  feedback_enabled=False
+)
+
+print("Domain created:", domain)
+print("DNS Records:", domain.records)
+```
+
+```typescript title="TypeScript"
+import { AgentMailClient } from "agentmail";
+
+const client = new AgentMailClient({
+  apiKey: "YOUR_API_KEY",
+});
+
+// Create domain with default settings
+const domain = await client.domains.create("your-domain.com");
+
+// Or with custom feedback forwarding
+const domain = await client.domains.create("your-domain.com", {
+  feedback_enabled: false
+});
+
+console.log("Domain created:", domain);
+console.log("DNS Records:", domain.records);
+```
+
+```bash title="CLI"
+# create domain with default settings
+agentmail domains create --domain your-domain.com
+```
+
+#### Idempotent Requests
+
+You can make these requests idempotent by including a `client_id`
+attribute in the request so we dont serve an error if you try and create a
+domain that has already been registered with us.
+
+#### Feedback Forwarding
+
+By default, bounce and complaint notifications are sent to your domain. You
+can disable this by setting `feedback_enabled` to `false` in your request. If
+not specified it is default set to `true`
+
+The API response includes a `records` array. Each object in this array contains the precise `name`, `type`, `value`, and `priority` you'll need to add to your DNS provider.
+
+The initial `status` of the domain will be `pending`. It will change as you configure your domain and we verify it on our end.
+
+#### 2. Add Records to Your DNS Provider
+
+The process for adding records varies slightly between providers. The examples below assume you are configuring records in the apex `domain.com` hosted zone. If you are using a subdomain make sure it is in the apex domain hosted zone.
+
+### Option A: Upload BIND Zone File (Easiest)
+
+A BIND zone file is a text file that contains DNS resource records in a standardized format. This approach allows you to bulk upload our records to your DNS provider without you needing to go down one by one.
+
+**How to use the BIND zone file:**
+
+**Step 1: Download the BIND zone file**
+
+After creating your domain in the AgentMail Console, click the "Download BIND Zone File" button to get the complete zone file.
+
+<img src="https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/https%3A//agentmail-production.docs.buildwithfern.com/faac7775a4d3462c040390f8427b67a3d0ab59a811489e773739e6c973418123/assets/download-zone-file.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIA6KXJSKKNFOCF7G4B%2F20260815%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260815T033001Z&X-Amz-Expires=604800&X-Amz-Signature=909780c33cc0e19df10015a34bfeec068608073bc464f2b1bb089a0c75db6b88&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject" alt="Download BIND Zone File from Console" />
+
+#### Cloudflare
+
+**Step 2: Import to Cloudflare**
+
+1. Go to your Cloudflare dashboard and select your domain
+2. Navigate to **DNS > Records**
+
+<img src="https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/https%3A//agentmail-production.docs.buildwithfern.com/96c7605681eb665155d04a7df0a8cd58830fe147270cabdec3b05797cb993899/assets/cloudflare-dns.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIA6KXJSKKNFOCF7G4B%2F20260815%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260815T033001Z&X-Amz-Expires=604800&X-Amz-Signature=e42230970646d5f5526e3037648106462839d1f26fb0e674b3622151f7f75895&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject" alt="Cloudflare BIND Import" />
+
+3. Click **"Import and Export"**
+
+<img src="https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/https%3A//agentmail-production.docs.buildwithfern.com/05cc3ce3579576efb2e81419b9a3f66d79c1cd5b0ec684d070b55762ffade22a/assets/cloudflare-import-export.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIA6KXJSKKNFOCF7G4B%2F20260815%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260815T033001Z&X-Amz-Expires=604800&X-Amz-Signature=fccec0dbc73b78091f8a6840f651ae11659efd3195dd3429157028bd4f3020ea&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject" alt="Cloudflare BIND Import" />
+
+4. Upload the downloaded BIND zone file as is
+
+#### AWS Route 53
+
+**Step 2: Import to Route 53**
+
+1. Go to your Route 53 hosted zone for your domain
+2. Click **"Import zone file"** in the top right corner
+
+<img src="https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/https%3A//agentmail-production.docs.buildwithfern.com/036c4079abf5da1f8f4bb3aaa5b444b59f0be8077b4f2c3e718746aff5c06751/assets/aws-bind-import.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIA6KXJSKKNFOCF7G4B%2F20260815%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260815T033001Z&X-Amz-Expires=604800&X-Amz-Signature=77b51709667d5ccd7508da506dc024d244616ea939ad3cd0ad871c09f769779f&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject" alt="AWS Route 53 BIND Import" />
+
+3. Paste the CONTENTS of downloaded BIND zone file
+
+<img src="https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/https%3A//agentmail-production.docs.buildwithfern.com/0ddc3eaa3744f03f776a832f09d236312b33a0c8f40d1804a84e70c75a3b5896/assets/aws-paste.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIA6KXJSKKNFOCF7G4B%2F20260815%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260815T033001Z&X-Amz-Expires=604800&X-Amz-Signature=9ad8d800423776bae8913a9ed7cf860429be4c8612e1e0b8a357d5d6272caa7d&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject" alt="AWS Route 53 BIND Import" />
+
+4. Review the records and click **"Import"**
+
+#### CRITICAL: Route 53 TXT Record 255 Character Limit
+
+**AWS Route 53 has a 255 character maximum per string.** It will get angry at the DKIM record since it is longer than 255 chars (we use more secure encryption key so we get better deliverability with Gmail!)
+
+**When entering TXT values in the Route 53 UI, you MUST do the following.**
+
+1. Split the value into two quoted strings.
+   a. e.g.: "abcd" -> "ab""cd"
+2. Ensure there is NO SPACE between the quoted strings. This will make or break validation.
+
+**Correct:** `"first-part-of-value""second-part-of-value"`
+
+**Wrong:** `"first-part-of-value" "second-part-of-value"` (space between strings)
+
+If you accidentally include a space or click enter, Route 53 will create **two separate TXT records** instead of one concatenated record. This will cause email authentication to fail, and providers like **Gmail will reject your emails**.
+
+#### Porkbun
+
+**Step 2: Import to Porkbun**
+
+1. Go to your Porkbun profile and click domain management
+2. Navigate to the **DNS** subtab of the domain you want to send from
+
+<img src="https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/https%3A//agentmail-production.docs.buildwithfern.com/e4ed50d2d850209bc7eaba74f70e49de1e236816cf9a8b0ee1a244c76dee2714/assets/porkbun-dns.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIA6KXJSKKNFOCF7G4B%2F20260815%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260815T033001Z&X-Amz-Expires=604800&X-Amz-Signature=3dd6be09db298a2f67fb0195c53a52a46215e6452413c9eb0a0d9e052f707329&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject" alt="Porkbun DNS Management" />
+
+3. Scroll down to the quick upload section
+
+<img src="https://fdr-prod-docs-files-public.s3.us-east-1.amazonaws.com/https%3A//agentmail-production.docs.buildwithfern.com/139296cc33927d5d3c4e6e493ed61545914dec905b620a0d6a5408f3010f8e95/assets/porkbun-import.png?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=AKIA6KXJSKKNFOCF7G4B%2F20260815%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260815T033001Z&X-Amz-Expires=604800&X-Amz-Signature=5eb9b3ace47489db125c3ad14851b44ee1b78f80edbe0da535e6546e3eb05fc3&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject" alt="Porkbun Zone File Import" />
+
+4. Upload the downloaded BIND zone file as is
+
+{" "}
+
+#### Important: Review Before Importing
+
+Uploading a BIND zone file in Porkbun REPLACES the existing records you have.
+This is fine if this is a fresh domain you bought for the sake of sending
+email but if this is a domain that has other important records configured,
+consider adding [additional records
+manually](#option-b-add-individual-records).
+
+#### BIND Zone File Format
+
+Check that all records (TXT, MX) have been correctly imported in the
+console(the console will show in real time if we can find the records,
+typically within seconds).
+
+### Option B: Add Individual Records
+
+Below are detailed instructions for AWS Route53, CloudFlare, and Namecheap. The instructions vary depending on whether you're using the AgentMail Console or the API directly.
+
+#### DKIM record type
+
+Legacy orgs should keep existing working DNS records in place. For new domain setup, add the TXT selector records returned by the AgentMail Console or API.
+
+#### Via Console
+
+If you created your domain through the [AgentMail Console](https://console.agentmail.to), the DNS records are displayed in a simplified format that's ready for copy-paste into your DNS provider.
+
+#### Cloudflare
+
+In the dashboard (**DNS > Records**), click **"Add record"**.
+
+* **TXT (DMARC/SPF/DKIM):**
+  * **Name:** Copy the **Name** value directly from the console.
+  * **Content:** Copy the **Value** from the console.
+
+* **MX:**
+  * **Name:** Enter `@` to apply the record to the root domain.
+  * **Mail server:** Copy the **Value** from the console.
+  * **Priority:** Use the priority shown in the console.
+
+#### AWS Route 53
+
+In your hosted zone, click **"Create record"**.
+
+* **TXT (DMARC/SPF/DKIM):**
+  * **Record name:** Copy the **Name** value directly from the console (e.g., `_dmarc` or `mail` or `selector._domainkey`).
+  * **Value:** Copy the **Value** from the console, ensuring it is enclosed in quotes.
+
+#### CRITICAL: Route 53 TXT Record 255 Character Limit
+
+**AWS Route 53 has a 255 character maximum per string.** It will get angry at the DKIM record since it is longer than 255 chars (we use more secure encryption key so we get better deliverability with Gmail!)
+
+**When entering TXT values in the Route 53 UI, you MUST do the following.**
+
+1. Split the value into two quoted strings.
+   a. e.g.: "abcd" -> "ab""cd"
+2. Ensure there is NO SPACE between the quoted strings. This will make or break validation.
+
+**Correct:** `"first-part-of-value""second-part-of-value"`
+
+**Wrong:** `"first-part-of-value" "second-part-of-value"` (space between strings)
+
+If you accidentally include a space or click enter, Route 53 will create **two separate TXT records** instead of one concatenated record. This will cause email authentication to fail, and providers like **Gmail will reject your emails**.
+
+* **MX:**
+  * **Record name:** Enter the value exactly as we return it, whether its `@` or the subdomain.
+  * **Value:** Copy the **Value** from the console (e.g., `inbound-smtp.us-east-1.amazonaws.com`).
+  * **Priority:** Use the priority shown in the console (typically `10`).
+
+#### Console Advantage
+
+The console automatically formats DNS record names to be relative hostnames (without the full domain), making them ready for direct copy-paste into your DNS provider. No manual parsing required!
+
+#### Via API
+
+If you're using the API directly, the DNS records are returned as fully qualified domain names (FQDNs) that require some manual parsing.
+
+#### Cloudflare
+
+In the dashboard (**DNS > Records**), click **"Add record"**.
+
+* **TXT (DMARC/SPF/DKIM):**
+  * **Name:** Enter the part of the `name` before your root domain (e.g. `_dmarc`).
+  * **Content:** Copy paste the `value` from the API response.
+
+* **MX:**
+  * **Name:** Enter the part of the name before your root domain
+  * **Mail server:** Enter the `value` from the API.
+  * **Priority:** Enter the `priority` from the API.
+
+#### AWS Route 53
+
+In your hosted zone, click **"Create record"**.
+
+* **TXT (DMARC/SPF/DKIM):**
+  * **Record name:** Enter the part of the `name` before your root domain (e.g., `_dmarc` for a `name` of `_dmarc.domain.com`, or `mail` for a `name` of `mail.domain.com`, or `selector._domainkey` for a `name` of `selector._domainkey.agents.com`).
+  * **Value:** Copy paste the `value` from the API, ensuring it is enclosed in quotes.
+
+#### CRITICAL: Route 53 TXT Record 255 Character Limit
+
+**AWS Route 53 has a 255 character maximum per string.** It will get angry at the DKIM record since it is longer than 255 chars (we use more secure encryption key so we get better deliverability with Gmail!)
+
+**When entering TXT values in the Route 53 UI, you MUST do the following.**
+
+1. Split the value into two quoted strings.
+   a. e.g.: "abcd" -> "ab""cd"
+2. Ensure there is NO SPACE between the quoted strings. This will make or break validation.
+
+**Correct:** `"first-part-of-value""second-part-of-value"`
+
+**Wrong:** `"first-part-of-value" "second-part-of-value"` (space between strings)
+
+If you accidentally include a space or click enter, Route 53 will create **two separate TXT records** instead of one concatenated record. This will cause email authentication to fail, and providers like **Gmail will reject your emails**.
+
+* **MX:**
+  * **Record name:** Leave this field blank to apply the record to the root domain.
+  * **Value:** This is critical. You must combine the `priority` and `value` from the API into a single string, separated by a space. For example: `10 inbound-smtp.us-east-1.amazonaws.com`.
+
+#### 3. Verify Your Domain
+
+Once you've added the records, AgentMail automatically begins to check them. This can take anywhere from a few minutes to 48 hours for your DNS changes to propagate across the internet.
+
+Check your domain verification status in the [AgentMail Console](https://console.agentmail.to/dashboard/domains):
+
+1. **Navigate to Domains**: Go to the "Domains" section in the left sidebar
+2. **View Domain Status**: Find your domain in the list and check its status
+3. **Monitor Progress**: The status will update automatically as verification progresses
+4. **View Details**: Click on your domain to see detailed information about which records are verified
+
+The status indicators will show you exactly where you are in the process:
+
+* **`Not Started`**: You need to click the Verify Domain button to kick start the process
+* **`Pending`**: You still need to add or fix your DNS records
+* **`Invalid`**: Some of your records are misconfigured. Please verify you inputted them correctly.
+* **`Failed`**: Your records are correct, but our servers need a bump. Please click the verify domain button in the console.
+* **`Verifying`**: DNS records are correct, and we're authorizing the domain
+* **`Verified`**: Domain is fully verified and ready for sending
+
+Here are instructions for some common DNS providers. This list is not exhaustive, so please consult your provider's documentation if you don't see it here.
+
+| DNS/Hosting Provider | Documentation Link                                                                                                                                                                                                                                                                                                                                                                       |
+| :------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **GoDaddy**          | [MX: Add an MX record](https://www.godaddy.com/help/add-an-mx-record-19234) <br /> [TXT: Add a TXT record](https://www.godaddy.com/help/add-a-txt-record-19232)                                                                                                                                                                                                                          |
+| **DreamHost**        | [How do I add custom DNS records?](https://help.dreamhost.com/hc/en-us/articles/215414867-How-do-I-add-custom-DNS-records)                                                                                                                                                                                                                                                               |
+| **Cloudflare**       | [MX: How do I add or edit mail or MX records?](https://support.cloudflare.com/hc/en-us/articles/200168806-Managing-DNS-records-in-Cloudflare) <br /> [TXT: Managing DNS records in Cloudflare](https://support.cloudflare.com/hc/en-us/articles/200168806-Managing-DNS-records-in-Cloudflare)                                                                                            |
+| **HostGator**        | [Manage DNS Records with HostGator/eNom](https://www.hostgator.com/help/article/manage-dns-records-with-hostgator-enom)                                                                                                                                                                                                                                                                  |
+| **Namecheap**        | [MX: How can I set up MX records required for mail service?](https://www.namecheap.com/support/knowledgebase/article.aspx/434/2237/how-can-i-set-up-mx-records-required-for-mail-service) <br /> [TXT: How do I add TXT/SPF/DKIM/DMARC records for my domain?](https://www.namecheap.com/support/knowledgebase/article.aspx/317/2237/how-do-i-add-txtspfdkimdmarc-records-for-my-domain) |
+| **Names.co.uk**      | [Changing your domain's DNS settings](https://www.names.co.uk/support/articles/changing-your-domains-dns-settings/)                                                                                                                                                                                                                                                                      |
+| **Wix**              | [MX: Adding or Updating MX Records in Your Wix Account](https://support.wix.com/en/article/adding-or-updating-mx-records-in-your-wix-account) <br /> [TXT: Adding or Updating TXT Records in Your Wix Account](https://support.wix.com/en/article/adding-or-updating-txt-records-in-your-wix-account)                                                                                    |
+
+#### Ready to Go!
+
+Once your domain status is `ready`, you can start creating `Inboxes` with your
+custom domain and building your agents!
+
+## Setting Up Subdomains
+
+By default, a verified domain only hosts inboxes on the exact domain you registered (e.g. `agent@example.com`). To create inboxes on **arbitrary subdomains** (e.g. `agent@bot.example.com`, `support@sales.example.com`) without registering each subdomain as its own domain, enable **subdomains** on the parent domain.
+
+To set this up, add one new **required** record to your top-level domain: a wildcard MX (`*.example.com`). Once it's published and verified, you can create inboxes on any subdomain of the domain.
+
+#### 1. Enable subdomains on the domain
+
+Set `subdomains_enabled` when you create the domain, or turn it on later with an update.
+
+```python title="Python"
+from agentmail import AgentMail
+
+client = AgentMail(api_key="YOUR_API_KEY")
+
+# Enable at creation
+domain = client.domains.create(domain="example.com", subdomains_enabled=True)
+
+# Or enable on an existing domain
+domain = client.domains.update("example.com", subdomains_enabled=True)
+
+print("DNS records:", domain.records)
+```
+
+```typescript title="TypeScript"
+import { AgentMailClient } from "agentmail";
+
+const client = new AgentMailClient({ apiKey: "YOUR_API_KEY" });
+
+// Enable at creation
+let domain = await client.domains.create({ domain: "example.com", subdomainsEnabled: true });
+
+// Or enable on an existing domain
+domain = await client.domains.update("example.com", { subdomainsEnabled: true });
+
+console.log("DNS records:", domain.records);
+```
+
+```bash title="cURL"
+# Enable on an existing domain
+curl -X PATCH https://api.agentmail.to/v0/domains/example.com \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"subdomains_enabled": true}'
+```
+
+#### Verified domains return to Pending
+
+Enabling subdomains on an already-verified domain adds the wildcard MX as a new required record, so the domain returns to `Pending` until that record is published and verified. Sending is not interrupted while this happens.
+
+#### 2. Publish the wildcard MX record
+
+The response `records` array (and the BIND zone file) now includes a wildcard MX. Add it to your DNS provider exactly like the other MX record, using `*` as the host:
+
+| Field       | Value                                  |
+| :---------- | :------------------------------------- |
+| Type        | `MX`                                   |
+| Name / Host | `*` (resolves to `*.example.com`)      |
+| Value       | `inbound-smtp.us-east-1.amazonaws.com` |
+| Priority    | `10`                                   |
+
+#### If your domain is itself a subdomain
+
+If the domain you registered is itself a subdomain (e.g. `mail.example.com`), the wildcard is `*.mail.example.com`, so enter `*.mail` as the host. The console and zone file always show the exact name to use.
+
+#### 3. Create inboxes on any subdomain
+
+Once the domain is `Verified`, create an inbox on any subdomain by passing it as the `domain`:
+
+```python title="Python"
+inbox = client.inboxes.create(username="agent", domain="bot.example.com")
+print(inbox.inbox_id)  # agent@bot.example.com
+```
+
+```typescript title="TypeScript"
+const inbox = await client.inboxes.create({ username: "agent", domain: "bot.example.com" });
+console.log(inbox.inboxId); // agent@bot.example.com
+```
+
+You don't need to register `bot.example.com` separately: AgentMail routes it through the parent domain's wildcard MX. Creating a subdomain inbox on a domain that does **not** have subdomains enabled returns a `422` error.
+
+Subdomain inboxes don't appear under `GET /domains` (only registered domains do); list your inboxes to see them.
+
+Inboxes on a subdomain send under the parent domain's identity and DKIM, so they share its sending reputation rather than building their own. To give a subdomain an isolated reputation, register it as a separate domain instead, see [Isolate reputations with subdomains](/managing-domains#strategy-1-isolate-reputations-with-subdomains).
+
+## Troubleshooting Common DNS Issues
+
+DNS can be tricky. Here are some common issues and how to resolve them.
+
+#### My DNS changes aren't showing up instantly
+
+DNS propagation can take up to 48 hours, though it's often much faster. If
+it's been a while, click the verify domain button in the console which will trigger a reverification manually(DNS propagation can get stuck at times).
+
+#### I'm seeing 'Too many SPF records' errors
+
+A domain must have only **one** SPF record. If you're using other services that send email on your behalf (like a CRM), you need to merge their SPF policies with AgentMail's into a single record.
+
+An SPF record is a single line of text. It starts with `v=spf1` and ends with a mechanism like `~all` or `-all`. All your permitted senders go in the middle.
+
+**How to Merge:**
+
+1. **Find your existing SPF record.** It will look something like this: `v=spf1 include:_spf.other-domain.com ~all`
+2. **Find AgentMail's SPF include.** This is `include:spf.agentmail.to`.
+3. **Combine them.** Copy the `include` from AgentMail and place it into your existing record, right before the `~all` or `-all` part.
+
+```text title="Example: Merging SPF records"
+# Before
+v=spf1 include:_spf.other-domain.com ~all
+
+# After
+v=spf1 include:_spf.other-domain.com include:spf.agentmail.to ~all
+```
+
+Just keep adding `include:` mechanisms for each service you use. Remember to only have one `v=spf1` at the beginning and one `~all` or `-all` at the end.
+
+{/* The user will write this section themselves. */}
+
+## Best Practices for Domain Management
+
+Check out our guide on [Email Deliverability](/email-deliverability) for tips on warming up your new domain and maintaining a healthy sender reputation.
+==============================================================================
+BLOCK 5 — [SPEC:docs] https://docs.agentmail.to/managing-domains.md (verbatim, fetched 2026-08-15)
+==============================================================================
+> For clean Markdown content of this page, append .md to this URL. For the complete documentation index, see https://docs.agentmail.to/llms.txt. For full content including API reference and SDK examples, see https://docs.agentmail.to/llms-full.txt.
+
+# Managing Your Domains
+
+> Learn how to manage your custom domains effectively using AgentMail's API for enhanced deliverability and reputation management.
+
+## From Setup to Strategy
+
+You've successfully set up your first custom domain—now what?
+
+## Core Domain Operations via API
+
+Your domains are resources that can be fully managed through the API. Here are the core operations you'll use.
+
+#### List All Your Domains
+
+To get a complete overview of all the domains registered in your organization, use the `GET /domains` endpoint. This is useful for auditing your assets and programmatic checks.
+
+#### List All Domains
+
+#### Check Domain Health
+
+DNS records can sometimes be accidentally changed or deleted, impacting your ability to send or receive email. You should periodically monitor the health of your domains by polling the `GET /domains/{domain}` endpoint.
+
+Pay close attention to the `status` field for both the domain and its individual records. If a record's status changes from `verified` to `missing`, it needs immediate attention.
+
+#### Check a Specific Domain
+
+#### Update a Domain
+
+Use the `PATCH /domains/{domain}` endpoint to change a domain's settings. Provide at least one of `feedback_enabled` or `subdomains_enabled`; omitted fields are left unchanged.
+
+#### Update a Domain
+
+Enabling `subdomains_enabled` adds a required wildcard MX record and returns a verified domain to `Pending` until that record is published and verified. See [Setting Up Subdomains](/custom-domains#setting-up-subdomains).
+
+#### Delete a Domain
+
+If you no longer need a domain, you can remove it using the `DELETE /domains/{domain}` endpoint.
+
+**This action is permanent and cannot be undone.** Deleting a domain will immediately prevent any inboxes associated with it from sending or receiving email. BUT you will still have access to the data in these inboxes.
+
+#### Delete a Domain
+
+## Advanced Strategies for Agent Fleets
+
+As you scale, your domain strategy must evolve beyond a single domain. A sophisticated approach is crucial for deliverability, security, and resilience.
+
+### Strategy 1: Isolate Reputations with Subdomains
+
+Different agents have different sending patterns and risk profiles. A transactional agent sending receipts is low-risk, while a cold outreach agent is high-risk. Mixing their traffic on the same domain means the high-risk agent can damage the reputation of the critical transactional one.
+
+**The Solution:** Segment agents onto different subdomains to isolate their sending reputations.
+
+* **`billing.your-company.com`**: For critical transactional agents (receipts, invoices).
+* **`outreach.your-company.com`**: For high-volume sales or marketing agents.
+* **`support.your-company.com`**: For customer service and support agents.
+
+Registering each subdomain as its own domain gives it an independent sending identity (its own DKIM), which is what isolates its reputation. If you don't need isolated reputations and only want inboxes to live on many subdomains under one verified parent, [enable subdomains](/custom-domains#setting-up-subdomains) instead: turn them on once for the parent domain, publish the wildcard MX record, then create inboxes on any subdomain without registering each one. Inboxes created this way send under the parent domain's identity, so they share its sending reputation rather than building their own.
+
+### Strategy 2: Scale Deliverability with Domain Pooling
+
+When sending at a very high scale, even a perfectly warmed-up domain has a daily sending limit before providers start throttling. The professional-grade solution is "domain pooling."
+
+Instead of relying on one domain, you build a pool of multiple root domains (e.g., `company.com`, `company.net`, `get-company.com`).
+
+**The Solution:** Programmatically spread your email volume across this pool.
+
+* Maintain an array of your sending domains in your application.
+* When sending a large batch of emails, rotate through the array to assign the sending inbox.
+* This diversification significantly improves inbox placement at scale and makes your system more resilient if one domain's reputation is temporarily impacted.
+
+## Leveraging DMARC for Security
+
+By default, AgentMail configures your domain with a strict DMARC policy (`p=reject`). This is the best possible setting for security, as it tells receiving mail servers to block any email that fails authentication.
+
+However, this is obviously up to your discretion if you want to impose a more relaxed DMARC policy, whether its `p=none` where it doesn't do anything if both SPF and DMARC fail, or its `p=quarantine`, where it puts the mail in spam/junk. Feel free to do more research at your own discretion. You can do this by changing the value in the TXT record in your DNS configuration where the name starts with `_dmarc`.
+==============================================================================
+BLOCK 6 — AUTHORITATIVE VERIFICATION SEQUENCE [SPEC:docs errors]
+==============================================================================
+GET /v0/domains/{domain} -> returns the DNS records to add -> POST /v0/domains/{domain}/verify.
+P5 implements exactly this sequence — not a config-file or selector-driven model.
+
+sha256(openapi.json local copy): 9535f0d5848576f4ed77f2124bff8b04c6fefe8521d3b5f79c85c594a2f05c6b

@@ -1,0 +1,68 @@
+# Fixture 17 — message.complained via real FBL (A11). ATTEMPT RECORDED.
+
+## Step 1 — wire shape is already [SPEC:openapi] (verified against local openapi.json this session)
+webhooks['message-complained'] present; schemas:
+  type_events:MessageComplainedEvent = {type:"event", event_type:"message.complained",
+      event_id, complaint: type_events:Complaint}
+  type_events:Complaint = {inbox_id, thread_id, message_id, timestamp,
+      type:string ("Complaint type."), sub_type:string ("Complaint sub-type."),
+      recipients:string[] ("Complained recipients.")}
+=> Only the live `type`/`sub_type` VALUES and trigger/timing were open.
+
+## Step 2 — ATTEMPT (Gmail, per user)
+- 2026-08-15T05:51:51Z: sent from amk-probe@agentmail.to -> nthntonkin@gmail.com
+  message_id <010001a003fa02dc-b0a90472-f755-437d-b883-1febd58ea49a-000000@email.amazonses.com>
+- capture webhook (ep_3HwIKSSVTUWz1aznPYS3s00oMiL -> 200 sink) updated to include message.complained.
+- User reported the message as spam in Gmail.
+
+## Step 3 — RESULT: NO message.complained event.
+- 200-sink event counts after the spam report: message.received.unauthenticated x17,
+  message.delivered x2, message.sent x2, message.complained x0.
+- ROOT CAUSE (known, not a harness failure): Gmail does NOT operate a per-message feedback
+  loop to SES. Gmail exposes only aggregate spam-rate data via Postmaster Tools; there is no
+  ARF/per-message complaint forwarded to the sender's ESP. So a Gmail "Report spam" can never
+  produce message.complained regardless of wait time. (Outlook.com/Hotmail JMRP and Yahoo CFL
+  DO forward per-message complaints to SES — those are the only viable targets.)
+
+## DISPOSITION
+- Attempt recorded (this file). To actually capture live type/sub_type values, re-run to an
+  Outlook.com/Hotmail or Yahoo address the user controls (capture webhook still armed).
+- Otherwise A11 -> ACCEPTED UNKNOWN: wire shape [SPEC:openapi] above; isolate behind the
+  event-emitter interface (ARF parser -> Complaint payload); live type/sub_type values remain
+  unobserved. This is a recorded negative, not an unexamined "looked hard".
+
+## Step 2b — RETRY via Outlook (nathant1902@outlook.com), which HAS a per-message FBL (JMRP)
+- 2026-08-15T06:07:28Z sent amk-probe@agentmail.to -> nathant1902@outlook.com
+  message_id <010001a004084ef3-d5bf1ffb-571b-4c5f-bad4-8b1715b73e2c-000000@email.amazonses.com>
+- User marks as Junk in Outlook; watcher polls the 200 sink up to ~6h for message.complained.
+
+## Step 2c — RESEND (neutral wording; prior probe auto-filed to Junk by Outlook's filter,
+##            which does NOT produce a JMRP complaint — only a user reporting an INBOX msg does)
+- 2026-08-15T06:09:26Z sent amk-probe@agentmail.to -> nathant1902@outlook.com
+  subject 'Notes from Thursday', message_id <010001a0040a1ced-8d2b8e2c-8149-4801-93d5-39d134fd90d6-000000@email.amazonses.com>
+- Expected in Inbox; user reports THIS as junk. Existing watcher (polls any message.complained) will capture it.
+
+## *** message.complained CAPTURED (Outlook JMRP) — A11 CLOSED ***
+captured_at: 2026-08-15 06:10:00  (complaint timestamp 2026-08-15T06:09:56.956Z — ~30s after send; JMRP is fast)
+{
+  "type": "event",
+  "event_type": "message.complained",
+  "event_id": "6813392d-e351-4392-ae72-87354eca35b4",
+  "complaint": {
+    "organization_id": "133c9cbe-f996-4094-a8d5-0c6603e022ea",
+    "pod_id": "9047724b-2879-416b-8424-82ef81ab9397",
+    "inbox_id": "amk-probe@agentmail.to",
+    "thread_id": "a538760f-1bcc-424b-93d3-1e67928d39df",
+    "message_id": "<010001a0040a1ced-8d2b8e2c-8149-4801-93d5-39d134fd90d6-000000@email.amazonses.com>",
+    "recipients": ["nathant1902@outlook.com"],
+    "timestamp": "2026-08-15T06:09:56.956Z",
+    "type": "abuse"
+  }
+}
+
+## LIVE VALUES OBSERVED (closes what the [SPEC:openapi] shape left open):
+- complaint.type = "abuse"   (SES complaint feedback type; other SES values: auth-failure, fraud, not-spam, other, virus)
+- complaint.sub_type = ABSENT (optional; omitted when empty — do NOT emit an empty string)
+- event_id is a UUID (6813392d-...); like message.delivered, unlike message.sent's 32-hex form
+- complaint object emits extra organization_id + pod_id (beyond SDK Complaint type) — amk must emit them
+A11 FULLY CLOSED.

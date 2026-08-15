@@ -1,0 +1,17 @@
+ITEM A10 case (f) — empty Subject sent twice (same sender), no References
+Question: one thread or two?
+Captured 2026-08-15. RUN = d64ee47e. Inbox amk-probe@agentmail.to.
+
+--- SENDS (header "Subject:" present but empty; from frank@probe.test) ---
+ f1 subject ""  mid <f1-...>  SMTP 250 5mggbtenp662sadn7mtk4vfqss39k5h004e8tc01
+ f2 subject ""  mid <f2-...>  SMTP 250 t23bbruvmbv5qvbslia4epte0vj7ltm0sd9c1vg1
+
+--- OBSERVED (webhook payloads; note: NO "subject" key present on an empty-subject message) ---
+ f1 {"message_id":"<f1-d64ee47e@probe.test>","thread_id":"d6cc9a91-010a-456f-808d-1400902a15ae","labels":["received","unread","unauthenticated"]}  (no subject field)
+ f2 {"message_id":"<f2-d64ee47e@probe.test>","thread_id":"d7e7ddfe-c4b7-4fd8-ab7b-2741213e82ba","labels":["received","unread","unauthenticated"]}  (no subject field)
+
+RESULT: f1 -> d6cc9a91, f2 -> d7e7ddfe  => TWO separate threads.
+
+OBSERVED: two empty-subject messages from the same sender do NOT merge — each opens its own thread.
+Empty subjects are stored with the "subject" field ABSENT (not "" ) in the message object.
+Consistent with the overall rule: absent an In-Reply-To/References chain, no grouping occurs.

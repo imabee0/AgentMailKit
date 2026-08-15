@@ -1,0 +1,28 @@
+ITEM A10 case (e) — same subject/sender sent to TWO inboxes in the same pod
+Question: is thread grouping per-inbox or wider (pod/org)?
+Captured 2026-08-15. RUN = d64ee47e. Pod 9047724b-2879-416b-8424-82ef81ab9397.
+
+--- SETUP: second throwaway inbox created ---
+POST /v0/pods/9047724b-.../inboxes  {"username":"amk-probe2"}
+-> 200 {"inbox_id":"amk-probe2@agentmail.to","email":"amk-probe2@agentmail.to", ...}
+
+--- SENDS (identical subject + identical From eve@probe.test, different RCPT) ---
+ e1 rcpt amk-probe@agentmail.to   subject "AMKthreadE d64ee47e"  mid <e1-...>  SMTP 250 p1ipbvh8mm6tri8eefemqtqdtg6p279b2tpe1ng1
+ e2 rcpt amk-probe2@agentmail.to  subject "AMKthreadE d64ee47e"  mid <e2-...>  SMTP 250 hnldh8mo6erf47hlcfqim04sfadgf2ttgdoe5n01
+
+--- OBSERVED ---
+ e1 (webhook payload, inbox amk-probe):
+    {"message_id":"<e1-d64ee47e@probe.test>","inbox_id":"amk-probe@agentmail.to","thread_id":"0fb5b5b3-a715-49aa-9c0c-75ed17ee6afe"}
+ e2 (NO webhook — the Svix sink is scoped to amk-probe only; retrieved by direct id GET):
+    GET /v0/inboxes/amk-probe2@agentmail.to/messages/%3Ce2-d64ee47e%40probe.test%3E ->
+    {"inbox_id":"amk-probe2@agentmail.to","message_id":"<e2-d64ee47e@probe.test>",
+     "thread_id":"7041d590-3626-4666-b274-1cba24d027e4","labels":["received","unread","unauthenticated"]}
+
+RESULT:
+  e1 -> thread 0fb5b5b3 (inbox_id amk-probe)
+  e2 -> thread 7041d590 (inbox_id amk-probe2)   DIFFERENT thread, DIFFERENT inbox_id.
+
+OBSERVED: grouping is PER-INBOX. thread objects carry an inbox_id; identical subject+sender to a
+different inbox in the same pod produces a distinct thread. Threads do not span inboxes.
+NOTE: webhooks are scoped per-inbox — probe2 fired no message.received.unauthenticated to the
+amk-probe sink; e2 was confirmed only via the message-by-id API.

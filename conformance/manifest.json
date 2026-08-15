@@ -1,0 +1,16 @@
+{
+  "_comment": "Read-only request manifest for the dual-target conformance harness. Expands per phase as endpoints are implemented. Paths use the throwaway probe resources where an id is needed; swap for the candidate server's own seeded ids when running against localhost. Destructive/mutating requests are added only against throwaway scopes.",
+  "requests": [
+    { "method": "GET", "path": "/v0/auth/me" },
+    { "method": "GET", "path": "/v0/organizations" },
+    { "method": "GET", "path": "/v0/pods?limit=5" },
+    { "method": "GET", "path": "/v0/inboxes?limit=5" },
+    { "method": "GET", "path": "/v0/pods/9047724b-2879-416b-8424-82ef81ab9397/inboxes" },
+    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to" },
+    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to/messages?limit=1" },
+    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to/threads?limit=5" },
+    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to/webhooks" },
+    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to/drafts" },
+    { "method": "GET", "path": "/v0/auth/me", "auth": false, "_note": "unauth => bare 401, exercises the error-shape asymmetry (A8)" }
+  ]
+}

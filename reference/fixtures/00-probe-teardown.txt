@@ -1,0 +1,17 @@
+# Probe resource teardown ledger (P-1). Update as items are removed.
+
+DELETED
+- webhook ep_3HwIKSSVTUWz1aznPYS3s00oMiL (200 capture sink) -> 204 at 2026-08-15 ~06:47Z
+  (A9 payloads, A11 complaint, A14 unauthenticated all already captured to fixtures)
+- inbox amk-probe2@agentmail.to (threading matrix case e) -> see status above
+
+STILL LIVE (deliberately, until the A2 retry tail completes ~T+28h from 2026-08-15T05:44Z)
+- pod    9047724b-2879-416b-8424-82ef81ab9397  "amk-probe-throwaway"
+- inbox  amk-probe@agentmail.to
+- webhook ep_3HwIKMKzmbCirmu4p74HOjg3PZq -> webhook.site 500 sink (drives A2 retry observations)
+- webhook.site tokens: 500-sink 98da41b0-db94-440e-aaa5-9d9bac538565 ; 200-sink 9416815d-ed0d-491e-9555-7bb65f731a78
+
+FINAL TEARDOWN (run when A2 fixture is complete)
+  DELETE /v0/inboxes/amk-probe@agentmail.to/webhooks/ep_3HwIKMKzmbCirmu4p74HOjg3PZq
+  DELETE /v0/inboxes/amk-probe@agentmail.to
+  DELETE /v0/pods/9047724b-2879-416b-8424-82ef81ab9397

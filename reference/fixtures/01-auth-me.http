@@ -1,0 +1,16 @@
+# Fixture 01 — auth/me (A13). Captured: 
+# Request:  GET https://api.agentmail.to/v0/auth/me
+#   Header:  Authorization: Bearer <redacted am_ key from sdxd:agentmail>
+# --- response status + headers (Authorization never echoed) ---
+HTTP/2 200 
+content-type: application/json
+content-length: 188
+date: Sat, 15 Aug 2026 05:37:59 GMT
+apigw-requestid: CIQwrghZoAMEa0A=
+x-cache: Miss from cloudfront
+via: 1.1 4c367553462aee327c63b772b1c903e6.cloudfront.net (CloudFront)
+x-amz-cf-pop: GRU1-P3
+x-amz-cf-id: KzvnbaLVfnrgFrNBgBB-fIhe-x8LMHE6fUGYAjVLB4A2XCbHwTyslA==
+
+# --- response body ---
+{"api_key_id":"3c5547b5-e7ff-474e-9871-83e82251568e","organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","scope_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","scope_type":"organization"}
