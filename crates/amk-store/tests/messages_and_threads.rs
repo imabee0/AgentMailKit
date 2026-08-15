@@ -3067,6 +3067,35 @@ async fn message_insert_rejects_a_nul_byte_in_in_reply_to() {
     );
 }
 
+/// `messages::insert`, fourth guarded field: `references` is the only other `MessageId`-typed
+/// value on this struct — same type, same struct, same statement, same linkage role as
+/// `in_reply_to` above, so it gets the identical guard. The hostile byte sits in the **second**
+/// element, deliberately not the first: a guard written as `.first().is_some_and(...)` instead of
+/// `.any(...)` would pass this test's first element and still 500 on the second.
+#[tokio::test]
+async fn message_insert_rejects_a_nul_byte_in_a_non_first_references_element() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+
+    let mut new =
+        new_message(&inbox, &org, pod, thread_id, "<a@x>", &["sent"], "2026-08-15T05:00:01.000Z");
+    new.references = Some(vec![
+        MessageId::new("<clean@x>"),
+        MessageId::new("<z\0z@x>"),
+        MessageId::new("<also-clean@x>"),
+    ]);
+
+    let result = messages::insert(&pool, new).await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("references"))),
+        "a NUL-bearing references element must be a typed InvalidValue, not a raw database error: \
+         {result:?}"
+    );
+}
+
 /// `threads::insert`, first of its two guarded fields.
 #[tokio::test]
 async fn thread_insert_rejects_a_nul_byte_in_inbox_id() {

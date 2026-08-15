@@ -72,6 +72,19 @@ pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
     {
         return Err(StoreError::InvalidValue("in_reply_to"));
     }
+    // `references` is the only other `MessageId`-typed field on this struct: same type, same
+    // struct, same statement, same linkage role as `in_reply_to`, bound as `Option<Vec<String>>`
+    // into a `text[]` parameter below — a NUL in *any* element fails encoding exactly as a NUL in
+    // `in_reply_to` does. Checked with `.any(...)`, not `.first()`: a hostile MIME message that
+    // put the bad byte second or third must not slip past a check that only looked at the head of
+    // the list.
+    if msg
+        .references
+        .as_ref()
+        .is_some_and(|refs| refs.iter().any(|m| has_forbidden_byte(m.as_str())))
+    {
+        return Err(StoreError::InvalidValue("references"));
+    }
     let inbox_id = msg.inbox_id.normalized();
     let references: Option<Vec<String>> = msg
         .references
