@@ -56,7 +56,16 @@ through a sibling of the function its regression test guarded. Mutate before cla
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
 writing to `amk-types`, to the plan, outside its dispatched `.amk-scope`, or introducing a
 stalwart-labs type into the three protected crates. Subagency is decided by path — inside
-`.claude/worktrees/` or not.
+`.claude/worktrees/` or not. `.claude/fanout.lock` freezes `amk-types`, the plan and
+`scripts/hooks/**` for **everyone including the orchestrator** while a dispatch is in flight.
+
+**An approval prompt is a defect signal, not friction.** With the permissions layer built as the
+plan specifies, routine plan-following work never reaches the user. So being asked to approve
+`cargo test` means `.claude/settings.json`'s allow-list is missing a command the plan sanctions —
+fix the list, never approve past it. This was found the hard way: only the deny half of that layer
+was ever written, and the user diagnosed it from one prompt faster than the process did. The same
+reading applies to any user-facing interruption during work the plan already authorises: it locates
+a gap in enforcement, so treat it as a bug report against the harness.
 
 ## Contract facts that are easy to get wrong
 

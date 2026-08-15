@@ -2,7 +2,14 @@
   "$comment": [
     "Harness enforcement for AgentMailKit. The plan's anti-drift rules are prompts until they are",
     "bound here: the model does not decide whether a hook runs.",
-    "Hooks complement permissions, CI and branch protection — they replace none of them."
+    "Hooks complement permissions, CI and branch protection — they replace none of them.",
+    "",
+    "PERMISSIONS PRINCIPLE: the plan is the authority on what is routine. Anything the plan",
+    "mandates as normal work — the verify command, the crate write/test loop, committing and",
+    "pushing to Gitea, worktree lifecycle — is ALLOWED and must not interrupt the user. Anything",
+    "that leaves the repo, spends money, touches production, or could disclose a secret is ASK or",
+    "DENY. An allow-list that is too narrow is not 'safe': it trains the user to approve without",
+    "reading, which is strictly worse than a correct list."
   ],
   "hooks": {
     "PreToolUse": [
@@ -30,19 +37,85 @@
     ]
   },
   "permissions": {
+    "allow": [
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo metadata:*)",
+      "Bash(cargo tree:*)",
+
+      "Bash(./scripts/check.sh:*)",
+      "Bash(./scripts/shape-provenance.sh:*)",
+      "Bash(./scripts/dev-db.sh:*)",
+      "Bash(./scripts/hooks/guard.test.sh:*)",
+      "Bash(./scripts/hooks/guard.sh:*)",
+      "Bash(./scripts/plan-ledger.sh:*)",
+
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git merge-base:*)",
+      "Bash(git fetch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push origin main:*)",
+      "Bash(git push -q origin main:*)",
+      "Bash(git push origin amk/:*)",
+      "Bash(git rebase:*)",
+      "Bash(git merge --ff-only:*)",
+      "Bash(git worktree:*)",
+      "Bash(git restore:*)",
+      "Bash(git stash list:*)",
+
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(ls:*)",
+      "Bash(wc:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(sed -n:*)",
+      "Bash(find:*)",
+      "Bash(du:*)",
+      "Bash(df:*)",
+      "Bash(ps:*)",
+      "Bash(date:*)",
+      "Bash(pwd:*)",
+      "Bash(mkdir:*)",
+      "Bash(cp:*)",
+      "Bash(tar:*)",
+      "Bash(diff:*)",
+      "Bash(python3:*)",
+      "Bash(bash -n:*)",
+      "Bash(docker exec amk-dev-postgres:*)",
+      "Bash(docker ps:*)"
+    ],
+    "ask": [
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl apply:*)",
+      "Bash(ssh:*)",
+      "Bash(curl:*)",
+      "Bash(swaks:*)",
+      "Bash(git push --set-upstream:*)"
+    ],
     "deny": [
       "Read(./reference/fixtures/**/*.key)",
       "Read(**/*.pem)",
       "Read(**/id_rsa*)",
       "Bash(sdxd get:*)",
       "Bash(tea login:*)",
+      "Bash(gh:*)",
       "Bash(git push --force:*)",
-      "Bash(git push -f:*)"
-    ],
-    "ask": [
-      "Bash(git push:*)",
-      "Bash(kubectl delete:*)",
-      "Bash(kubectl apply:*)"
+      "Bash(git push -f:*)",
+      "Bash(git push --mirror:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git filter-branch:*)",
+      "Bash(sudo:*)"
     ]
   }
 }
