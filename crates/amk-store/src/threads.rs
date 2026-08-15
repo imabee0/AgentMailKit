@@ -49,6 +49,16 @@ pub struct NewThread {
 }
 
 pub async fn insert(pool: &PgPool, t: NewThread) -> Result<(), StoreError> {
+    // Sibling of the identical guard in `messages::insert`: the third door, not a wire one — see
+    // that function's comment. A NUL in either free-text id would otherwise fail at the `INSERT`
+    // bind (SQLSTATE 22021); reject rather than null, since there is no not-found to fall back to
+    // on an insert and nulling either value would silently change what gets stored.
+    if has_forbidden_byte(t.inbox_id.as_str()) {
+        return Err(StoreError::InvalidValue("inbox_id"));
+    }
+    if has_forbidden_byte(t.last_message_id.as_str()) {
+        return Err(StoreError::InvalidValue("last_message_id"));
+    }
     let inbox_id = t.inbox_id.normalized();
     sqlx::query(
         "INSERT INTO threads ( \

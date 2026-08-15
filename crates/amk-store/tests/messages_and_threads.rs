@@ -2969,3 +2969,164 @@ async fn thread_list_with_a_nul_byte_in_the_scope_filters_inbox_id_pin_returns_a
         Err(e) => panic!("a NUL-bearing ScopeFilter inbox_id pin must not error: {e:?}"),
     }
 }
+
+// ---- the third door: insert paths (`.claude/contracts/amk-store-id-safety.md`, rewritten) -------
+//
+// `messages::insert`/`threads::insert` are not reached through a path segment or a page token —
+// `amk-ingest` will call `messages::insert` with a `MessageId` parsed straight out of hostile
+// MIME, and `amk-import` will call the same functions with values read from Stalwart. Neither of
+// the two wire doors covers either caller, so `amk-store` must be total on its own: a public
+// function that 500s on a byte its parameter type permits is a defect in that function, not its
+// caller. There is no not-found to fall back to on an insert, so the guard is a rejection
+// (`StoreError::InvalidValue`), not the `Ok`/empty-page treatment the lookups get — and it names
+// the field, one distinct `&'static str` per bound value, tested independently per field so a
+// mutant deleting one guard cannot hide behind a sibling's still-passing test.
+
+/// `messages::insert`, first of its three guarded fields.
+#[tokio::test]
+async fn message_insert_rejects_a_nul_byte_in_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+
+    let result = messages::insert(
+        &pool,
+        NewMessage {
+            inbox_id: InboxId::new("abc\0def@x"),
+            ..new_message(
+                &inbox,
+                &org,
+                pod,
+                thread_id,
+                "<a@x>",
+                &["sent"],
+                "2026-08-15T05:00:01.000Z",
+            )
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("inbox_id"))),
+        "a NUL-bearing inbox_id must be a typed InvalidValue, not a raw database error: {result:?}"
+    );
+}
+
+/// `messages::insert`, second guarded field — tested independently of the first: the two live in
+/// one function but must fail on their own bytes, not on each other's.
+#[tokio::test]
+async fn message_insert_rejects_a_nul_byte_in_message_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+
+    let result = messages::insert(
+        &pool,
+        NewMessage {
+            message_id: MessageId::new("<a\0b@x>"),
+            ..new_message(
+                &inbox,
+                &org,
+                pod,
+                thread_id,
+                "<a@x>",
+                &["sent"],
+                "2026-08-15T05:00:01.000Z",
+            )
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("message_id"))),
+        "a NUL-bearing message_id must be a typed InvalidValue, not a raw database error: {result:?}"
+    );
+}
+
+/// `messages::insert`, third guarded field: `in_reply_to` is the one header-derived, optional id
+/// on this path — a header a hostile MIME message controls directly, per the contract's own P2
+/// citation for why this door exists at all.
+#[tokio::test]
+async fn message_insert_rejects_a_nul_byte_in_in_reply_to() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+
+    let mut new =
+        new_message(&inbox, &org, pod, thread_id, "<a@x>", &["sent"], "2026-08-15T05:00:01.000Z");
+    new.in_reply_to = Some(MessageId::new("<z\0z@x>"));
+
+    let result = messages::insert(&pool, new).await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("in_reply_to"))),
+        "a NUL-bearing in_reply_to must be a typed InvalidValue, not a raw database error: {result:?}"
+    );
+}
+
+/// `threads::insert`, first of its two guarded fields.
+#[tokio::test]
+async fn thread_insert_rejects_a_nul_byte_in_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+
+    let result = threads::insert(
+        &pool,
+        NewThread {
+            inbox_id: InboxId::new("abc\0def@x"),
+            ..new_thread(
+                &inbox,
+                &org,
+                pod,
+                thread_id,
+                &["received"],
+                "2026-08-15T05:00:00.000Z",
+                "<seed>",
+            )
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("inbox_id"))),
+        "a NUL-bearing inbox_id must be a typed InvalidValue, not a raw database error: {result:?}"
+    );
+}
+
+/// `threads::insert`, second guarded field — tested independently of the first, same reasoning as
+/// the two `messages::insert` field tests above.
+#[tokio::test]
+async fn thread_insert_rejects_a_nul_byte_in_last_message_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+
+    let result = threads::insert(
+        &pool,
+        NewThread {
+            last_message_id: MessageId::new("<z\0z@x>"),
+            ..new_thread(
+                &inbox,
+                &org,
+                pod,
+                thread_id,
+                &["received"],
+                "2026-08-15T05:00:00.000Z",
+                "<seed>",
+            )
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("last_message_id"))),
+        "a NUL-bearing last_message_id must be a typed InvalidValue, not a raw database error: \
+         {result:?}"
+    );
+}

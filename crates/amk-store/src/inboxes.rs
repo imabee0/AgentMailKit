@@ -50,12 +50,17 @@ fn row_to_inbox(row: &PgRow) -> Result<Inbox, StoreError> {
 ///   edge case) → the primary key itself raises a unique violation, mapped here to
 ///   [`StoreError::InboxAlreadyExists`] rather than propagated as a raw database error.
 pub async fn create(pool: &PgPool, new: NewInbox) -> Result<Inbox, StoreError> {
-    // `client_id` is a free-form caller-supplied idempotency key, bound straight into the
-    // `INSERT` below (never through an `InboxId`, so `from_path_segment` never sees it). A NUL
-    // byte in it would otherwise fail at parameter encoding (SQLSTATE 22021) — an ungraceful
-    // `StoreError::Database`, not the masking defect this dispatch targets (this is an insert,
-    // not a lookup with a not-found to hide behind), but caller-controlled input that 500s
-    // unnecessarily is worth a clear, typed rejection now that the check is one line.
+    // `inbox_id` (the username) and `client_id` both arrive in the request body — neither travels
+    // through `from_path_segment`, so neither is covered by the path-segment door — and both are
+    // bound straight into the `INSERT` below. A NUL byte in either would otherwise fail at
+    // parameter encoding (SQLSTATE 22021): an ungraceful `StoreError::Database`, not the masking
+    // defect the lookups target (this is an insert, not a lookup with a not-found to hide behind),
+    // but caller-controlled input that 500s unnecessarily is worth a clear, typed rejection now
+    // that the check is one line. Named per field, not one shared `InvalidValue("id")`: a caller
+    // that cannot tell which of the two it got wrong will retry with the same bad payload.
+    if has_forbidden_byte(new.inbox_id.as_str()) {
+        return Err(StoreError::InvalidValue("inbox_id"));
+    }
     if new.client_id.as_deref().is_some_and(has_forbidden_byte) {
         return Err(StoreError::InvalidValue("client_id"));
     }

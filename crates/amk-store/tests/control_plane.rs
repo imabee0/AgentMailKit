@@ -578,3 +578,31 @@ async fn pods_create_rejects_a_nul_byte_in_client_id() {
         "a NUL-bearing client_id must be a typed InvalidValue, not a raw database error: {result:?}"
     );
 }
+
+/// `inboxes::create`'s *own* `inbox_id` (the username): caller-supplied in the request body,
+/// exactly like `client_id` above, and bound into the same `INSERT` — tested independently at its
+/// own call site rather than assumed to be covered by the `client_id` guard sitting next to it.
+#[tokio::test]
+async fn inboxes_create_rejects_a_nul_byte_in_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+
+    let result = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new("abc\0def@example.test"),
+            organization_id: org,
+            pod_id: pod,
+            client_id: None,
+            display_name: None,
+            metadata: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("inbox_id"))),
+        "a NUL-bearing inbox_id must be a typed InvalidValue, not a raw database error: {result:?}"
+    );
+}

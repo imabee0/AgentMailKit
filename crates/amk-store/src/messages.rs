@@ -52,6 +52,26 @@ pub struct NewMessage {
 }
 
 pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
+    // The third door (`.claude/contracts/amk-store-id-safety.md`): `amk-ingest` will call this
+    // with a `MessageId` parsed straight out of hostile MIME, and `amk-import` with values read
+    // from Stalwart — neither travels through a path segment or a page token, so neither is
+    // covered by either of those two doors. A NUL in any of the three free-text ids below would
+    // otherwise fail at the `INSERT` bind (SQLSTATE 22021); there is no not-found to fall back to
+    // on an insert, and nulling the value would silently change what gets stored, so this is a
+    // rejection, one field at a time, not a shared `InvalidValue("id")` a caller cannot act on.
+    if has_forbidden_byte(msg.inbox_id.as_str()) {
+        return Err(StoreError::InvalidValue("inbox_id"));
+    }
+    if has_forbidden_byte(msg.message_id.as_str()) {
+        return Err(StoreError::InvalidValue("message_id"));
+    }
+    if msg
+        .in_reply_to
+        .as_ref()
+        .is_some_and(|m| has_forbidden_byte(m.as_str()))
+    {
+        return Err(StoreError::InvalidValue("in_reply_to"));
+    }
     let inbox_id = msg.inbox_id.normalized();
     let references: Option<Vec<String>> = msg
         .references
