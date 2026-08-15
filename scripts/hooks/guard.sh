@@ -82,6 +82,37 @@ IN_WORKTREE=0
 case "$CWD" in */.claude/worktrees/*) IN_WORKTREE=1 ;; esac
 case "$FILE" in */.claude/worktrees/*) IN_WORKTREE=1 ;; esac
 
+# 0. THE FAN-OUT LOCK — the one rule that does not care who you are.
+#
+# CWD cannot actually identify a subagent: a subagent inherits the parent's working directory, so
+# an implementer whose shell sits in the primary checkout is indistinguishable from the
+# orchestrator. That was not theory — a dispatched implementer wrote scripts/check.sh, outside its
+# .amk-scope, and the scope rule never fired.
+#
+# So this rule drops identity entirely and enforces the plan's rule 2 as literally written: while a
+# dispatch is in flight, the frozen paths are frozen for EVERYONE, orchestrator included. That is
+# not a limitation of the check, it is the actual rule — a type change mid-fan-out invalidates
+# every parallel worker's assumptions, and the orchestrator is the likeliest person to make one
+# "quickly" while waiting for an agent to return.
+#
+# Lifecycle: the orchestrator creates .claude/fanout.lock at dispatch and removes it at merge.
+# Removing it is a deliberate act; forgetting the rule is not.
+if [ -f "$REPO/.claude/fanout.lock" ]; then
+  case "$FILE" in
+    */crates/amk-types/*|*"$PLAN_GLOB"|*/.claude/plans/*|*/scripts/hooks/*)
+      deny "A fan-out is IN FLIGHT ($REPO/.claude/fanout.lock exists) and this path is frozen for
+everyone — orchestrator included — until it completes:
+  $FILE
+
+Frozen while dispatched: crates/amk-types/**, the plan, scripts/hooks/**.
+A type change mid-fan-out invalidates every parallel worker's assumptions.
+
+If the change is genuinely needed now: stop the in-flight work, remove the lock, make the change,
+and re-dispatch from the new base. That is the plan's rule 2, not a workaround."
+      ;;
+  esac
+fi
+
 # 1. The plan and its registers are orchestrator-only. A subagent that edits the contract it is
 #    being judged against has silently redefined "correct".
 case "$FILE" in

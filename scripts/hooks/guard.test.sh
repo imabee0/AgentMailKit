@@ -80,6 +80,22 @@ check 0 "cargo test from a worktree" \
 check 0 "malformed payload does not block work" \
   "not json at all"
 
+echo "== fan-out lock (identity-independent: freezes everyone) =="
+LOCK="$ORCH/.claude/fanout.lock"
+had_lock=0; [ -f "$LOCK" ] && had_lock=1
+touch "$LOCK"
+check 2 "orchestrator cannot edit amk-types while a dispatch is in flight" \
+  "$(j Write "$ORCH/crates/amk-types/src/api_key.rs" "$ORCH" "pub struct ApiKey;")"
+check 2 "orchestrator cannot edit the plan while a dispatch is in flight" \
+  "$(j Edit "/home/imma/.claude/plans/download-agents-mail-sdk-drifting-frog.md" "$ORCH" "text")"
+check 2 "nobody can edit the guard itself while a dispatch is in flight" \
+  "$(j Edit "$ORCH/scripts/hooks/guard.sh" "$ORCH" "exit 0")"
+check 0 "ordinary crate work is unaffected by the lock" \
+  "$(j Write "$ORCH/crates/amk-store/src/lib.rs" "$ORCH" "pub struct S;")"
+[ "$had_lock" -eq 1 ] || rm -f "$LOCK"
+check 0 "amk-types is editable again once the lock is gone" \
+  "$(j Write "$ORCH/crates/amk-types/src/api_key.rs" "$ORCH" "pub struct ApiKey;")"
+
 echo "== .amk-scope enforcement =="
 mkdir -p "$WT"
 printf 'crates/amk-core/*\ncrates/amk-core/src/*\n' > "$WT/.amk-scope"
