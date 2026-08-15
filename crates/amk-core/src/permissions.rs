@@ -23,10 +23,12 @@
 //!
 //! # This module cannot decide visibility
 //!
-//! A `label_*_read` flag is only **half** of the restricted-label rule: a list result also
-//! requires the caller to have set the matching `include_*` query flag (fixture `09b`: a
-//! credential that *held* `label_unauthenticated_read` still got `count=0` from every list
-//! endpoint). The composed verdict is owned by `crate::labels`. What this module exposes is
+//! A `label_*_read` flag is only **half** of the restricted-label rule on the four paginated GETs
+//! that carry `include_*`: there, the caller must also have set the matching flag (fixture `09b`:
+//! a credential that *held* `label_unauthenticated_read` still got `count=0` from every list
+//! endpoint). On search and get-by-id the flag half does not exist and the permission is the whole
+//! rule — which is a distinction only `crate::labels` may draw, since it turns on the path rather
+//! than on the credential. The composed verdict is owned there. What this module exposes is
 //! [`allows_label_read`], named so it cannot be mistaken for the whole check, and it deliberately
 //! offers no `is_visible` / `retain_visible` / `visible_count`.
 //!
@@ -162,14 +164,26 @@ pub fn derive_child(parent: &KeyGrants, requested: &KeyGrants) -> Result<KeyGran
 
 /// The restricted label carried by a `message.received.*` variant, if it is one.
 ///
-/// Kept as its own function so the tripwire test can assert it is total over
-/// [`EventType::is_restricted_receive`].
+/// **The match is wildcard-free on purpose, and this is the crate's single choke point for a new
+/// event type.** With `_ => None` it was not: a reviewer added `message.received.quarantined` to
+/// [`EventType`] in a sandbox, and the new variant fell through to "no label flag required", so a
+/// credential holding `message_read` and no label permission could subscribe to a stream whose
+/// payload carries full message bodies (fixture `09b`) — with every test still green, because the
+/// totality test iterated a hand-copied array of the ten variants it was meant to catch drifting.
+/// Adding a variant upstream now stops this crate compiling until someone decides whether it
+/// carries a restricted label.
 fn restricted_receive_label(event: EventType) -> Option<&'static str> {
     match event {
         EventType::MessageReceivedSpam => Some(labels::SPAM),
         EventType::MessageReceivedBlocked => Some(labels::BLOCKED),
         EventType::MessageReceivedUnauthenticated => Some(labels::UNAUTHENTICATED),
-        _ => None,
+        EventType::MessageReceived
+        | EventType::MessageSent
+        | EventType::MessageDelivered
+        | EventType::MessageBounced
+        | EventType::MessageComplained
+        | EventType::MessageRejected
+        | EventType::DomainVerified => None,
     }
 }
 
@@ -500,18 +514,27 @@ mod tests {
     // ------------------------------------------------------------- event subscription
 
     /// Every variant of `EventType`, so a new one cannot slip past the gating tests.
-    const ALL_EVENTS: [EventType; 10] = [
-        EventType::MessageReceived,
-        EventType::MessageReceivedSpam,
-        EventType::MessageReceivedBlocked,
-        EventType::MessageReceivedUnauthenticated,
-        EventType::MessageSent,
-        EventType::MessageDelivered,
-        EventType::MessageBounced,
-        EventType::MessageComplained,
-        EventType::MessageRejected,
-        EventType::DomainVerified,
-    ];
+    ///
+    /// The event catalog now lives in amk-types as `EventType::ALL`, with a wildcard-free
+    /// `ordinal()` beside it, so a new variant fails to compile until it is listed there. The
+    /// hand-copied array that used to sit here is exactly what let a sandboxed
+    /// `message.received.quarantined` slip past a test whose job was to catch it: a tripwire that
+    /// iterates its own copy of the thing it is meant to catch drifting cannot fire.
+
+    #[test]
+    fn all_events_names_every_variant_exactly_once() {
+        // Length alone is not enough: a duplicated entry masking an omission keeps it at 10. The
+        // position check makes the array a bijection with `ordinal`, and `ordinal` is the part a
+        // new variant cannot compile past.
+        for (i, event) in EventType::ALL.iter().enumerate() {
+            assert_eq!(
+                event.ordinal(),
+                i,
+                "{event:?} is out of place or duplicated in EventType::ALL"
+            );
+        }
+        assert_eq!(EventType::ALL.len(), 10);
+    }
 
     #[test]
     fn the_deny_everything_credential_may_subscribe_to_nothing() {
@@ -521,13 +544,13 @@ mod tests {
         // extracted_text, headers, from, to, subject and the whole thread, i.e. everything
         // GET /messages/{id} would have refused it.
         let webhook_only = whitelist(&["webhook_create"]);
-        for event in ALL_EVENTS {
+        for event in EventType::ALL {
             assert!(
                 !may_subscribe(&webhook_only, event),
                 "{event:?} was open to a key with no read flag"
             );
         }
-        for event in ALL_EVENTS {
+        for event in EventType::ALL {
             assert!(
                 !may_subscribe(&whitelist(&[]), event),
                 "{event:?} open to the empty whitelist"
@@ -542,7 +565,7 @@ mod tests {
     #[test]
     fn every_message_event_requires_message_read() {
         let reader = whitelist(&["message_read"]);
-        for event in ALL_EVENTS {
+        for event in EventType::ALL {
             if event == EventType::DomainVerified {
                 continue;
             }
@@ -594,8 +617,10 @@ mod tests {
     #[test]
     fn the_restricted_receive_label_map_is_total() {
         // Tripwire: a new restricted receive variant upstream must not fall through to
-        // "message_read is enough".
-        for event in ALL_EVENTS {
+        // "message_read is enough". The *arrival* of a variant is caught by the compiler now —
+        // `restricted_receive_label` has no wildcard arm — and this test checks the half a
+        // compiler cannot: that each arm's label is really restricted and its flag really exists.
+        for event in EventType::ALL {
             assert_eq!(
                 restricted_receive_label(event).is_some(),
                 event.is_restricted_receive(),

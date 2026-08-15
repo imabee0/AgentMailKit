@@ -9,7 +9,10 @@ description = "Domain logic: scope resolution, permission intersection, label ru
 
 [dependencies]
 amk-types = { path = "../amk-types" }
-serde.workspace = true
+# No serde here, deliberately: amk-core derives no Serialize/Deserialize. Every wire shape is
+# owned by amk-types, and a serialization dependency on the pure-logic crate is the standing
+# invitation to derive one on `Denial`, `ScopeDenial`, `LabelDenial` or `IncludeFlags` — a second
+# wire shape outside amk-types, which is what the frozen-types rule exists to prevent.
 thiserror.workspace = true
 # scope.rs compares `Identity::scope_id` (a text column) against `PodId` (a UUID) by VALUE, not
 # by rendering — otherwise a brace-wrapped or uppercase scope_id locks a key out of its own pod.

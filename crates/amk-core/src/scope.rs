@@ -60,6 +60,15 @@ use uuid::Uuid;
 /// sentence also names the credential's scope: "... scope (organization, pod, or inbox) ...".
 /// Only the clause joining the two is ours. The envelope *key* is what the conformance diff
 /// compares; one rendering lives here so the server never emits two.
+///
+/// **One string for every [`ResourceKind`], and the restricted-label clause is [INFERRED] for
+/// most of them.** Both captures are label-bearing resources — an inbox and a message — yet this
+/// same sentence is served for a 404 on `/v0/api-keys/{id}` or `/v0/pods/{id}/webhooks/{id}`,
+/// which carry no labels at all. Varying the clause by kind would mint a *second* `fix` rendering
+/// that no capture backs, on a field the conformance diff compares, to remove a clause that is
+/// merely inapplicable rather than wrong; one over-broad string that matches both captures
+/// verbatim is the smaller invention. `every_denial_is_not_found_whatever_the_resource` pins that
+/// there is exactly one. A live 404 from a label-less endpoint would settle it.
 const MASK_FIX: &str = "Visibility depends on the credential's scope (organization, pod, or \
      inbox), and some resources (e.g. restricted labels like spam or trash) are hidden without \
      their label-read permission. The corresponding list endpoint returns only the ids visible \
@@ -104,8 +113,16 @@ impl ResourceKind {
         ResourceKind::ApiKey,
     ];
 
-    /// The noun used in the error message, e.g. `Inbox` in the observed "Inbox not found"
-    /// (fixture 05) and `Message` in "Message not found" (fixture 09b).
+    /// The noun used in the error message.
+    ///
+    /// **Two of the ten are observed, and only two**: `Inbox`, from "Inbox not found"
+    /// (`reference/fixtures/05-error-catalog.http:33`), and `Message`, from "Message not found"
+    /// (`reference/fixtures/09b-unauthenticated-variant.txt:89`).
+    ///
+    /// The other eight are **[INFERRED]** — the singular capitalised English noun those two
+    /// follow, extended to kinds whose 404 was never captured. `message` is a wire field the
+    /// conformance diff compares, so each inferred noun is a guess that one live 404 per endpoint
+    /// would settle; `API key` in particular guesses both the spacing and the capitalisation.
     pub const fn noun(self) -> &'static str {
         match self {
             ResourceKind::Organization => "Organization",
@@ -171,8 +188,9 @@ impl From<ScopeDenial> for ErrorEnvelope {
 /// This is not a scope denial: nothing was looked up, so there is nothing to mask. It is an
 /// auth-layer failure, and the auth layer answers with the bare gateway body.
 ///
-/// Citation, precisely: `reference/fixtures/05-error-catalog.http:10-16` shows the auth layer
-/// answering `403 {"message":"Forbidden"}` for a credential *it* rejects (an unknown key). A
+/// Citation, precisely: `reference/fixtures/05-error-catalog.http:6-9` shows the auth layer
+/// answering `403 {"message":"Forbidden"}` for a credential *it* rejects — both a well-formed
+/// unknown key and a malformed one (`:10-11` is the *missing*-credential form, 401). A
 /// self-contradictory **resolved** identity was never observed — it cannot be produced from
 /// outside, only by our own credential store contradicting itself. Serving it as an auth-layer
 /// failure is our choice: it is the closest observed neighbour, and it keeps an unresolvable
@@ -410,11 +428,20 @@ impl Resolved {
         }
     }
 
-    /// The window, or `None` when a probe is still outstanding.
-    pub fn into_ready(self) -> Option<ScopeFilter> {
+    /// The settled window, or the outstanding [`MountProbe`] handed straight back.
+    ///
+    /// `Err` is not a failure — it is the probe, unspent, so the handler shape
+    /// `match resolved.into_ready() { Ok(f) => serve(f), Err(p) => p.settle(store.get(…))? }`
+    /// still has the thing it must discharge. That is why this returns `Result` and not
+    /// `Option`: `None` *destroyed* the probe, leaving a handler that reached for a window
+    /// anyway (via [`Resolved::window`], or by resolving again) serving
+    /// `GET /v0/inboxes/foreign@x/threads` as `200 {"count":0}` without the mount ever being
+    /// looked up — a different answer from the 404 an absent inbox gets, which is exactly the
+    /// distinction this module exists to erase.
+    pub fn into_ready(self) -> Result<ScopeFilter, MountProbe> {
         match self {
-            Resolved::Ready(f) => Some(f),
-            Resolved::Probe(_) => None,
+            Resolved::Ready(f) => Ok(f),
+            Resolved::Probe(p) => Err(p),
         }
     }
 }
@@ -621,6 +648,17 @@ impl ScopeFilter {
     /// the offending messages would mean re-deriving `message_count` and `size` here and serving
     /// a body the store never produced — a plausible-looking answer that hides the defect. The
     /// whole thread is masked instead.
+    ///
+    /// **Deliberately the opposite of [`crate::labels::redact_thread`], which rebuilds a
+    /// partially-visible thread rather than masking it. The two situations differ; the asymmetry
+    /// is the answer, not a bug to reconcile:**
+    /// * a thread straddling two *inboxes* is **impossible** — threading is per inbox
+    ///   (`reference/fixtures/16-threading-matrix/`) — so it can only be a storage defect, and
+    ///   rebuilding one would serve a plausible body that hides the defect;
+    /// * a thread holding a *restricted-label member* is **entirely normal**, so masking it would
+    ///   hide legitimate mail the caller is entitled to.
+    ///
+    /// Scope masks; labels redact. Do not "fix" one to match the other.
     pub fn check_thread(&self, thread: Thread) -> Result<Thread, ScopeDenial> {
         let denied = || ScopeDenial::new(ResourceKind::Thread);
         if !self.admits(&thread.item.resource_scope()) {
@@ -987,7 +1025,6 @@ mod tests {
         assert_eq!(env.status(), 404);
         assert_eq!(env.name, "NotFoundError");
         assert_eq!(env.message, "Inbox not found");
-        assert_ne!(env.status(), 403);
     }
 
     #[test]
@@ -1000,6 +1037,10 @@ mod tests {
             assert_eq!(env.status(), 404, "{kind:?}");
             assert!(env.suggestions.is_empty(), "a mask must not hint at what it hid");
             assert!(env.errors.is_empty());
+            // One `fix` rendering for all ten kinds, including the six that carry no labels: the
+            // alternative is a second, uncaptured wire string on a field the conformance diff
+            // compares. See MASK_FIX.
+            assert_eq!(env.fix.as_deref(), Some(MASK_FIX), "{kind:?} must serve the one fix");
         }
     }
 
@@ -1269,15 +1310,17 @@ mod tests {
         let scope = Scope::from_identity(&pod_identity(mine)).unwrap();
         let filter = ready(&scope, Mount::Organization);
 
+        // The one visible row sits last on purpose: a filter that truncated instead of filtering
+        // would keep the wrong row, and a length check alone cannot tell the two apart.
         let page = vec![
-            thread_record(&org(), mine, INBOX),
             thread_record(&org(), theirs, OTHER_INBOX),
             thread_record(&other_org(), mine, INBOX),
+            thread_record(&org(), mine, INBOX),
         ];
-        let raw_len = page.len();
         let visible = filter.retain_visible(page);
         assert_eq!(visible.len(), 1, "scope-foreign rows must not survive");
-        assert_ne!(visible.len(), raw_len);
+        assert_eq!(visible[0].organization_id.as_ref(), Some(&org()));
+        assert_eq!(visible[0].pod_id, Some(mine), "the survivor is the credential's own row");
     }
 
     #[test]
@@ -1427,14 +1470,92 @@ mod tests {
             .is_err());
     }
 
+    // NOTE: that `check` *consumes* a denied row is a compile-time property — no runtime assert
+    // can reach it, and a test that only shows a visible row coming back duplicates four tests
+    // above. The property is enforced by the signature (`fn check<T>(&self, value: T)`) and stated
+    // in its doc comment; deleting the by-value parameter is a compile error at every call site.
+
+    // ---- a pending probe cannot be traded for a window --------------------------------------
+
     #[test]
-    fn checking_moves_the_value_so_a_denied_row_cannot_be_used() {
-        // Compile-level property: check() consumes the row and only hands it back when visible.
+    fn into_ready_hands_the_probe_back_rather_than_a_servable_window() {
+        // The sibling of `a_pod_key_on_an_inbox_mount_must_probe_before_a_collection_is_served`,
+        // and the fail-open shape: if this yielded a window for a Probe, a pod key on
+        // GET /v0/inboxes/foreign@x/threads would be served 200 {"count":0} without the mount ever
+        // being looked up, while an absent inbox answers 404.
+        let (mine, theirs) = (PodId::new_random(), PodId::new_random());
+        let scope = Scope::from_identity(&pod_identity(mine)).unwrap();
+
+        let probe = scope
+            .resolve(&Mount::Inbox(InboxId::new(OTHER_INBOX)))
+            .unwrap()
+            .into_ready()
+            .expect_err("an unproven inbox mount must not yield a servable window");
+        // Handed back unspent: it still names what to look up, and it still masks.
+        assert_eq!(probe.kind(), ResourceKind::Inbox);
+        assert_eq!(probe.mount(), &Mount::Inbox(InboxId::new(OTHER_INBOX)));
+        assert!(probe
+            .settle(Some(inbox_record(&org(), theirs, OTHER_INBOX)))
+            .is_err());
+
+        // An org key's pod mount is the same story with the other kind.
+        let org_scope = Scope::from_identity(&org_identity()).unwrap();
+        let probe = org_scope
+            .resolve(&Mount::Pod(theirs))
+            .unwrap()
+            .into_ready()
+            .expect_err("an unproven pod mount must not yield a servable window");
+        assert_eq!(probe.kind(), ResourceKind::Pod);
+        assert_eq!(probe.mount(), &Mount::Pod(theirs));
+
+        // A mount the credential itself proves settles here, with the very window resolve built.
+        let resolved = scope.resolve(&Mount::Organization).unwrap();
+        let expected = resolved.window().clone();
+        assert_eq!(resolved.into_ready().expect("nothing is pending"), expected);
+    }
+
+    #[test]
+    fn a_mixed_case_inbox_path_parameter_is_pinned_in_its_stored_lowercase_form() {
+        // Fixture 18, on the reachable path: the mount's inbox comes from the URL, so its casing
+        // is the caller's. `resolve` accepts AMK-Probe@AgentMail.To case-insensitively; were the
+        // window then to pin that raw casing, the store query built from
+        // `ScopeFilter::inbox_id()` (documented as the lowercased form, so amk-store compares a
+        // lowercased column) would match nothing and a real, populated inbox would answer
+        // 200 {"count":0}.
+        let mixed = "AMK-Probe@AgentMail.To";
         let pod = PodId::new_random();
-        let scope = Scope::from_identity(&pod_identity(pod)).unwrap();
-        let filter = ready(&scope, Mount::Organization);
-        let row = inbox_record(&org(), pod, INBOX);
-        let back = filter.check(row).expect("visible");
-        assert_eq!(back.inbox_id, InboxId::new(INBOX));
+
+        // Path-parameter mounts, for both credentials that must probe one.
+        for scope in [
+            Scope::from_identity(&org_identity()).unwrap(),
+            Scope::from_identity(&pod_identity(pod)).unwrap(),
+        ] {
+            let probe = probe_for(&scope, Mount::Inbox(InboxId::new(mixed)));
+            let pinned = probe.window().inbox_id().expect("the mount names an inbox");
+            assert_eq!(pinned.as_str(), INBOX, "{scope:?}: the window pins the stored form");
+            // The mount still echoes the URL verbatim; only the window is normalized.
+            assert_eq!(probe.mount(), &Mount::Inbox(InboxId::new(mixed)));
+            // ... and the stored row is admitted by that window.
+            let settled = probe
+                .settle(Some(inbox_record(&org(), pod, INBOX)))
+                .unwrap();
+            assert_eq!(settled.inbox_id().map(InboxId::as_str), Some(INBOX));
+        }
+
+        // The other three arms take the inbox from the credential, which is recorded in whatever
+        // casing the caller created it with.
+        let scope = Scope::from_identity(&inbox_identity(pod, mixed)).unwrap();
+        for mount in [
+            Mount::Organization,
+            Mount::Pod(pod),
+            Mount::Inbox(InboxId::new(INBOX)),
+        ] {
+            let filter = ready(&scope, mount.clone());
+            assert_eq!(
+                filter.inbox_id().map(InboxId::as_str),
+                Some(INBOX),
+                "{mount:?}: an inbox credential pins the stored form too"
+            );
+        }
     }
 }

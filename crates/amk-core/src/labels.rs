@@ -10,18 +10,28 @@
 //!
 //! # This module owns the whole visibility verdict
 //!
-//! Restricted-label admission has two inputs, and **both** are required on a list path:
+//! Restricted-label admission has two inputs:
 //!
 //! 1. the credential holds the matching `label_*_read` flag — the partial gate exposed by
 //!    [`crate::permissions::allows_label_read`], paired to its label by
 //!    [`amk_types::api_key::label_read_flag`];
-//! 2. the request set the matching `include_*` query flag (`[SPEC:openapi]`
-//!    `include_{spam,blocked,unauthenticated,trash}` on every list endpoint).
+//! 2. the request set the matching `include_*` query flag.
 //!
-//! A get-by-id needs only (1). [`admit`] is the single function that composes them, and
-//! `crate::permissions` deliberately exposes no visibility verdict of its own — when both modules
-//! answered this question they answered it differently, and the permission-only answer silently
-//! returned rows fixture `09b` proves are not returned.
+//! **How many of them apply is a property of the path, and there are three answers, not two.**
+//! `include_{spam,blocked,unauthenticated,trash}` exists on **4 of the 33 paginated GETs**
+//! (`[SPEC:openapi]`) — `/v0/threads`, `/v0/pods/{pod_id}/threads`, `/v0/inboxes/{inbox_id}/threads`
+//! and `/v0/inboxes/{inbox_id}/messages`. It exists on no search endpoint and on no drafts list:
+//!
+//! | mode | constructor | rule |
+//! |------|-------------|------|
+//! | list carrying `include_*` | [`LabelAccess::list`] | permission **and** the matching flag |
+//! | search | [`LabelAccess::search`] | permission only — restricted mail **is** returned |
+//! | get-by-id | [`LabelAccess::by_id`] | permission only |
+//!
+//! [`admit`] is the single function that composes them, and `crate::permissions` deliberately
+//! exposes no visibility verdict of its own — when both modules answered this question they
+//! answered it differently, and the permission-only answer silently returned rows fixture `09b`
+//! proves are not returned.
 //!
 //! ## What was observed, and what is inferred
 //!
@@ -42,10 +52,30 @@
 //! why [`admit`] takes no filter argument — a filter can only narrow what admission already let
 //! through.
 //!
-//! **[INFERRED]** — the *admission* half. No fixture sets any `include_*` flag, so nothing here
-//! was observed to make restricted mail appear in a list. The flags exist on every list endpoint
-//! in the spec and are the only mechanism that could; treating them as necessary-and-sufficient
-//! (alongside the permission) is the reading that matches the observation and fails closed.
+//! **Observed** (`reference/fixtures/20-search-and-label-precedence.txt`, D) — search does **not**
+//! hide restricted mail:
+//!
+//! ```text
+//! PATCH …/messages/<id>  {"add_labels":["spam"]}
+//! GET   …/messages?limit=50        -> count=5, the message ABSENT
+//! GET   …/messages/search?q=FW:    -> count=1, the message STILL RETURNED
+//! ```
+//!
+//! Same inbox, same credential, same moment. An earlier revision of this module had two modes and
+//! ran search through the list rule; because no search endpoint has an `include_*` parameter, that
+//! pinned search at [`IncludeFlags::NONE`] forever and made restricted mail unreachable by search
+//! for every credential that will ever exist. Search behaves like get-by-id, not like list.
+//!
+//! **[INFERRED]** — two halves remain unobserved, and both fail closed:
+//!
+//! * No fixture sets an `include_*` flag, so nothing was observed to make restricted mail *appear*
+//!   in a list. The flags are the only mechanism that could; treating them as
+//!   necessary-and-sufficient alongside the permission matches the observation.
+//! * Fixture 20's probe key was org-scoped and **unrestricted**, so its permission half was
+//!   trivially satisfied. What is observed is that the *include-flag* half does not gate search;
+//!   whether search would hide the message from a key lacking `label_spam_read` is unobserved.
+//!   Search is therefore treated as permission-gated exactly like get-by-id, which is the reading
+//!   that matches `09b` and fails closed.
 //!
 //! ## Admission is a storage predicate, not a post-filter
 //!
@@ -104,11 +134,22 @@ use crate::permissions::allows_label_read;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IncludeFlags(u8);
 
+/// The mask is a `u8`, so the label catalog it indexes must fit in one.
+const _: () = assert!(
+    RESTRICTED.len() <= u8::BITS as usize,
+    "IncludeFlags is a u8 bitmask over RESTRICTED; widen it before adding a ninth label"
+);
+
 impl IncludeFlags {
     /// Nothing requested — the state of a list query that names no `include_*` flag.
     pub const NONE: Self = Self(0);
-    /// Every restricted label requested. Also the state of a get-by-id, which has no such flags.
-    pub const ALL: Self = Self(0b1111);
+    /// Every restricted label requested.
+    ///
+    /// The **width** is derived from `RESTRICTED` too, not written as `0b1111`: every bit
+    /// *position* is already resolved at runtime so an upstream reorder cannot re-point a flag,
+    /// and a hardcoded width would have left a fifth label permanently unrequestable — the same
+    /// class of permanent-impossibility bug fixture 20 caught in the search mode.
+    pub const ALL: Self = Self(((1u16 << RESTRICTED.len()) - 1) as u8);
 
     /// Build from the four per-label booleans, in the order the API names them.
     pub fn from_flags(spam: bool, blocked: bool, unauthenticated: bool, trash: bool) -> Self {
@@ -164,25 +205,65 @@ fn index_of(label: &str) -> Option<usize> {
 // Admission
 // ---------------------------------------------------------------------------------------------
 
-/// The admission inputs for one request: what the credential may read and what the request asked
-/// for. Built by [`LabelAccess::list`] or [`LabelAccess::by_id`] so the two paths cannot drift.
+/// Which of the two admission inputs the *path* applies. Private: a handler names the path by
+/// picking a constructor, and cannot assemble a fourth rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// One of the four paginated GETs that carry `include_*`.
+    List(IncludeFlags),
+    /// A search endpoint. No `include_*` parameter exists here and restricted mail is returned.
+    Search,
+    /// A single-resource fetch by id.
+    ById,
+}
+
+/// The admission inputs for one request: what the credential may read, and which rule the path
+/// applies. Built by [`LabelAccess::list`], [`LabelAccess::search`] or [`LabelAccess::by_id`] so
+/// the three paths cannot drift.
 #[derive(Debug, Clone, Copy)]
 pub struct LabelAccess<'a> {
     grants: &'a KeyGrants,
-    requested: IncludeFlags,
+    mode: Mode,
 }
 
 impl<'a> LabelAccess<'a> {
-    /// A list query: both the `label_*_read` permission and the `include_*` flag are required.
+    /// One of the four paginated GETs that carry `include_*` — `/v0/threads`,
+    /// `/v0/pods/{pod_id}/threads`, `/v0/inboxes/{inbox_id}/threads`,
+    /// `/v0/inboxes/{inbox_id}/messages`. Both the `label_*_read` permission and the matching
+    /// `include_*` flag are required.
+    ///
+    /// **Only those four.** Any other paginated GET — every search endpoint, every drafts list —
+    /// has no such parameter, so routing it here would gate it on a flag its caller has no way to
+    /// set.
     pub fn list(grants: &'a KeyGrants, requested: IncludeFlags) -> Self {
-        Self { grants, requested }
+        Self { grants, mode: Mode::List(requested) }
+    }
+
+    /// A search endpoint: the permission alone decides, and restricted mail **is** returned.
+    ///
+    /// `reference/fixtures/20-search-and-label-precedence.txt` (D): a message labelled `spam`
+    /// disappeared from `GET …/messages` and was still returned by `GET …/messages/search`, for
+    /// the same credential at the same moment. Search has no `include_*` parameter, so applying
+    /// the list rule here would hide it permanently rather than pending a flag.
+    pub fn search(grants: &'a KeyGrants) -> Self {
+        Self { grants, mode: Mode::Search }
     }
 
     /// A get-by-id: there are no `include_*` flags on this path, so the permission alone decides.
     /// Fixture `09b` observed exactly this asymmetry — the message every list endpoint refused was
     /// returned in full by id.
     pub fn by_id(grants: &'a KeyGrants) -> Self {
-        Self { grants, requested: IncludeFlags::ALL }
+        Self { grants, mode: Mode::ById }
+    }
+
+    /// Whether the *request* asked for `label`. Only a list path can fail to ask: the other two
+    /// have no parameter to ask with, and treating their silence as a refusal is what made
+    /// restricted mail unreachable by search.
+    fn requested(&self, label: &str) -> bool {
+        match self.mode {
+            Mode::List(flags) => flags.contains(label),
+            Mode::Search | Mode::ById => true,
+        }
     }
 }
 
@@ -251,7 +332,7 @@ pub fn admit<S: AsRef<str>>(
     }
     for label in item_labels.iter().map(AsRef::as_ref) {
         if let Some(&restricted) = RESTRICTED.iter().find(|&&r| r == label) {
-            if !access.requested.contains(restricted) {
+            if !access.requested(restricted) {
                 return Err(LabelDenial { kind: DenialKind::NotRequested, label: restricted });
             }
         }
@@ -271,13 +352,17 @@ pub fn admits<S: AsRef<str>>(item_labels: &[S], access: &LabelAccess<'_>) -> boo
 /// by walking `next_page_token`. Dropping such rows from a page after the fact leaves the gap
 /// visible — see the module docs.
 ///
-/// Empty means nothing is hidden from this caller.
+/// Empty means nothing is hidden from this caller. **A search query for a credential that holds
+/// the label-read flags excludes nothing** — fixture 20 observed the reference API returning a
+/// spam-labelled message from search at the moment the list endpoint hid it, so an exclusion here
+/// would be a conformance failure rather than a safe default.
+///
+/// It is [`admit`]'s own verdict, applied one label at a time, so the pushed-down `WHERE` clause
+/// cannot drift from the in-memory answer.
 pub fn excluded_labels(access: &LabelAccess<'_>) -> Vec<&'static str> {
     RESTRICTED
         .into_iter()
-        .filter(|&label| {
-            !(allows_label_read(access.grants, label) && access.requested.contains(label))
-        })
+        .filter(|&label| !admits(&[label], access))
         .collect()
 }
 
@@ -288,22 +373,35 @@ pub fn excluded_labels(access: &LabelAccess<'_>) -> Vec<&'static str> {
 /// What [`redact_thread`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadRedaction {
-    /// Every member is admitted; the thread is untouched.
+    /// Every member is admitted and so is every label on the thread itself; nothing is touched.
     Unchanged,
-    /// Some members were removed and the aggregates recomputed from what remains.
+    /// Something was withheld: members removed and every aggregate recomputed from what remains,
+    /// and/or restricted labels stripped from `item.labels`. A label can offend on its own —
+    /// whether `ThreadItem.labels` is the union of its members' labels is unobserved.
     Redacted,
     /// No member is admitted. The handler must answer `not_found` — the thread itself must not be
     /// returned, because its aggregates would describe nothing the caller may see.
     Withheld,
 }
 
-/// Remove the messages this caller may not see from a thread **and recompute every aggregate that
-/// counted them**.
+/// Remove the messages this caller may not see from a thread, **recompute every aggregate that
+/// counted them, and strip the restricted labels this caller may not see from `item.labels`**.
 ///
 /// `Thread` carries `messages: Vec<Message>` alongside scalars derived from those messages —
 /// `message_count`, `size`, `last_message_id`, `timestamp`, `senders`, `recipients`, `preview`,
 /// `attachments`. Filtering the vector alone leaves each scalar still counting, sizing and naming
 /// the hidden mail, which discloses more than the message would have.
+///
+/// `item.labels` is the same failure one level up, and worse: a thread returned with no spam
+/// member, `message_count: 1`, and `"spam"` in `labels` names the very fact the redaction exists to
+/// conceal — the fact [`LabelDenial::label`] is `pub(crate)` to keep out of a 404. Offending labels
+/// are **stripped**, never rebuilt as the union of the surviving members' labels: whether
+/// `ThreadItem.labels` IS that union is unobserved (register C2 — fixture 16's only threaded
+/// example has two members carrying identical labels, so it cannot discriminate), and stripping is
+/// correct under either rule while disclosing nothing.
+///
+/// The postcondition is therefore `admits(&thread.item.labels, access)` for any body this function
+/// returns, and a thread whose own labels offend is redacted even when every member is admitted.
 ///
 /// **[INFERRED], and deliberately fail-closed.** Nothing observed says upstream does this: no
 /// fixture contains a thread whose members carry different restricted labels, so upstream's
@@ -313,20 +411,36 @@ pub enum ThreadRedaction {
 /// which is exactly why the fail-closed path is written rather than assumed away. All redaction
 /// logic lives in this one function so the assumption can be re-examined in one place.
 ///
-/// Values are **filtered, never rebuilt**: `senders`, `recipients` and `attachments` keep only
-/// entries a remaining message still accounts for, so upstream's own composition and ordering
-/// survive. `created_at` and `updated_at` are storage metadata rather than message aggregates and
-/// are left alone — a residual channel: `updated_at` still reflects the moment hidden mail
-/// arrived.
+/// Values are **filtered, never rebuilt**: `senders`, `recipients`, `attachments` and `labels` keep
+/// only entries a remaining message (or, for labels, this credential) still accounts for, so
+/// upstream's own composition and ordering survive. `created_at` and `updated_at` are storage
+/// metadata rather than message aggregates and are left alone — a residual channel: `updated_at`
+/// still reflects the moment hidden mail arrived.
+///
+/// `subject` is **not** recomputed. Nothing observed derives a thread's subject from its current
+/// membership, and fixture `16-threading-matrix/a.txt` shows the thread keeping the ROOT's subject
+/// (`"AMKthreadA d64ee47e"`) while its reply carries `"Re: AMKthreadA d64ee47e"` — so hiding the
+/// root and re-deriving from `messages[0]` would rewrite the subject to a value no artifact
+/// supports. Leaving it is the residual channel upstream itself already has.
 pub fn redact_thread(thread: &mut Thread, access: &LabelAccess<'_>) -> ThreadRedaction {
-    if thread
-        .messages
+    let Thread { item, messages } = thread;
+    let leaks_a_label = item
+        .labels
         .iter()
-        .all(|m| admits(&m.item.labels, access))
-    {
+        .any(|l| !admits(std::slice::from_ref(l), access));
+    let hides_a_member = messages.iter().any(|m| !admits(&m.item.labels, access));
+    if !leaks_a_label && !hides_a_member {
         return ThreadRedaction::Unchanged;
     }
-    let Thread { item, messages } = thread;
+
+    item.labels
+        .retain(|l| admits(std::slice::from_ref(l), access));
+    if !hides_a_member {
+        // Every member survives, so no aggregate counted anything this caller may not see; only
+        // the thread's own label list did. Recomputing aggregates here could only invent values.
+        return ThreadRedaction::Redacted;
+    }
+
     messages.retain(|m| admits(&m.item.labels, access));
     let Some(last) = messages.last() else {
         return ThreadRedaction::Withheld;
@@ -335,7 +449,6 @@ pub fn redact_thread(thread: &mut Thread, access: &LabelAccess<'_>) -> ThreadRed
     item.last_message_id = last.item.message_id.clone();
     item.timestamp = last.item.timestamp;
     item.preview = last.item.preview.clone();
-    item.subject = messages[0].item.subject.clone();
     item.message_count = messages.len() as u64;
     item.size = messages.iter().map(|m| m.item.size).sum();
     item.received_timestamp = latest_timestamp_labelled(messages, labels::RECEIVED);
@@ -384,7 +497,7 @@ fn latest_timestamp_labelled(
 // Mutation
 // ---------------------------------------------------------------------------------------------
 
-/// The labels a **thread** PATCH may neither add nor remove.
+/// The labels a client PATCH may neither add nor remove, on a **message or a thread** alike.
 ///
 /// **`[TESTED]` — the exact set, not a floor.** `reference/fixtures/19-message-label-patch-gate.txt`
 /// PATCHed every candidate onto a live message: `sent`, `received`, `bounced` and `scheduled`
@@ -412,10 +525,14 @@ pub fn system_labels() -> Vec<&'static str> {
     labels::SYSTEM.to_vec()
 }
 
-/// Whether a **thread** PATCH is forbidden from touching this label. Match is exact: labels are
-/// free-form strings and nothing here case-folds them (see [`apply_mutation`]).
+/// Whether a client PATCH is forbidden from touching this label — on a **message exactly as on a
+/// thread**. Match is exact: labels are free-form strings and nothing here case-folds them (see
+/// [`apply_mutation`]).
 ///
-/// Message PATCH has no such gate — `type_messages:UpdateMessageRequest` imposes none.
+/// The spec text tempts the opposite reading, because `type_threads:UpdateThreadRequest` says
+/// "Cannot be system labels" and `type_messages:UpdateMessageRequest` says nothing. Two reviewers
+/// and this project's own dispatch instruction reached that reading; fixture 19 PATCHed all four
+/// onto a live **message** and got 400 `validation_error` each time.
 pub fn is_system(label: &str) -> bool {
     system_labels().contains(&label)
 }
@@ -436,20 +553,49 @@ impl MutationField {
     }
 }
 
-/// A client-supplied label that the client is not allowed to set on a thread.
+/// A client-supplied label that the client is not allowed to set on a **message or a thread**.
+///
+/// `field` and `index` together are the observed `errors[].path`. Fixture 19's verbatim body:
+///
+/// ```json
+/// {"code":"custom","message":"Cannot use system label: bounced","path":["add_labels",0]}
+/// ```
+///
+/// — field name **then** array index. The index is **per field**: `remove_labels` is validated
+/// after `add_labels`, so a running count across both would report `["remove_labels",2]` for the
+/// first element of `remove_labels`, and the label alone cannot stand in for the position because
+/// it is not unique (`{"add_labels":["sent","sent"]}` is a legal request body).
+///
+/// amk-http renders the path as `[field.as_field_name(), index]`; amk-core does not build it
+/// itself, because `ValidationIssue::path` is a `Vec<serde_json::Value>` and this crate takes no
+/// serde_json dependency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemLabelViolation {
     pub field: MutationField,
+    /// Position within `field`'s own array — **not** across both arrays.
+    pub index: usize,
     pub label: String,
 }
 
-/// Every system label a client PATCH tried to add or remove, on **either** a thread or a message.
-/// Empty means the mutation is allowed.
+impl SystemLabelViolation {
+    /// The `errors[].message` the live API returns, verbatim from fixture 19
+    /// (`"Cannot use system label: bounced"`). A validation error conceals nothing, so naming the
+    /// offending label here is correct — unlike the `not_found` masking path.
+    pub fn message(&self) -> String {
+        format!("Cannot use system label: {}", self.label)
+    }
+}
+
+/// Every system label a client PATCH tried to add or remove, on **either** a thread or a message,
+/// each carrying the position it occupied in its own array. Empty means the mutation is allowed.
 ///
-/// All violations are returned rather than just the first, because the validation envelope carries
-/// an `errors[]` array — though note the live API rejects the **whole** mutation when any element
-/// offends (fixture 19: `{"remove_labels":["spam","bounced"]}` failed as a unit rather than
-/// applying the valid half), so the caller must not partially apply.
+/// A non-empty result rejects the **whole** mutation — fixture 19's cleanup attempt
+/// `{"remove_labels":["spam","bounced"]}` returned 400 as a unit rather than removing the legal
+/// `spam` and refusing `bounced`. There is no partial application: the caller returns
+/// `validation_error` and mutates nothing.
+///
+/// All violations are returned rather than just the first, because the envelope carries an
+/// `errors[]` array.
 ///
 /// Applies to messages as well as threads. The spec text says otherwise by omission, and that
 /// omission misled two reviewers and this project's own dispatch; fixture 19 observed a message
@@ -461,18 +607,33 @@ pub fn system_label_violations<A: AsRef<str>, R: AsRef<str>>(
     add: &[A],
     remove: &[R],
 ) -> Vec<SystemLabelViolation> {
-    let adds = add.iter().map(|l| (MutationField::Add, l.as_ref()));
-    let removes = remove.iter().map(|l| (MutationField::Remove, l.as_ref()));
+    // `enumerate` per field, not across the chain: the index is a position within `add_labels` or
+    // within `remove_labels`, which is what the observed path spells.
+    let adds = add
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (MutationField::Add, i, l.as_ref()));
+    let removes = remove
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (MutationField::Remove, i, l.as_ref()));
     adds.chain(removes)
-        .filter(|(_, label)| is_system(label))
-        .map(|(field, label)| SystemLabelViolation { field, label: label.to_owned() })
+        .filter(|(_, _, label)| is_system(label))
+        .map(|(field, index, label)| SystemLabelViolation { field, index, label: label.to_owned() })
         .collect()
 }
 
 /// Apply an add/remove pair to a label list.
 ///
-/// * `remove` wins over `add` for a label named in both (`[SPEC:openapi]`: *"Takes priority over
-///   `add_labels` (in the event of duplicate labels passed in)"*).
+/// * `remove` wins over `add` for a label named in both — **`[TESTED]` on a message**, not read
+///   across from the thread schema. `[SPEC:openapi]` states *"Takes priority over `add_labels` (in
+///   the event of duplicate labels passed in)"* on `type_threads:UpdateThreadRequest` only, and
+///   `type_messages:UpdateMessageRequest` says merely "Label or labels to remove from message"; an
+///   earlier revision applied the thread sentence to messages anyway.
+///   `reference/fixtures/20-search-and-label-precedence.txt` (C) probed it live —
+///   `{"add_labels":["probe-conflict"],"remove_labels":["probe-conflict"]}` returned 200 with
+///   `labels: ["received","unread"]`, the label absent. The generalisation was right and no longer
+///   rests on being right.
 /// * Existing order and existing contents are preserved exactly; new labels are appended in the
 ///   order given, and a label already present is not appended again.
 /// * A duplicate already on the record **stays**. Collapsing it would rewrite stored labels on a
@@ -505,8 +666,8 @@ pub fn apply_mutation<A: AsRef<str>, R: AsRef<str>>(
 mod tests {
     use super::*;
     use amk_types::api_key::ApiKeyPermissions;
-    use amk_types::ids::{InboxId, MessageId, ThreadId};
-    use amk_types::message::{Message, MessageItem};
+    use amk_types::ids::{AttachmentId, InboxId, MessageId, ThreadId};
+    use amk_types::message::{Attachment, Message, MessageItem};
     use amk_types::thread::ThreadItem;
 
     fn v(labels: &[&str]) -> Vec<String> {
@@ -551,6 +712,22 @@ mod tests {
             }
         }
         assert_eq!(IncludeFlags::from_flags(true, true, true, true), IncludeFlags::ALL);
+    }
+
+    #[test]
+    fn the_all_mask_is_as_wide_as_the_label_catalog() {
+        // The width is the one thing that used to be a hardcoded copy of RESTRICTED.len(): a fifth
+        // restricted label upstream would have stayed permanently unrequestable behind `0b1111`.
+        for &label in RESTRICTED.iter() {
+            assert!(IncludeFlags::ALL.contains(label), "{label} is outside the ALL mask");
+        }
+        assert_eq!(
+            RESTRICTED
+                .iter()
+                .filter(|l| IncludeFlags::ALL.contains(l))
+                .count(),
+            RESTRICTED.len()
+        );
     }
 
     #[test]
@@ -698,6 +875,71 @@ mod tests {
     }
 
     #[test]
+    fn fixture_20_search_returns_the_message_the_list_endpoint_hid() {
+        // reference/fixtures/20-search-and-label-precedence.txt (D), verbatim:
+        //   PATCH …/messages/{mid} {"add_labels":["spam"]}
+        //   GET   …/messages?limit=50     -> count=5, the message ABSENT
+        //   GET   …/messages/search?q=FW: -> count=1, the message STILL RETURNED
+        // Same inbox, same unrestricted credential, same moment.
+        let grants = KeyGrants::Unrestricted;
+        let row = v(&["received", "unread", "spam"]);
+
+        let listed = LabelAccess::list(&grants, IncludeFlags::from_params(&ListParams::default()));
+        assert!(!admits(&row, &listed), "the list endpoint hid it");
+
+        let searched = LabelAccess::search(&grants);
+        assert!(admits(&row, &searched), "search returned it");
+        assert!(
+            excluded_labels(&searched).is_empty(),
+            "a search query must push down NO label exclusion for this credential — hiding mail \
+             the reference API returns is a conformance failure, not a safe default"
+        );
+    }
+
+    #[test]
+    fn search_is_permission_gated_exactly_like_get_by_id() {
+        // [INFERRED], fail-closed: fixture 20's probe key was unrestricted, so only the
+        // include-flag half of the rule was observed. The permission half is read across from 09b,
+        // where the get-by-id path needed it.
+        let row = v(&["received", "spam"]);
+        let permitted = reader(true, false, false, false);
+        let denied = no_label_flags();
+        for (grants, expected) in [(&permitted, true), (&denied, false)] {
+            assert_eq!(admits(&row, &LabelAccess::search(grants)), expected);
+            assert_eq!(
+                admits(&row, &LabelAccess::by_id(grants)),
+                expected,
+                "search and get-by-id must reach the same verdict"
+            );
+        }
+        let denial = admit(&row, &LabelAccess::search(&denied)).unwrap_err();
+        assert_eq!(denial.kind(), DenialKind::NotPermitted);
+        assert_eq!(excluded_labels(&LabelAccess::search(&denied)), RESTRICTED.to_vec());
+        assert_eq!(
+            excluded_labels(&LabelAccess::search(&permitted)),
+            vec![labels::BLOCKED, labels::UNAUTHENTICATED, labels::TRASH]
+        );
+    }
+
+    #[test]
+    fn only_a_list_path_can_withhold_for_a_missing_flag() {
+        // The include_* parameter exists on 4 of the 33 paginated GETs. A path that has no such
+        // parameter must never be routed through the list rule: `IncludeFlags::NONE` would be
+        // permanent and no request could ever lift it.
+        let grants = all_label_flags();
+        let row = v(&["spam"]);
+        assert_eq!(
+            admit(&row, &LabelAccess::list(&grants, IncludeFlags::NONE))
+                .unwrap_err()
+                .kind(),
+            DenialKind::NotRequested
+        );
+        for access in [LabelAccess::search(&grants), LabelAccess::by_id(&grants)] {
+            assert!(admits(&row, &access), "no flag exists to be missing on this path");
+        }
+    }
+
+    #[test]
     fn get_by_id_needs_the_permission_but_never_a_flag() {
         // Same fixture: the unauthenticated message was retrievable by id with no include_* flag
         // in sight, and a credential without the label-read permission gets not_found instead.
@@ -731,14 +973,22 @@ mod tests {
                 perm_bits & 4 != 0,
                 perm_bits & 8 != 0,
             );
-            for req_bits in 0u8..16 {
-                let requested = IncludeFlags::from_flags(
-                    req_bits & 1 != 0,
-                    req_bits & 2 != 0,
-                    req_bits & 4 != 0,
-                    req_bits & 8 != 0,
-                );
-                let access = LabelAccess::list(&grants, requested);
+            // 0..16 are the list queries; 16 is search and 17 is get-by-id, neither of which has
+            // a flag to vary.
+            for req_bits in 0u8..18 {
+                let access = match req_bits {
+                    16 => LabelAccess::search(&grants),
+                    17 => LabelAccess::by_id(&grants),
+                    bits => LabelAccess::list(
+                        &grants,
+                        IncludeFlags::from_flags(
+                            bits & 1 != 0,
+                            bits & 2 != 0,
+                            bits & 4 != 0,
+                            bits & 8 != 0,
+                        ),
+                    ),
+                };
                 let excluded = excluded_labels(&access);
                 for row_bits in 0u8..16 {
                     let mut row = vec!["received".to_string()];
@@ -762,7 +1012,9 @@ mod tests {
     fn a_caller_that_may_see_everything_excludes_nothing() {
         let grants = all_label_flags();
         assert!(excluded_labels(&LabelAccess::list(&grants, IncludeFlags::ALL)).is_empty());
+        assert!(excluded_labels(&LabelAccess::search(&grants)).is_empty());
         assert!(excluded_labels(&LabelAccess::by_id(&grants)).is_empty());
+        assert!(excluded_labels(&LabelAccess::search(&KeyGrants::Unrestricted)).is_empty());
         assert!(excluded_labels(&LabelAccess::by_id(&KeyGrants::Unrestricted)).is_empty());
 
         // ...and the default list query excludes all four, even for that caller.
@@ -811,6 +1063,46 @@ mod tests {
         }
     }
 
+    fn at(mut m: Message, second: u32) -> Message {
+        let stamp = ts(&format!("2026-08-15T05:54:{second:02}.000Z"));
+        m.item.timestamp = stamp;
+        m.item.updated_at = stamp;
+        m.item.created_at = stamp;
+        m
+    }
+
+    fn with_cc(mut m: Message, cc: &[&str]) -> Message {
+        m.item.cc = Some(cc.iter().map(|s| (*s).to_string()).collect());
+        m
+    }
+
+    fn with_attachment(mut m: Message, filename: &str) -> Message {
+        m.item.attachments = Some(vec![Attachment {
+            attachment_id: AttachmentId::new_random(),
+            filename: Some(filename.to_string()),
+            size: 7,
+            content_type: Some("text/plain".to_string()),
+            content_disposition: None,
+            content_id: None,
+        }]);
+        m
+    }
+
+    /// The filenames of an attachment list, which is what a test can name; `AttachmentId` is a
+    /// random UUID.
+    fn filenames(attachments: &Option<Vec<Attachment>>) -> Vec<String> {
+        attachments
+            .iter()
+            .flatten()
+            .map(|a| a.filename.clone().unwrap_or_default())
+            .collect()
+    }
+
+    fn with_subject(mut m: Message, subject: &str) -> Message {
+        m.item.subject = Some(subject.to_string());
+        m
+    }
+
     fn distinct(values: impl IntoIterator<Item = String>) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for value in values {
@@ -823,6 +1115,10 @@ mod tests {
 
     fn thread(messages: Vec<Message>) -> Thread {
         let last = messages.last().unwrap().clone();
+        let attachments: Vec<Attachment> = messages
+            .iter()
+            .flat_map(|m| m.item.attachments.iter().flatten().cloned())
+            .collect();
         Thread {
             item: ThreadItem {
                 organization_id: None,
@@ -834,10 +1130,18 @@ mod tests {
                 received_timestamp: None,
                 sent_timestamp: None,
                 senders: distinct(messages.iter().map(|m| m.item.from.clone())),
-                recipients: distinct(messages.iter().flat_map(|m| m.item.to.clone())),
+                recipients: distinct(messages.iter().flat_map(|m| {
+                    m.item
+                        .to
+                        .iter()
+                        .chain(m.item.cc.iter().flatten())
+                        .chain(m.item.bcc.iter().flatten())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })),
                 subject: messages[0].item.subject.clone(),
                 preview: last.item.preview.clone(),
-                attachments: None,
+                attachments: (!attachments.is_empty()).then_some(attachments),
                 last_message_id: last.item.message_id.clone(),
                 message_count: messages.len() as u64,
                 size: messages.iter().map(|m| m.item.size).sum(),
@@ -861,35 +1165,152 @@ mod tests {
         assert_eq!(t, before);
     }
 
+    /// Two visible messages and one hidden one, with every aggregate given enough variety that a
+    /// deleted branch changes the answer: an attachment and a recipient that only the hidden
+    /// message accounts for, and two surviving `received` members at different timestamps.
+    fn mixed_thread() -> Thread {
+        thread(vec![
+            at(
+                with_attachment(
+                    message("<a@x>", &["received"], "alice@x", &["amk-probe@agentmail.to"], 10),
+                    "att-a.txt",
+                ),
+                1,
+            ),
+            at(
+                with_cc(
+                    message("<b@x>", &["received"], "carol@x", &["amk-probe@agentmail.to"], 20),
+                    &["dave@x"],
+                ),
+                2,
+            ),
+            at(
+                with_attachment(
+                    message(
+                        "<c@x>",
+                        &["received", "spam"],
+                        "mallory@evil",
+                        &["amk-probe@agentmail.to", "victim@x"],
+                        999,
+                    ),
+                    "att-evil.txt",
+                ),
+                3,
+            ),
+        ])
+    }
+
     #[test]
     fn hiding_a_member_recomputes_every_aggregate_that_counted_it() {
         // The defect this pins: filtering `messages` alone leaves message_count, size,
-        // last_message_id, senders, recipients and preview describing the hidden message.
+        // last_message_id, senders, recipients, attachments and preview describing the hidden
+        // message.
+        let grants = no_label_flags();
+        let access = LabelAccess::by_id(&grants);
+        let mut t = mixed_thread();
+        assert_eq!(t.item.message_count, 3);
+        assert_eq!(redact_thread(&mut t, &access), ThreadRedaction::Redacted);
+
+        assert_eq!(t.messages.len(), 2);
+        assert_eq!(t.item.message_count, 2);
+        assert_eq!(t.item.size, 30, "size must not include the hidden message");
+        assert_eq!(t.item.last_message_id, MessageId::new("<b@x>"));
+        assert_eq!(t.item.timestamp, t.messages[1].item.timestamp);
+        assert_eq!(t.item.preview.as_deref(), Some("preview <b@x>"));
+        assert_eq!(t.item.senders, v(&["alice@x", "carol@x"]), "the hidden sender must be gone");
+        assert_eq!(
+            t.item.recipients,
+            v(&["amk-probe@agentmail.to", "dave@x"]),
+            "a recipient only the hidden message named must be gone, a cc'd one must stay"
+        );
+        assert_eq!(
+            filenames(&t.item.attachments),
+            v(&["att-a.txt"]),
+            "the hidden message's attachment must be gone"
+        );
+        assert_eq!(
+            t.item.received_timestamp,
+            Some(t.messages[1].item.timestamp),
+            "the LATEST surviving `received` member, not the earliest"
+        );
+        assert_ne!(t.item.received_timestamp, Some(t.messages[0].item.timestamp));
+        assert_eq!(t.item.sent_timestamp, None);
+    }
+
+    #[test]
+    fn redaction_strips_the_label_it_exists_to_hide() {
+        // The disclosure this pins: the body came back with no spam message, message_count
+        // recomputed, and `spam` still standing in `labels` — naming exactly the fact the
+        // redaction conceals, which is why LabelDenial::label is pub(crate).
+        let grants = no_label_flags();
+        let access = LabelAccess::by_id(&grants);
+        let mut t = mixed_thread();
+        assert!(t.item.labels.contains(&"spam".to_string()));
+        assert_eq!(redact_thread(&mut t, &access), ThreadRedaction::Redacted);
+
+        assert_eq!(t.item.labels, v(&["received"]));
+        assert!(
+            admits(&t.item.labels, &access),
+            "the returned body must satisfy the same admission rule that hid the member"
+        );
+
+        // A credential that MAY see spam gets the label and the message both.
+        let permitted = reader(true, false, false, false);
+        let mut t = mixed_thread();
+        assert_eq!(
+            redact_thread(&mut t, &LabelAccess::by_id(&permitted)),
+            ThreadRedaction::Unchanged
+        );
+        assert!(t.item.labels.contains(&"spam".to_string()));
+    }
+
+    #[test]
+    fn a_thread_labelled_beyond_its_members_is_redacted_even_when_every_member_is_visible() {
+        // Whether ThreadItem.labels is the union of its members' labels is unobserved (register
+        // C2). If it is not, a thread can name `spam` while every member is admissible — and
+        // returning it unchanged would leak the label with no member to blame.
         let grants = no_label_flags();
         let access = LabelAccess::by_id(&grants);
         let mut t = thread(vec![
-            message("<a@x>", &["received"], "alice@x", &["amk-probe@agentmail.to"], 10),
-            message(
-                "<b@x>",
-                &["received", "spam"],
-                "mallory@evil",
-                &["amk-probe@agentmail.to"],
-                999,
+            at(message("<a@x>", &["received"], "alice@x", &["amk-probe@agentmail.to"], 10), 1),
+            at(message("<b@x>", &["received"], "alice@x", &["amk-probe@agentmail.to"], 20), 2),
+        ]);
+        t.item.labels.push("spam".to_string());
+
+        assert_eq!(redact_thread(&mut t, &access), ThreadRedaction::Redacted);
+        assert_eq!(t.item.labels, v(&["received"]));
+        assert!(admits(&t.item.labels, &access));
+        assert_eq!(t.messages.len(), 2, "no member offended, so no member is dropped");
+        assert_eq!(t.item.message_count, 2, "and no aggregate is re-derived");
+        assert_eq!(t.item.size, 30);
+    }
+
+    #[test]
+    fn redaction_never_rewrites_the_subject() {
+        // fixture 16-threading-matrix/a.txt: the thread keeps the ROOT's subject while its reply
+        // carries "Re: …". Nothing observed derives a thread subject from current membership, so
+        // hiding the root must not promote the reply's subject — that value has no artifact behind
+        // it.
+        let grants = no_label_flags();
+        let access = LabelAccess::by_id(&grants);
+        let root = "AMKthreadA d64ee47e";
+        let mut t = thread(vec![
+            with_subject(
+                message("<a-root@probe.test>", &["received", "spam"], "alice@x", &["probe@x"], 10),
+                root,
+            ),
+            with_subject(
+                message("<a-reply@probe.test>", &["received"], "bob@x", &["probe@x"], 20),
+                "Re: AMKthreadA d64ee47e",
             ),
         ]);
-        assert_eq!(t.item.message_count, 2);
+        assert_eq!(t.item.subject.as_deref(), Some(root));
         assert_eq!(redact_thread(&mut t, &access), ThreadRedaction::Redacted);
-
-        assert_eq!(t.messages.len(), 1);
-        assert_eq!(t.item.message_count, 1);
-        assert_eq!(t.item.size, 10, "size must not include the hidden message");
-        assert_eq!(t.item.last_message_id, MessageId::new("<a@x>"));
-        assert_eq!(t.item.timestamp, t.messages[0].item.timestamp);
-        assert_eq!(t.item.preview.as_deref(), Some("preview <a@x>"));
-        assert_eq!(t.item.senders, vec!["alice@x".to_string()], "the hidden sender must be gone");
-        assert_eq!(t.item.recipients, vec!["amk-probe@agentmail.to".to_string()]);
-        assert_eq!(t.item.received_timestamp, Some(t.messages[0].item.timestamp));
-        assert_eq!(t.item.sent_timestamp, None);
+        assert_eq!(
+            t.item.subject.as_deref(),
+            Some(root),
+            "the root is hidden; its subject is still the thread's"
+        );
     }
 
     #[test]
@@ -930,13 +1351,18 @@ mod tests {
             assert!(is_system(label), "the spec names {label} as a system label");
             assert_eq!(
                 system_label_violations(&[label], &[] as &[&str]),
-                vec![SystemLabelViolation { field: MutationField::Add, label: label.to_string() }],
+                vec![SystemLabelViolation {
+                    field: MutationField::Add,
+                    index: 0,
+                    label: label.to_string()
+                }],
                 "adding {label} must be rejected"
             );
             assert_eq!(
                 system_label_violations(&[] as &[&str], &[label]),
                 vec![SystemLabelViolation {
                     field: MutationField::Remove,
+                    index: 0,
                     label: label.to_string()
                 }],
                 "removing {label} must be rejected"
@@ -1007,6 +1433,53 @@ mod tests {
     }
 
     #[test]
+    fn each_violation_carries_the_position_the_wire_path_names() {
+        // fixture 19's verbatim body:
+        //   {"code":"custom","message":"Cannot use system label: bounced","path":["add_labels",0]}
+        // Field name THEN array index — so amk-http renders [field.as_field_name(), index], and
+        // without `index` it could not reproduce the envelope at all.
+        let one = system_label_violations(&["bounced"], &[] as &[&str]);
+        assert_eq!((one[0].field.as_field_name(), one[0].index), ("add_labels", 0));
+        assert_eq!(one[0].message(), "Cannot use system label: bounced");
+
+        // The index is per FIELD. `remove_labels` is validated after `add_labels`, so a running
+        // count across both would spell ["remove_labels", 2] for its first element.
+        let both = system_label_violations(&["x", "sent"], &["received", "y"]);
+        assert_eq!(
+            both.iter()
+                .map(|b| (b.field.as_field_name(), b.index, b.label.as_str()))
+                .collect::<Vec<_>>(),
+            [("add_labels", 1, "sent"), ("remove_labels", 0, "received")]
+        );
+
+        // The label cannot stand in for the position: it is not unique within one field.
+        let dup = system_label_violations(&["sent", "sent"], &[] as &[&str]);
+        assert_eq!(dup.iter().map(|b| b.index).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn one_offending_label_rejects_the_whole_mutation() {
+        // fixture 19: {"remove_labels":["spam","bounced"]} returned 400 as a unit — the legal
+        // `spam` was NOT removed. The gate is a whole-request verdict, so a caller that saw any
+        // violation applies nothing; nothing here offers a partially-applied result to reach for.
+        let violations = system_label_violations(&[] as &[&str], &["spam", "bounced"]);
+        assert_eq!(
+            violations
+                .iter()
+                .map(|b| (b.field.as_field_name(), b.index, b.label.as_str()))
+                .collect::<Vec<_>>(),
+            [("remove_labels", 1, "bounced")],
+            "the legal `spam` at index 0 is not reported, and is not applied either"
+        );
+        // What partial application would have produced, and did not: the gate runs first and the
+        // caller returns validation_error without reaching apply_mutation.
+        assert_eq!(
+            apply_mutation(&v(&["received", "spam"]), &[] as &[&str], &["spam", "bounced"]),
+            v(&["received"])
+        );
+    }
+
+    #[test]
     fn a_free_form_label_that_merely_resembles_a_system_one_is_allowed() {
         assert!(system_label_violations(
             &["Sent", "spam-suspect", "trashed", "bounce"],
@@ -1019,7 +1492,17 @@ mod tests {
 
     #[test]
     fn remove_wins_over_add_for_a_label_named_in_both() {
-        // [SPEC:openapi] UpdateThreadRequest.remove_labels: "Takes priority over `add_labels`".
+        // [TESTED] on a MESSAGE — reference/fixtures/20-search-and-label-precedence.txt (C):
+        //   PATCH …/messages/{mid} {"add_labels":["probe-conflict"],
+        //                           "remove_labels":["probe-conflict"]}
+        //   -> 200  labels: ["received","unread"]      # the label is ABSENT: remove won
+        // The rule was previously read across from the thread schema, where [SPEC:openapi] says
+        // "Takes priority over `add_labels`"; the message schema says nothing. The generalisation
+        // was right, and no longer depends on being right.
+        assert_eq!(
+            apply_mutation(&v(&["received", "unread"]), &["probe-conflict"], &["probe-conflict"]),
+            v(&["received", "unread"])
+        );
         assert_eq!(apply_mutation(&v(&["a"]), &["b"], &["b"]), v(&["a"]));
         assert_eq!(apply_mutation(&v(&["a", "b"]), &["b"], &["b"]), v(&["a"]));
     }
