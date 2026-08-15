@@ -42,9 +42,13 @@
 
 pub mod error;
 pub mod inboxes;
+pub mod messages;
 pub mod organizations;
+pub mod pagination;
 pub mod pods;
 pub mod pool;
+pub mod threads;
 
 pub use error::{PageTokenError, StoreError};
+pub use pagination::{MessageCursor, Page, SortDirection, ThreadCursor};
 pub use pool::{connect, connect_unmigrated};
