@@ -27,11 +27,28 @@ const DATABASE_URL: &str = "postgres://amk:amk-dev-local@127.0.0.1:55432/amk";
 /// reused by another hangs the moment it needs to grow past whatever idle connections happened to
 /// survive. Connecting fresh (~25-90ms, confirmed against the dev database) costs far less than
 /// debugging that. Returns `None` when the dev database is unreachable — every DB-touching test
-/// must skip cleanly rather than fail, per the dispatch contract.
+/// must skip cleanly rather than fail, per the dispatch contract, so `cargo test` on a machine
+/// without Postgres still passes.
+///
+/// That skip is exactly what makes this gate silent in the direction that matters: a test suite
+/// that reports `ok` whether or not it touched a database cannot tell "22 integration tests
+/// passed" from "22 integration tests did nothing", and a gate that can silently verify nothing is
+/// worse than one that fails. `AMK_REQUIRE_DB=1` closes that hole for a caller that already knows
+/// a database is supposed to be there (`scripts/check.sh` sets it when the dev database answers):
+/// with it set, an unreachable database is a **panic**, not a skip, so a developer whose local
+/// Postgres breaks gets a loud failure instead of a quiet, meaningless pass. Any other value, or
+/// the variable unset, keeps today's skip behaviour.
 pub async fn pool() -> Option<PgPool> {
     match amk_store::connect(DATABASE_URL).await {
         Ok(p) => Some(p),
         Err(e) => {
+            if std::env::var("AMK_REQUIRE_DB").as_deref() == Ok("1") {
+                panic!(
+                    "AMK_REQUIRE_DB=1 but the dev database is unreachable ({e}). \
+                     Run `./scripts/dev-db.sh up`, or unset AMK_REQUIRE_DB to allow this suite \
+                     to skip its database-backed tests."
+                );
+            }
             eprintln!("skipping: dev database unreachable ({e})");
             None
         }

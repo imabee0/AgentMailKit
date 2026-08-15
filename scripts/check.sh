@@ -32,6 +32,17 @@ if [ "$FAST" -eq 0 ]; then
 fi
 
 step "tests"
+# amk-store's DB-backed integration tests skip cleanly when Postgres is unreachable, per its
+# dispatch contract — but a gate that reports "ok" whether or not it touched a database cannot
+# tell "passed" from "silently verified nothing". So: if the dev database answers, require it
+# (AMK_REQUIRE_DB=1 turns an unreachable-database skip into a panic in
+# crates/amk-store/tests/support/mod.rs), and if it does not, say so out loud instead of passing
+# quietly. Never started here — scripts/dev-db.sh is a human/CI step, not this script's job.
+if timeout 1 bash -c '(exec 3<>/dev/tcp/127.0.0.1/55432) 2>/dev/null'; then
+  export AMK_REQUIRE_DB=1
+else
+  echo "  dev database unreachable at 127.0.0.1:55432 — amk-store's DB-backed integration tests are SKIPPED, not verified (run ./scripts/dev-db.sh up to cover them)"
+fi
 run cargo test --workspace
 
 step "shape provenance"
