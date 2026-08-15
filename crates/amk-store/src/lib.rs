@@ -41,6 +41,9 @@
 // `api_keys`. It needs `amk-types::api_key::ApiKey` (ported from `openapi.json`) before it can.
 
 pub mod error;
+pub mod inboxes;
+pub mod organizations;
+pub mod pods;
 pub mod pool;
 
 pub use error::{PageTokenError, StoreError};

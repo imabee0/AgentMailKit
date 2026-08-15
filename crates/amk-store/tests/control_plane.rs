@@ -1,0 +1,208 @@
+//! Organizations / pods / inboxes: create/get/list/delete, idempotent `client_id` replay, and the
+//! two edge cases the dispatch names explicitly:
+//! * two simultaneous creates of the same inbox username → exactly one wins, via real database
+//!   concurrency, not a check-then-insert race;
+//! * a case-variant `inbox_id` resolves to one row, and two case-variant usernames collide.
+
+mod support;
+
+use amk_store::inboxes::{self, NewInbox};
+use amk_store::pods::{self, NewPod};
+use amk_store::{organizations, StoreError};
+use amk_types::ids::{InboxId, PodId};
+
+#[tokio::test]
+async fn organization_create_get_list_delete_round_trips() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+
+    let org = support::seed_org(&pool).await;
+    let fetched = organizations::get(&pool, &org)
+        .await
+        .unwrap()
+        .expect("just created");
+    assert_eq!(fetched.organization_id, org);
+    assert_eq!(fetched.inbox_count, 0, "no inboxes yet");
+    assert!(organizations::list(&pool)
+        .await
+        .unwrap()
+        .iter()
+        .any(|o| o.organization_id == org));
+
+    assert!(organizations::delete(&pool, &org).await.unwrap());
+    assert!(organizations::get(&pool, &org).await.unwrap().is_none());
+    // Deleting an already-absent organization is a no-op, not an error.
+    assert!(!organizations::delete(&pool, &org).await.unwrap());
+}
+
+#[tokio::test]
+async fn pod_client_id_replay_returns_the_original_row_not_a_duplicate() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+
+    let org = support::seed_org(&pool).await;
+    let client_id = format!("replay-{}", support::unique_suffix());
+    let new = || NewPod {
+        organization_id: org.clone(),
+        pod_id: PodId::new_random(),
+        client_id: Some(client_id.clone()),
+        name: "replayed-pod".into(),
+    };
+
+    let first = pods::create(&pool, new()).await.unwrap();
+    let second = pods::create(&pool, new()).await.unwrap();
+    assert_eq!(
+        first.pod_id, second.pod_id,
+        "replay must return the original pod, not a new one"
+    );
+
+    let all = pods::list(&pool, &org).await.unwrap();
+    assert_eq!(all.len(), 1, "exactly one row must exist for the replayed client_id");
+}
+
+#[tokio::test]
+async fn inbox_client_id_replay_returns_the_original_row_not_a_duplicate() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let client_id = format!("replay-{}", support::unique_suffix());
+    let username = format!("replay-inbox-{}@example.test", support::unique_suffix());
+    let new = || NewInbox {
+        inbox_id: InboxId::new(username.clone()),
+        organization_id: org.clone(),
+        pod_id: pod,
+        client_id: Some(client_id.clone()),
+        display_name: None,
+        metadata: None,
+    };
+
+    let first = inboxes::create(&pool, new()).await.unwrap();
+    let second = inboxes::create(&pool, new()).await.unwrap();
+    assert_eq!(first.inbox_id, second.inbox_id);
+
+    let all = inboxes::list(&pool, &org, None).await.unwrap();
+    assert_eq!(
+        all.iter()
+            .filter(|i| i.client_id.as_deref() == Some(client_id.as_str()))
+            .count(),
+        1
+    );
+}
+
+/// The concurrency edge case: two real, simultaneous `create()` calls for the same normalized
+/// username. Exactly one must win; the loser must get [`StoreError::InboxAlreadyExists`], not a
+/// generic database error and not a silent duplicate — proving the collision is resolved by the
+/// database's own unique index, not by a check-then-insert in this crate.
+#[tokio::test]
+async fn two_simultaneous_creates_of_the_same_username_collide_exactly_once() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let username = format!("race-{}@example.test", support::unique_suffix());
+
+    let new = |case: &str| NewInbox {
+        inbox_id: InboxId::new(case.to_owned()),
+        organization_id: org.clone(),
+        pod_id: pod,
+        client_id: None,
+        display_name: None,
+        metadata: None,
+    };
+
+    // Two different casings of the SAME address: fixture 18 says both normalize to one inbox, so
+    // this is simultaneously the concurrency test and the case-fold-then-collide test.
+    let upper = username.to_uppercase();
+    let (r1, r2) =
+        tokio::join!(inboxes::create(&pool, new(&username)), inboxes::create(&pool, new(&upper)),);
+
+    let results = [r1, r2];
+    let wins = results.iter().filter(|r| r.is_ok()).count();
+    let collisions = results
+        .iter()
+        .filter(|r| matches!(r, Err(StoreError::InboxAlreadyExists)))
+        .count();
+    assert_eq!(wins, 1, "exactly one create must win: {}", debug(&results));
+    assert_eq!(collisions, 1, "the other must get the collision error, not a generic DB error");
+
+    let normalized = InboxId::new(username.to_lowercase());
+    let rows = inboxes::list(&pool, &org, None).await.unwrap();
+    let matching = rows.iter().filter(|i| i.inbox_id == normalized).count();
+    assert_eq!(matching, 1, "the database must hold exactly one row for the normalized id");
+}
+
+fn debug(results: &[Result<amk_types::Inbox, StoreError>; 2]) -> String {
+    format!(
+        "[{}, {}]",
+        results[0].as_ref().map(|_| "Ok").unwrap_or("Err"),
+        results[1].as_ref().map(|_| "Ok").unwrap_or("Err"),
+    )
+}
+
+#[tokio::test]
+async fn case_variant_inbox_id_resolves_to_one_row() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let mixed = format!("MixedCase-{}@Example.Test", support::unique_suffix());
+    let created = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(mixed.clone()),
+            organization_id: org.clone(),
+            pod_id: pod,
+            client_id: None,
+            display_name: None,
+            metadata: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        created.inbox_id,
+        InboxId::new(mixed.to_lowercase()),
+        "stored form is lowercased"
+    );
+
+    for variant in [mixed.clone(), mixed.to_uppercase(), mixed.to_lowercase()] {
+        let found = inboxes::get(&pool, &org, &InboxId::new(variant.clone()))
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{variant} must resolve to the same inbox"));
+        assert_eq!(found.inbox_id, created.inbox_id);
+    }
+}
+
+#[tokio::test]
+async fn inbox_delete_is_scoped_to_its_organization() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+
+    let (org_a, pod_a, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let org_b = support::seed_org(&pool).await;
+
+    // org_b must not be able to delete org_a's inbox by naming it.
+    assert!(!inboxes::delete(&pool, &org_b, &inbox_a).await.unwrap());
+    assert!(
+        inboxes::get(&pool, &org_a, &inbox_a)
+            .await
+            .unwrap()
+            .is_some(),
+        "must survive"
+    );
+
+    assert!(inboxes::delete(&pool, &org_a, &inbox_a).await.unwrap());
+    assert!(inboxes::get(&pool, &org_a, &inbox_a)
+        .await
+        .unwrap()
+        .is_none());
+    let _ = pod_a; // kept for readability of the seeded triple
+}
