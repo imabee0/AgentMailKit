@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/amk-types"]
+members = ["crates/amk-types", "crates/amk-core"]
 
 [workspace.package]
 version = "0.1.0"

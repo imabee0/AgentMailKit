@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "amk-core"
+version = "0.1.0"
+dependencies = [
+ "amk-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "amk-types"
 version = "0.1.0"
 dependencies = [
