@@ -76,10 +76,17 @@ check harness-permissions-per-role yes \
 # DEFAULT model, effort and tool set instead of the per-role ones the plan assigns. That failure is
 # invisible from inside a dispatch. Allowlist the keys with positive evidence for this Claude Code
 # version; anything else fails here rather than at dispatch.
+#
+# The key-extraction pattern must accept ANY key shape, not just pure letters. Its first version
+# was `^[a-zA-Z][a-zA-Z]*:`, which never extracted `max_tokens:` or `top-p:` at all — so an
+# unsupported key containing a digit, underscore or hyphen was invisible to the allowlist and the
+# check reported MET. That is precisely the class of key most likely to be a real-but-unsupported
+# frontmatter field, i.e. the exact thing this check exists to catch. Extract permissively, then
+# judge against the allowlist; never filter before judging.
 check harness-agent-frontmatter yes \
   "agent frontmatter uses only evidenced keys" \
   bash -c 'for f in .claude/agents/*.md; do
-             sed -n "2,/^---$/p" "$f" | grep -E "^[a-zA-Z][a-zA-Z]*:" | cut -d: -f1 |
+             sed -n "2,/^---$/p" "$f" | grep -E "^[a-zA-Z][a-zA-Z0-9_-]*:" | cut -d: -f1 |
                grep -qvE "^(name|description|model|tools|disallowedTools)$" && exit 1
            done; exit 0'
 
@@ -195,6 +202,12 @@ attest evidence-not-assert   "every completion claim in the last report carried 
 # nothing. Verify the key in a fresh session, then add it to harness-agent-frontmatter's allowlist
 # and to the reviewer files — in that order, so the allowlist can never be the thing that lags.
 attest mem-subagent-memory   "subagent memory split: DECIDED in the plan, NOT bound — memory: key unverified on 2.1.233"
+# The plan says reference/ holds "vendored openapi.json + SDK extracts". openapi.json,
+# endpoints.txt and types_dump.txt are there; the node SDK's environments.ts/Client.ts are not, so
+# the am_eu_ host-routing claim cannot be checked from this repository. Found by the review panel,
+# which caught the api-keys contract citing it as [SPEC:sdk] when nothing here can verify it.
+# Non-blocking by construction: the rule it produces (never mint an am_eu_ key) is fail-closed.
+attest evidence-sdk-routing  "node SDK host-routing source not vendored — am_eu_ claim is [UNVERIFIED] from this repo"
 
 echo
 if [ "$fail" -gt 0 ]; then

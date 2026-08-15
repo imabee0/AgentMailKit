@@ -26,8 +26,11 @@ would have had to invent a storage shape, which rule 3 forbids.
 
 - `[SPEC:openapi]` `reference/openapi.json`, `type_api-keys:ApiKey`, `CreateApiKeyRequest`,
   `CreateApiKeyResponse`, `ApiKeyPermissions` — already modelled in `amk_types::api_key`. **Use
-  those types; do not restate them.** The 9 `/v0/**/api-keys*` paths establish that keys are
-  creatable and listable at the org and pod and inbox mounts and deletable by id.
+  those types; do not restate them.** Of the 9 `/v0/**/api-keys*` paths, **6** are this dispatch's
+  subject — create + list + delete-by-id at each of the org, pod and inbox mounts. The other 3
+  (`/v0/api-keys/public-keys`, `…/public-keys/{api_key_id}` PATCH, `…/agentid-sign-in/revoke-all`)
+  are the **AgentID P-256 public-key** feature, which is a different credential kind entirely and
+  is parked until after V1. **Out of scope — do not build a table, column or enum variant for it.**
 - `[SPEC:openapi]` `ApiKeyPermissions` has **36** boolean flags. `amk_types::api_key` owns them and
   `KeyGrants::from_wire` owns their absent/empty semantics. Never define a second representation —
   two modules independently defining these flags is the exact fan-out collision that cost this
@@ -42,19 +45,28 @@ would have had to invent a storage shape, which rule 3 forbids.
   **bare** `{"message":"Forbidden"}` 403. That response is `amk-http`'s to build; what it means for
   you is that "key not found" and "key found, hash mismatch" must be **indistinguishable** to the
   caller and must cost the same time.
-- `[SPEC:sdk]` — the node SDK routes an **`am_eu_`-prefixed** key to AgentMail's EU host
-  (`environments.ts`, `Client.ts:80`). See the minting rule below; this is a correctness
-  constraint, not a style note.
+- `[TESTED]` `reference/fixtures/05-error-catalog.http:6` — the **only key shape this project has
+  ever seen the reference API treat as well-formed**: `am_us_` followed by 32 characters. It drew
+  the bare 403 reserved for a well-formed-but-unknown key rather than a malformed-credential
+  response. That is thin evidence for a format, but it is the evidence there is, and it is what the
+  minting rule below is built on.
+- `[UNVERIFIED]` — the node SDK is recorded in the plan as routing an **`am_eu_`-prefixed** key to
+  AgentMail's EU host (`environments.ts`, `Client.ts:80`), read at planning time. **That source is
+  NOT vendored under `reference/`, so the claim cannot be checked from this repository** — the
+  review panel caught the contract citing it as `[SPEC:sdk]`, which overstated it. It is downgraded
+  rather than deleted because the rule it produces is fail-closed and costs nothing: never minting
+  an `am_eu_` key is correct whether or not the SDK dispatches on that prefix. Do not treat the
+  citation as verified evidence, and do not build anything else on it.
 
 ## The rule that governs every other decision
 
 **No fixture shows a real AgentMail API key** — none was ever created against the reference
 account, and `amk_types::api_key`'s own doc comment records that this type is `[SPEC:openapi]`
 only. So: the wire *shapes* are pinned and you must match them exactly, while the *secret's own
-format* is genuinely ours to choose. Mark that choice `[ASSUMED]` in a doc comment with its
-reasoning. Do not mark anything else assumed, and do not add a field no artifact shows —
-`ApiKey` deliberately omits `organization_id` for that reason even though sibling resources carry
-it.
+format* is ours to choose within the one constraint the evidence imposes. Mark that choice
+`[ASSUMED]` in a doc comment with its reasoning. Do not mark anything else assumed, and do not add
+a field no artifact shows — `ApiKey` deliberately omits `organization_id` for that reason even
+though sibling resources carry it.
 
 ## Decisions (settled — implement, do not relitigate)
 
@@ -74,9 +86,17 @@ it.
 
 ### Minting and verification
 
-- **Format (`[ASSUMED]`, ours to choose):** `am_` followed by URL-safe random. It must **never**
-  begin `am_eu_` — the official node SDK would redirect such a key to AgentMail's EU host and the
-  "change only the base URL" guarantee would break. Write that as a test, not a comment.
+- **Format (`[ASSUMED]`):** `am_us_` followed by 32 characters of URL-safe random.
+  **Not** bare `am_` + random, which was this contract's first answer and was wrong: the review
+  panel pointed at `reference/fixtures/05-error-catalog.http:6`, where
+  `am_us_00000000000000000000000000000000` drew the bare 403 reserved for a *well-formed* unknown
+  key. So the reference API's keys carry a **region segment**, and a bare `am_` + random neither
+  matches the one shape we have seen accepted nor gains anything. Reproduce the observed shape.
+  Two consequences, both of which you write as tests rather than comments:
+  - a minted key **never** begins `am_eu_` — satisfied automatically by the `am_us_` prefix, and
+    asserted anyway so that changing the prefix later cannot silently break it. The reason is the
+    `[UNVERIFIED]` EU-routing note above; the assertion is cheap and fail-closed either way.
+  - the random portion comes from a **CSPRNG**, not a general-purpose RNG, and is 32 characters.
 - `prefix` is the leading identifying segment, stored in clear and safe to display; the remainder
   is the secret. Never store, log, or return the secret except in `CreateApiKeyResponse`, which
   exists precisely so the secret is unrepresentable outside creation.
@@ -113,7 +133,9 @@ cross-pod read.
 
 - `permissions` NULL vs `'{}'` round-trip, and that `KeyGrants::from_wire` reads each back with the
   opposite verdict.
-- A minted key never begins `am_eu_`; the minted secret is not recoverable from a stored row.
+- A minted key matches `am_us_` + 32 chars, never begins `am_eu_`, and two successive mints differ;
+  the minted secret is not recoverable from a stored row (assert the row contains neither the
+  secret nor any prefix of it beyond `prefix` itself).
 - `authenticate` with: an unknown prefix; a known prefix and a wrong secret; a known prefix and the
   right secret; a presented value with no prefix separator at all; an empty string; a value whose
   prefix matches but which is longer than any key ever minted.
