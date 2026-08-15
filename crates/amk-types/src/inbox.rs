@@ -109,8 +109,7 @@ mod tests {
 
     #[test]
     fn metadata_accepts_string_number_and_bool() {
-        let m: Metadata =
-            serde_json::from_str(r#"{"s":"x","n":3,"b":true}"#).unwrap();
+        let m: Metadata = serde_json::from_str(r#"{"s":"x","n":3,"b":true}"#).unwrap();
         assert!(matches!(m["s"], MetadataValue::String(_)));
         assert!(matches!(m["n"], MetadataValue::Number(_)));
         assert!(matches!(m["b"], MetadataValue::Bool(_)));

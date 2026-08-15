@@ -1,0 +1,8 @@
+# Codifies the style amk-types is already written in, so `cargo fmt --check` is a real gate
+# rather than a permanent diff everyone learns to ignore.
+#
+# max_width is rustfmt's default 100. The only deviations raise the "small heuristics" widths:
+# rustfmt otherwise explodes a 40-column struct literal across four lines, which is noise in a
+# crate that is mostly small wire types.
+struct_lit_width = 80
+fn_call_width = 80

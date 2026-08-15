@@ -135,7 +135,10 @@ mod tests {
     fn malformed_tokens_are_rejected_not_panicking() {
         assert!(matches!(Cursor::decode("!!!not base64!!!"), Err(CursorError::Base64)));
         assert!(matches!(Cursor::decode(&STANDARD.encode("not json")), Err(CursorError::Json)));
-        assert!(matches!(Cursor::decode(&STANDARD.encode("[1,2]")), Err(CursorError::NotAnObject)));
+        assert!(matches!(
+            Cursor::decode(&STANDARD.encode("[1,2]")),
+            Err(CursorError::NotAnObject)
+        ));
         // A truncated real token must fail cleanly rather than half-decode.
         assert!(Cursor::decode(&LIVE_TOKEN[..LIVE_TOKEN.len() - 10]).is_err());
     }

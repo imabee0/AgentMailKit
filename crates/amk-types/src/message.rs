@@ -304,7 +304,10 @@ mod tests {
     fn full_message_flattens_item_fields() {
         let live = format!(
             r#"{{{}, "text":"body","extracted_text":"body"}}"#,
-            LIVE_ITEM.trim().trim_start_matches('{').trim_end_matches('}')
+            LIVE_ITEM
+                .trim()
+                .trim_start_matches('{')
+                .trim_end_matches('}')
         );
         let msg: Message = serde_json::from_str(&live).unwrap();
         assert_eq!(msg.item.labels, vec!["sent"]);

@@ -121,13 +121,25 @@ pub struct Reject {
 #[serde(tag = "event_type")]
 pub enum EventPayload {
     #[serde(rename = "message.received")]
-    MessageReceived { message: Box<Message>, thread: Box<ThreadItem> },
+    MessageReceived {
+        message: Box<Message>,
+        thread: Box<ThreadItem>,
+    },
     #[serde(rename = "message.received.spam")]
-    MessageReceivedSpam { message: Box<Message>, thread: Box<ThreadItem> },
+    MessageReceivedSpam {
+        message: Box<Message>,
+        thread: Box<ThreadItem>,
+    },
     #[serde(rename = "message.received.blocked")]
-    MessageReceivedBlocked { message: Box<Message>, thread: Box<ThreadItem> },
+    MessageReceivedBlocked {
+        message: Box<Message>,
+        thread: Box<ThreadItem>,
+    },
     #[serde(rename = "message.received.unauthenticated")]
-    MessageReceivedUnauthenticated { message: Box<Message>, thread: Box<ThreadItem> },
+    MessageReceivedUnauthenticated {
+        message: Box<Message>,
+        thread: Box<ThreadItem>,
+    },
     #[serde(rename = "message.sent")]
     MessageSent { send: Send },
     #[serde(rename = "message.delivered")]
@@ -238,7 +250,10 @@ mod tests {
     #[test]
     fn event_ids_of_both_live_formats_are_accepted() {
         // UUID form (delivered/complained) and 32-hex form (sent) must both survive round-trip.
-        for id in ["6813392d-e351-4392-ae72-87354eca35b4", "1a030f46544cd4764b70e51e3cdff899"] {
+        for id in [
+            "6813392d-e351-4392-ae72-87354eca35b4",
+            "1a030f46544cd4764b70e51e3cdff899",
+        ] {
             let parsed: EventId = serde_json::from_str(&format!("\"{id}\"")).unwrap();
             assert_eq!(parsed.as_str(), id);
         }

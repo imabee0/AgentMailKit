@@ -8,10 +8,17 @@
 //! * `pod_id` / `thread_id` / `attachment_id` are UUIDs; `domain_id` is the domain name.
 //! * `event_id` has TWO observed forms (UUID and 32-hex-no-dashes), so it stays an opaque string.
 
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
+
+/// Failure decoding an identifier out of a URL path segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum IdDecodeError {
+    #[error("path segment is not valid UTF-8 after percent-decoding")]
+    Utf8,
+}
 
 /// Characters that must be escaped inside a single URL path segment.
 /// `<`, `>` and `@` matter for `message_id`; the rest are standard path-segment reserved chars.
@@ -47,6 +54,18 @@ macro_rules! string_id {
             /// Percent-encoded form for use as a single URL path segment.
             pub fn to_path_segment(&self) -> String {
                 utf8_percent_encode(&self.0, PATH_SEGMENT).to_string()
+            }
+            /// Inverse of [`Self::to_path_segment`].
+            ///
+            /// Handlers normally receive an already-decoded parameter (axum percent-decodes path
+            /// params), so this is not the request path. It exists because the encoding has to be
+            /// *reversible* — `message_id` carries `<`, `>` and `@`, and any code that builds a URL
+            /// must be able to read its own output back, in tests and in the conformance harness.
+            pub fn from_path_segment(segment: &str) -> Result<Self, IdDecodeError> {
+                percent_decode_str(segment)
+                    .decode_utf8()
+                    .map(|s| Self(s.into_owned()))
+                    .map_err(|_| IdDecodeError::Utf8)
             }
         }
 
@@ -178,7 +197,8 @@ mod tests {
     /// Live capture, reference/fixtures/03-id-formats.http.
     const OBSERVED: &str =
         "<010001a003ef6970-1732f5b7-5c17-485b-92fa-52ccd78a0004-000000@email.amazonses.com>";
-    const OBSERVED_ENCODED: &str = "%3C010001a003ef6970-1732f5b7-5c17-485b-92fa-52ccd78a0004-000000%40email.amazonses.com%3E";
+    const OBSERVED_ENCODED: &str =
+        "%3C010001a003ef6970-1732f5b7-5c17-485b-92fa-52ccd78a0004-000000%40email.amazonses.com%3E";
 
     #[test]
     fn message_id_path_encoding_matches_live_capture() {
@@ -201,10 +221,7 @@ mod tests {
     fn message_id_bracket_helpers() {
         let bare = "abc@example.com";
         assert_eq!(MessageId::bracketed(bare).as_str(), "<abc@example.com>");
-        assert_eq!(
-            MessageId::bracketed("<abc@example.com>").as_str(),
-            "<abc@example.com>"
-        );
+        assert_eq!(MessageId::bracketed("<abc@example.com>").as_str(), "<abc@example.com>");
         assert_eq!(MessageId::new(OBSERVED).unbracketed(), &OBSERVED[1..OBSERVED.len() - 1]);
     }
 
@@ -222,14 +239,8 @@ mod tests {
 
     #[test]
     fn ids_serialize_transparently() {
-        assert_eq!(
-            serde_json::to_string(&InboxId::new("a@b.c")).unwrap(),
-            "\"a@b.c\""
-        );
+        assert_eq!(serde_json::to_string(&InboxId::new("a@b.c")).unwrap(), "\"a@b.c\"");
         let t = ThreadId::from(uuid::uuid!("c1197a89-02ad-4bdf-8461-c03136b481aa"));
-        assert_eq!(
-            serde_json::to_string(&t).unwrap(),
-            "\"c1197a89-02ad-4bdf-8461-c03136b481aa\""
-        );
+        assert_eq!(serde_json::to_string(&t).unwrap(), "\"c1197a89-02ad-4bdf-8461-c03136b481aa\"");
     }
 }
