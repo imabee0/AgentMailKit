@@ -285,6 +285,65 @@ mod tests {
         assert_eq!(p.get("not_a_flag"), None);
     }
 
+    /// `WIRE_NAMES` must name **every** field of `ApiKeyPermissions`, not merely resolve through
+    /// `get()`.
+    ///
+    /// The forward-only check was not enough. `amk-core::derive_child` bounds a child key by
+    /// iterating `WIRE_NAMES`, so a field present on the struct but missing from the array is
+    /// invisible to the escalation check — a reviewer demonstrated it by adding one field and
+    /// watching a child hold a permission its parent lacked while every test still passed.
+    /// Comparing the serialized key set closes the reverse direction, which is the one that
+    /// decides whether escalation is detectable at all.
+    #[test]
+    fn wire_names_covers_every_field_of_the_struct() {
+        // No `..Default::default()`: a field added to the struct fails to compile here, and one
+        // added to both struct and literal but not to WIRE_NAMES fails the comparison.
+        let all_true = ApiKeyPermissions {
+            inbox_read: Some(true),
+            inbox_create: Some(true),
+            inbox_update: Some(true),
+            inbox_delete: Some(true),
+            message_read: Some(true),
+            message_send: Some(true),
+            message_update: Some(true),
+            message_delete: Some(true),
+            label_spam_read: Some(true),
+            label_blocked_read: Some(true),
+            label_unauthenticated_read: Some(true),
+            label_trash_read: Some(true),
+            draft_read: Some(true),
+            draft_create: Some(true),
+            draft_update: Some(true),
+            draft_delete: Some(true),
+            draft_send: Some(true),
+            webhook_read: Some(true),
+            webhook_create: Some(true),
+            webhook_update: Some(true),
+            webhook_delete: Some(true),
+            domain_read: Some(true),
+            domain_create: Some(true),
+            domain_update: Some(true),
+            domain_delete: Some(true),
+            list_entry_read: Some(true),
+            list_entry_create: Some(true),
+            list_entry_delete: Some(true),
+            metrics_read: Some(true),
+            api_key_read: Some(true),
+            api_key_create: Some(true),
+            api_key_update: Some(true),
+            api_key_delete: Some(true),
+            pod_read: Some(true),
+            pod_create: Some(true),
+            pod_delete: Some(true),
+        };
+        let json = serde_json::to_value(&all_true).unwrap();
+        let mut on_wire: Vec<String> = json.as_object().unwrap().keys().cloned().collect();
+        let mut catalog: Vec<String> = WIRE_NAMES.iter().map(|s| s.to_string()).collect();
+        on_wire.sort();
+        catalog.sort();
+        assert_eq!(on_wire, catalog, "WIRE_NAMES and the struct fields must be the same set");
+    }
+
     #[test]
     fn an_omitted_object_grants_everything_and_an_empty_one_grants_nothing() {
         // The spec: "When ommitted all permissions are granted. Otherwise, only permissions set to

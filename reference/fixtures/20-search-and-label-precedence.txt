@@ -1,0 +1,51 @@
+# Fixture 20 — search visibility + add/remove precedence on a message.
+# Live api.agentmail.to, 2026-08-15 ~13:0xZ. Throwaway inbox amk-probe@agentmail.to.
+#
+# WHY: the amk-core review panel raised both as rules generalised beyond their evidence. Rather
+# than mark them [INFERRED] and carry the risk, they were probed. One generalisation was right;
+# the other was wrong and had built a permanent impossibility into the design.
+
+## C — remove_labels beats add_labels on a MESSAGE (the generalisation was correct)
+PATCH /v0/inboxes/amk-probe@agentmail.to/messages/{mid}
+     {"add_labels":["probe-conflict"],"remove_labels":["probe-conflict"]}
+-> 200  labels: ["received","unread"]        # the label is ABSENT: remove won
+
+=> `[SPEC:openapi]` states "Takes priority over `add_labels`" on `type_threads:UpdateThreadRequest`
+   only; `type_messages:UpdateMessageRequest` says merely "Label or labels to remove from message".
+   amk-core applied the thread rule to messages anyway. **Observed: it is right.** The rule is now
+   `[TESTED]` for messages and can drop its inference marker.
+
+## D — SEARCH DOES NOT HIDE RESTRICTED MAIL  (the generalisation was WRONG)
+Same message, subject "FW: Notes from Thursday", searched by its first word.
+
+  search BEFORE labelling spam   GET …/messages/search?q=FW:  -> count=1
+  PATCH add_labels=["spam"]
+  search AFTER  labelling spam   GET …/messages/search?q=FW:  -> count=1   <-- STILL FOUND
+  plain list    AFTER            GET …/messages?limit=50      -> count=5   <-- message ABSENT
+
+=> The restricted-label exclusion applies to the **list** endpoints and **not** to search. A
+   spam-labelled message vanishes from `GET …/messages` and is still returned by
+   `GET …/messages/search`, in the same inbox, for the same credential, at the same moment.
+
+=> This kills the amk-core rule as written. `labels.rs` documented "`include_*` on every list
+   endpoint" and offered exactly two access modes — `list` (permission AND include flag) and
+   `by_id` (permission only). But `include_*` exists on only **4 of 33** paginated GETs
+   (`/threads`, `/pods/{id}/threads`, `/inboxes/{id}/threads`, `/inboxes/{id}/messages`); the four
+   search endpoints and every drafts list have no such parameter. Applying the list rule there made
+   `IncludeFlags::NONE` permanent, so restricted mail would have been unreachable by search for
+   **every credential that will ever exist**, with no query parameter capable of turning it on.
+
+=> Correct model, three modes rather than two:
+     * list-with-include-flags  -> permission AND the matching include_* flag
+     * search                   -> permission only (restricted mail IS returned)  [TESTED here]
+     * get-by-id                -> permission only                                [TESTED 09b]
+   Search behaves like get-by-id, not like list.
+
+## Caveat, stated rather than glossed
+The probe credential is an org-scoped **unrestricted** key, so the permission half was trivially
+satisfied throughout. What is observed is that the *include-flag* half does not gate search. Whether
+search would hide the message from a key lacking `label_spam_read` is **unobserved** — treating it
+as permission-gated like get-by-id is the reading that matches 09b and fails closed.
+
+## Teardown
+All probe labels reverted; the message is back to ["received","unread"].

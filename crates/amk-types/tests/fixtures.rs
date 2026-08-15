@@ -345,6 +345,7 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         ("15-compile-spike.txt", "dependency pins, asserted by the build itself"),
         ("16-threading-matrix", "amk-core threading rules, P2"),
         ("17-message-complained.txt", "amk-events complaint payload, P4"),
+        ("20-search-and-label-precedence.txt", "amk-core label access modes, P1"),
         ("C1-domain-shape.txt", "amk-types domain shapes, P5"),
     ];
 
