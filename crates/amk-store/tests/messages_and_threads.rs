@@ -6,6 +6,7 @@ mod support;
 
 use amk_core::labels::{excluded_labels, IncludeFlags, LabelAccess};
 use amk_core::scope::{Mount, Resolved, Scope, ScopeFilter};
+use amk_store::inboxes::{self, NewInbox};
 use amk_store::messages::{self, ListMessagesQuery, NewMessage};
 use amk_store::pagination::{MessageCursor, SortDirection};
 use amk_store::threads::{self, ListThreadsQuery, NewThread};
@@ -266,6 +267,388 @@ async fn restricted_label_rows_are_absent_from_a_paginated_walk_with_no_gap() {
         .await
         .unwrap();
     assert!(masked.is_none());
+}
+
+/// Same scenario as [`restricted_label_rows_are_absent_from_a_paginated_walk_with_no_gap`], walked
+/// in descending order — the ASC and DESC branches are two independent literal query strings (see
+/// [`SortDirection`]'s docs), so nothing exercises the DESC exclusion/boundary unless a test asks
+/// for it explicitly.
+#[tokio::test]
+async fn list_descending_also_excludes_restricted_labels_with_no_gap() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let rows: [(&str, &[&str], &str); 4] = [
+        ("<a@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+        ("<b@x>", &["received", "unauthenticated"], "2026-08-15T05:00:02.000Z"),
+        ("<c@x>", &["sent"], "2026-08-15T05:00:03.000Z"),
+        ("<d@x>", &["sent"], "2026-08-15T05:00:04.000Z"),
+    ];
+    for (id, labels, when) in rows {
+        messages::insert(&pool, new_message(&inbox, &org, pod, thread_id, id, labels, when))
+            .await
+            .unwrap();
+    }
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::list(&grants, IncludeFlags::NONE);
+    let excluded = excluded_labels(&access);
+
+    let query =
+        |cursor| ListMessagesQuery { limit: 1, direction: SortDirection::Descending, cursor };
+
+    let page1 = messages::list(&pool, &filter, &excluded, query(None))
+        .await
+        .unwrap();
+    assert_eq!(page1.items[0].message_id.as_str(), "<d@x>", "newest first, descending");
+    let cursor1 =
+        MessageCursor::decode(page1.next.as_deref().expect("more rows remain"), filter.inbox_id())
+            .unwrap();
+
+    let page2 = messages::list(&pool, &filter, &excluded, query(Some(cursor1)))
+        .await
+        .unwrap();
+    assert_eq!(
+        page2.items[0].message_id.as_str(),
+        "<c@x>",
+        "walking backwards must skip the hidden row too, not surface it or leave a gap"
+    );
+    let cursor2 =
+        MessageCursor::decode(page2.next.as_deref().expect("one row remains"), filter.inbox_id())
+            .unwrap();
+
+    let page3 = messages::list(&pool, &filter, &excluded, query(Some(cursor2)))
+        .await
+        .unwrap();
+    assert_eq!(page3.items[0].message_id.as_str(), "<a@x>");
+    assert!(page3.next.is_none());
+}
+
+/// Isolates the `messages::list` inbox pin: two inboxes in the *same* pod, each with their own
+/// message, and a request scoped to only one of them.
+#[tokio::test]
+async fn list_pins_inbox_within_the_same_pod() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox1 = support::seed_inbox(&pool, &org, pod, "i1").await;
+    let inbox2 = support::seed_inbox(&pool, &org, pod, "i2").await;
+
+    let t1 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox1, &org, pod, t1, &["received"], "2026-08-15T05:00:00.000Z", "<i1@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox1, &org, pod, t1, "<i1@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let t2 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox2, &org, pod, t2, &["received"], "2026-08-15T05:00:00.000Z", "<i2@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox2, &org, pod, t2, "<i2@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox1);
+    let page = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery { limit: 10, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    let ids: Vec<_> = page
+        .items
+        .iter()
+        .map(|m| m.message_id.as_str().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["<i1@x>"],
+        "inbox-scoped list must not see the sibling inbox's message"
+    );
+}
+
+/// Isolates the `messages::get` organization pin: an org-scoped filter (no pod/inbox pinned, so
+/// those NULL-sentinel checks pass trivially) must still refuse a message that lives in a
+/// *different* organization, even though the caller names that message's real inbox_id directly.
+#[tokio::test]
+async fn get_pins_organization_even_when_the_named_inbox_belongs_to_another_org() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org_a, pod_a, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let org_b = support::seed_org(&pool).await;
+
+    let thread_a = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox_a,
+            &org_a,
+            pod_a,
+            thread_a,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<a@x>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(
+            &inbox_a,
+            &org_a,
+            pod_a,
+            thread_a,
+            "<a@x>",
+            &["sent"],
+            "2026-08-15T05:00:01.000Z",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter_b = org_filter(&org_b);
+    let leaked = messages::get(&pool, &filter_b, &inbox_a, &MessageId::new("<a@x>"), &[])
+        .await
+        .unwrap();
+    assert!(
+        leaked.is_none(),
+        "org B must not read org A's message by naming org A's inbox directly"
+    );
+}
+
+/// Isolates the `messages::get` inbox pin: same org and pod, but the message actually lives under
+/// a *different* inbox than the one named in the call.
+#[tokio::test]
+async fn get_pins_the_named_inbox_not_just_the_scope() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let right_inbox = support::seed_inbox(&pool, &org, pod, "right").await;
+    let wrong_inbox = support::seed_inbox(&pool, &org, pod, "wrong").await;
+
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &right_inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<r@x>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(
+            &right_inbox,
+            &org,
+            pod,
+            thread_id,
+            "<r@x>",
+            &["sent"],
+            "2026-08-15T05:00:01.000Z",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter = pod_filter(&org, pod);
+    let leaked = messages::get(&pool, &filter, &wrong_inbox, &MessageId::new("<r@x>"), &[])
+        .await
+        .unwrap();
+    assert!(
+        leaked.is_none(),
+        "naming the wrong inbox must not surface a message that lives elsewhere"
+    );
+}
+
+/// `messages::get`'s `inbox_id` *parameter* (not just `ScopeFilter`) must be folded to its
+/// normalized form before comparison — fixture 18.
+#[tokio::test]
+async fn get_normalizes_a_case_variant_inbox_id_parameter() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let mixed = format!("MixedGet-{}@Example.Test", support::unique_suffix());
+    let inbox = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(mixed.clone()),
+            organization_id: org.clone(),
+            pod_id: pod,
+            client_id: None,
+            display_name: None,
+            metadata: None,
+        },
+    )
+    .await
+    .unwrap()
+    .inbox_id;
+
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<m@x>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox, &org, pod, thread_id, "<m@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = pod_filter(&org, pod);
+    let found = messages::get(&pool, &filter, &InboxId::new(mixed), &MessageId::new("<m@x>"), &[])
+        .await
+        .unwrap();
+    assert!(
+        found.is_some(),
+        "a mixed-case inbox_id parameter must still resolve to the stored inbox"
+    );
+}
+
+/// Isolates the `threads::list` organization pin, mirroring
+/// [`list_never_leaks_across_organizations_even_at_the_org_mount`] for messages.
+#[tokio::test]
+async fn thread_list_never_leaks_across_organizations() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org_a, pod_a, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let (org_b, pod_b, inbox_b) = support::seed_org_pod_inbox(&pool).await;
+
+    let thread_a = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox_a,
+            &org_a,
+            pod_a,
+            thread_a,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<a@x>",
+        ),
+    )
+    .await
+    .unwrap();
+    let thread_b = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox_b,
+            &org_b,
+            pod_b,
+            thread_b,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<b@x>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter_a = org_filter(&org_a);
+    let page = threads::list(
+        &pool,
+        &filter_a,
+        &[],
+        ListThreadsQuery { limit: 10, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    let ids: Vec<_> = page.items.iter().map(|t| t.thread_id).collect();
+    assert_eq!(ids, vec![thread_a], "org A's thread list must not see org B's thread");
+}
+
+/// Isolates the `threads::get_with_messages` organization pin on its own item lookup.
+#[tokio::test]
+async fn thread_get_with_messages_pins_organization() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org_a, pod_a, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let org_b = support::seed_org(&pool).await;
+
+    let thread_a = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox_a,
+            &org_a,
+            pod_a,
+            thread_a,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<a@x>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter_b = org_filter(&org_b);
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::by_id(&grants);
+    let leaked = threads::get_with_messages(&pool, &filter_b, thread_a, &access)
+        .await
+        .unwrap();
+    assert!(leaked.is_none(), "org B must not read org A's thread by naming its id directly");
 }
 
 #[tokio::test]
