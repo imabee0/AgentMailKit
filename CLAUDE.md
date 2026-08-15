@@ -43,11 +43,24 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0** — `amk-types` (62) and `amk-core` (117) green, both through two review rounds
-and mutation-verified. `amk-store` (31) implemented for the P1 slice on branch `amk/p0/store`:
-migrations, pool, control-plane repositories, keyset pagination, message/thread reads. Deferred by
-decision, not omission: blobs, FTS, signed URLs, jobs, idempotency, and `api_keys` (blocked —
-`amk-types` has no `ApiKey` wire resource yet). Contracts: `.claude/contracts/amk-{store,http}.md`.
+Current phase: **P0**, 263 tests green on `main`. `amk-types`, `amk-core` and `amk-store` merged and
+mutation-verified; Register C3 applied to `amk-core::threading`.
+
+**Next: the amk-store SECOND dispatch — api-keys.** Not `amk-http`, which is blocked on it: the
+auth layer needs O(1) prefix lookup plus a constant-time argon2id verify, and there is no
+`api_keys` table, repository or hash in the crate. `api_keys` was deferred while `amk-types` had no
+`ApiKey` resource; it has one now (`amk_types::api_key`), and nothing re-queued it. Contract:
+`.claude/contracts/amk-store-api-keys.md`. Then `.claude/contracts/amk-http.md`.
+
+Still deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
+
+**Agent role definitions load only at session start.** `.claude/agents/*.md` is not hot-reloaded —
+dispatching before a restart runs under the default model, effort and tool set instead of the
+per-role ones, and nothing inside the dispatch can see that. `memory:` is deliberately absent from
+those files (unverified key on 2.1.233; an unsupported key deregisters the agent silently).
+
+No CI: gating is `./scripts/check.sh` plus the hooks, on this machine only — user decision, with
+its cost recorded in the plan.
 
 **A test that has never failed is not evidence.** Mutation testing found six defects in a green,
 twice-reviewed crate that two rounds of reading had missed — including a fail-open reachable
