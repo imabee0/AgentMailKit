@@ -18,7 +18,7 @@
 //! not have to distinguish "malformed" from "the wrong page for this credential" from a database
 //! error.
 
-use amk_types::ids::{InboxId, MessageId, ThreadId};
+use amk_types::ids::{has_forbidden_byte, InboxId, MessageId, ThreadId};
 use amk_types::page::Cursor;
 use amk_types::Timestamp;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -100,6 +100,18 @@ impl MessageCursor {
         let ts_raw = cursor
             .get_str("timestamp")
             .ok_or(PageTokenError::MissingField("timestamp"))?;
+        // A NUL byte percent-decodes (or, here, JSON-decodes) to a perfectly valid UTF-8 string,
+        // so it survives `Cursor::decode`'s JSON parse untouched. Reject it here, before either
+        // raw field is used to build an id or reaches a query — the same rule
+        // `from_path_segment` applies to a URL path segment, applied to this token's own two
+        // wire-reachable string fields. `has_forbidden_byte` is `amk-types`' one definition of
+        // the rule; this crate does not keep a second copy of it.
+        if has_forbidden_byte(message_id) {
+            return Err(PageTokenError::ForbiddenByte("message_id"));
+        }
+        if has_forbidden_byte(inbox_id_raw) {
+            return Err(PageTokenError::ForbiddenByte("inbox_id"));
+        }
         let timestamp = decode_timestamp(ts_raw, "timestamp")?;
         let inbox_id = InboxId::new(inbox_id_raw).normalized();
         check_inbox_scope(&inbox_id, pinned_inbox)?;
@@ -146,6 +158,13 @@ impl ThreadCursor {
         let ts_raw = cursor
             .get_str("timestamp")
             .ok_or(PageTokenError::MissingField("timestamp"))?;
+        // See the identical check in `MessageCursor::decode`: `inbox_id` is the one field here
+        // that is a free-text string rather than a UUID, so it is the one that can carry a NUL
+        // through JSON decoding undetected. `thread_id` needs no matching check: any NUL in it
+        // fails `Uuid`'s own parse below as `WrongType`, before it could reach a query.
+        if has_forbidden_byte(inbox_id_raw) {
+            return Err(PageTokenError::ForbiddenByte("inbox_id"));
+        }
         let timestamp = decode_timestamp(ts_raw, "timestamp")?;
         let thread_id = thread_id_raw
             .parse::<uuid::Uuid>()
@@ -270,6 +289,40 @@ mod tests {
         );
     }
 
+    /// The second of the two wire-reachable entry points into `InboxId`/`MessageId`: a tampered
+    /// token whose `inbox_id` carries a NUL. `%00` inside a JSON string decodes to a perfectly
+    /// valid UTF-8 `\0` character, so this reaches `decode` as ordinary-looking JSON — the defect
+    /// this dispatch closes is that, unguarded, it then reaches a bound Postgres `text` parameter
+    /// and fails at *encoding* (`SQLSTATE 22021`) rather than here. Asserted on the error type,
+    /// not merely `is_err()`: a `Base64`/`Json`/`WrongType` failure would also make this pass
+    /// while leaving the real hole open.
+    #[test]
+    fn message_cursor_rejects_a_nul_byte_in_inbox_id() {
+        let token = Cursor::new()
+            .with("message_id", "<a@b.c>")
+            .with("inbox_id", "abc\0def")
+            .with("timestamp", "2026-08-15T05:44:16.768Z")
+            .encode();
+        assert_eq!(
+            MessageCursor::decode(&token, None),
+            Err(PageTokenError::ForbiddenByte("inbox_id"))
+        );
+    }
+
+    /// Sibling of [`message_cursor_rejects_a_nul_byte_in_inbox_id`] for the other free-text field.
+    #[test]
+    fn message_cursor_rejects_a_nul_byte_in_message_id() {
+        let token = Cursor::new()
+            .with("message_id", "<a\0b@c>")
+            .with("inbox_id", "a@b.c")
+            .with("timestamp", "2026-08-15T05:44:16.768Z")
+            .encode();
+        assert_eq!(
+            MessageCursor::decode(&token, None),
+            Err(PageTokenError::ForbiddenByte("message_id"))
+        );
+    }
+
     /// `decode` normalizes `inbox_id` itself rather than leaving it to the caller: today
     /// [`check_inbox_scope`] compares via `eq_normalized`, so a raw, un-normalized `inbox_id` on
     /// the returned struct would be harmless — but a decoded cursor is meant to be a trustworthy
@@ -316,6 +369,23 @@ mod tests {
             .with("timestamp", "2026-08-15T05:44:16.768Z")
             .encode();
         assert_eq!(ThreadCursor::decode(&token, None), Err(PageTokenError::WrongType("thread_id")));
+    }
+
+    /// Sibling of `message_cursor_rejects_a_nul_byte_in_inbox_id` for [`ThreadCursor`]. Unlike
+    /// `MessageCursor`, `ThreadCursor` has only one free-text field (`inbox_id`) — `thread_id` is
+    /// a UUID and is covered instead by
+    /// [`thread_cursor_decode_rejects_a_non_uuid_thread_id`]'s `WrongType`.
+    #[test]
+    fn thread_cursor_rejects_a_nul_byte_in_inbox_id() {
+        let token = Cursor::new()
+            .with("thread_id", ThreadId::new_random().to_string())
+            .with("inbox_id", "abc\0def")
+            .with("timestamp", "2026-08-15T05:44:16.768Z")
+            .encode();
+        assert_eq!(
+            ThreadCursor::decode(&token, None),
+            Err(PageTokenError::ForbiddenByte("inbox_id"))
+        );
     }
 
     #[test]

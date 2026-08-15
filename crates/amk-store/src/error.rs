@@ -45,6 +45,13 @@ pub enum PageTokenError {
     /// minted while paging `inbox-a@…` replayed against a request pinned to `inbox-b@…`.
     #[error("page token does not belong to this request's scope")]
     WrongScope,
+    /// A decoded field carries a byte no identifier may contain — see
+    /// `amk_types::ids::has_forbidden_byte`. Distinct from [`Self::WrongType`]: the field is a
+    /// syntactically plausible string, so the *content*, not the shape, is what is rejected. A
+    /// `%00`-bearing `inbox_id`/`message_id` reaches this check before the query it would
+    /// otherwise fail at parameter encoding (SQLSTATE `22021`).
+    #[error("page token field {0:?} contains a forbidden byte")]
+    ForbiddenByte(&'static str),
 }
 
 impl From<amk_types::page::CursorError> for PageTokenError {
