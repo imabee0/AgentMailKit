@@ -43,14 +43,17 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0**, 263 tests green on `main`. `amk-types`, `amk-core` and `amk-store` merged and
-mutation-verified; Register C3 applied to `amk-core::threading`.
+Current phase: **P0**, 291 tests green on `main`. `amk-types`, `amk-core` and `amk-store` (incl.
+`api_keys`) merged and mutation-verified; Register C3 applied to `amk-core::threading`.
 
-**Next: the amk-store SECOND dispatch — api-keys.** Not `amk-http`, which is blocked on it: the
-auth layer needs O(1) prefix lookup plus a constant-time argon2id verify, and there is no
-`api_keys` table, repository or hash in the crate. `api_keys` was deferred while `amk-types` had no
-`ApiKey` resource; it has one now (`amk_types::api_key`), and nothing re-queued it. Contract:
-`.claude/contracts/amk-store-api-keys.md`. Then `.claude/contracts/amk-http.md`.
+**Next: `.claude/contracts/amk-store-id-safety.md`, then `.claude/contracts/amk-http.md`.**
+A caller-supplied id carrying a NUL (`%00` in a path segment, or a tampered page token) reaches a
+Postgres `text` parameter and errors `22021` instead of returning not-found — a 500 where the
+contract requires uniform `not_found`, and a side channel that distinguishes malformed from absent.
+Reachable in `inboxes::get`/`delete`, `messages::get`, `threads::get_with_messages`/`list`, and via
+`MessageCursor`/`ThreadCursor::decode`. **Fixing `from_path_segment` alone does NOT close it** — the
+cursor decoders build ids through raw `::new()` and never touch that function. Two entry points.
+Unreachable only until `amk-http` exists, which is why it goes first.
 
 Still deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
 

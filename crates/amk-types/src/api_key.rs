@@ -10,6 +10,8 @@
 //! Field names and order are generated from `reference/openapi.json`
 //! (`type_api-keys:ApiKeyPermissions`), not transcribed.
 
+use std::fmt;
+
 use crate::ids::{ApiKeyId, InboxId, PodId};
 use crate::{list_response, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -321,7 +323,15 @@ pub struct CreateApiKeyRequest {
 /// Deliberately a separate type from [`ApiKey`] rather than an `Option<String>` on it: making the
 /// secret unrepresentable outside creation is stronger than remembering to leave it `None`. Note
 /// it also has **no `used_at`** — a key returned at creation has never been used.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `Debug` is **hand-written and redacts `api_key`** — see the impl below. It is deliberately not
+/// derived: this type exists to carry a plaintext credential, and `#[derive(Debug)]` would print it
+/// into any log line, `assert_eq!` failure, panic message or CI transcript that ever formatted the
+/// struct. The field's own doc comment said "never log it" while the derive did exactly that; a
+/// comment is not a mechanism. Found by the review panel on the amk-store api-keys dispatch, and
+/// independently re-raised by a second lens as "a live footgun for whoever wires this into
+/// amk-http next" — which is the point: the next crate to touch this type must not have to
+/// remember.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateApiKeyResponse {
     pub api_key_id: ApiKeyId,
     /// The secret, returned exactly once. Never log it, never store it in plaintext — the store
@@ -338,10 +348,64 @@ pub struct CreateApiKeyResponse {
     pub created_at: Timestamp,
 }
 
+impl fmt::Debug for CreateApiKeyResponse {
+    /// Every field except the secret, which prints as `<redacted>`.
+    ///
+    /// `prefix` is deliberately kept: it is the non-secret, displayable half of the key and the
+    /// thing you actually need in a log to identify *which* key a line is about. Redacting the
+    /// whole struct would make it useless for diagnosis and invite someone to reach for the raw
+    /// field instead.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CreateApiKeyResponse")
+            .field("api_key_id", &self.api_key_id)
+            .field("api_key", &"<redacted>")
+            .field("prefix", &self.prefix)
+            .field("name", &self.name)
+            .field("pod_id", &self.pod_id)
+            .field("inbox_id", &self.inbox_id)
+            .field("permissions", &self.permissions)
+            .field("created_at", &self.created_at)
+            .finish()
+    }
+}
+
 list_response!(ListApiKeysResponse, api_keys, ApiKey);
 
 #[cfg(test)]
 mod tests {
+    /// The secret must never appear in `Debug` output. This type exists to carry a plaintext
+    /// credential exactly once, and `Debug` is the format that reaches logs, `assert_eq!` failure
+    /// messages, panic output and CI transcripts without anyone deciding to send it there.
+    ///
+    /// Asserted on the RENDERED STRING rather than by reading the impl: a derived `Debug`
+    /// reinstated by a careless edit would pass any test that only checks the type compiles.
+    #[test]
+    fn debug_redacts_the_secret_but_keeps_the_prefix() {
+        let resp = CreateApiKeyResponse {
+            api_key_id: ApiKeyId::new("3c5547b5-e7ff-474e-9871-83e82251568e"),
+            api_key: "am_us_SUPERSECRETVALUE0000000000000000".into(),
+            prefix: "am_us_SUPERSECR".into(),
+            name: "test".into(),
+            pod_id: None,
+            inbox_id: None,
+            permissions: None,
+            created_at: Timestamp::now(),
+        };
+        let rendered = format!("{resp:?}");
+        assert!(
+            !rendered.contains("SUPERSECRETVALUE"),
+            "the plaintext secret must not appear in Debug output: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "the secret field must render redacted: {rendered}"
+        );
+        // The non-secret half stays, or the output is useless for saying WHICH key a log line is
+        // about — and someone reaches for the raw field instead.
+        assert!(rendered.contains("am_us_SUPERSECR"), "prefix must survive: {rendered}");
+        assert!(rendered.contains("3c5547b5"), "api_key_id must survive: {rendered}");
+    }
+
     use super::*;
     use crate::message::labels;
 

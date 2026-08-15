@@ -76,6 +76,13 @@ format* is ours to choose within the one constraint the evidence imposes. Mark t
 a field no artifact shows — `ApiKey` deliberately omits `organization_id` for that reason even
 though sibling resources carry it.
 
+**"The secret's own format" includes the `prefix`/secret split point** — clarified after the fact.
+"Do not mark anything else assumed" read as forbidding the second `[ASSUMED]` tag the implementer
+correctly needed for `VISIBLE_LEN`, the number of characters of the random portion echoed into the
+stored, displayable `prefix`. No artifact shows it, a constant prefix cannot be `UNIQUE`, and the
+value must come from somewhere. It was disclosed and reasoned rather than smuggled in, which is the
+behaviour this rule exists to produce; the wording was under-specified, not the judgement wrong.
+
 ## Decisions (settled — implement, do not relitigate)
 
 ### Migration `0007_api_keys.sql`
