@@ -2,11 +2,31 @@
 # Tests for the PreToolUse guard. A hook that has never been tested is a hook that silently
 # stopped working — and this one is load-bearing for the anti-drift rules, so it gets both
 # directions: violations must BLOCK (exit 2) and legitimate work must PASS (exit 0).
+#
+# HERMETIC BY CONSTRUCTION. The guard derives its repo root — and therefore the fan-out lock path —
+# from its own location ($0/../..), so an earlier version of this suite tested the guard against
+# the REAL .claude/fanout.lock. That made the result depend on ambient state: while a dispatch was
+# in flight, every "MUST PASS" case touching a frozen path failed, and the suite could not be run
+# at exactly the moment its guarantees mattered most. Worse, its lock-section cleanup was
+# conditional, so a crash mid-run could have deleted a live lock and silently unfroze the project.
+#
+# So the suite now copies the guard into a throwaway repo root and drives the lock there. Nothing
+# is written inside the project, no real lock is read or touched, and the verdict is the same
+# whether or not a fan-out is running.
 set -uo pipefail
 cd "$(dirname "$0")"
-GUARD=./guard.sh
-WT=/home/imma/projects/AgentMailKit/.claude/worktrees/test-wt
-ORCH=/home/imma/projects/AgentMailKit
+SRC="$PWD/guard.sh"
+
+ROOT="$(mktemp -d)/repo"
+trap 'rm -rf "$(dirname "$ROOT")"' EXIT
+mkdir -p "$ROOT/scripts/hooks" "$ROOT/.claude"
+cp "$SRC" "$ROOT/scripts/hooks/guard.sh" || { echo "cannot stage the guard under test"; exit 1; }
+
+GUARD="$ROOT/scripts/hooks/guard.sh"
+ORCH="$ROOT"
+WT="$ROOT/.claude/worktrees/test-wt"
+LOCK="$ROOT/.claude/fanout.lock"
+PLAN=/home/imma/.claude/plans/download-agents-mail-sdk-drifting-frog.md
 
 pass=0; fail=0
 check() { # check <expected-exit> <name> <json>
@@ -34,7 +54,7 @@ echo "== MUST BLOCK (exit 2) =="
 check 2 "subagent edits amk-types (frozen)" \
   "$(j Write "$WT/crates/amk-types/src/ids.rs" "$WT" "pub struct X;")"
 check 2 "subagent edits the plan" \
-  "$(j Edit "/home/imma/.claude/plans/download-agents-mail-sdk-drifting-frog.md" "$WT" "text")"
+  "$(j Edit "$PLAN" "$WT" "text")"
 check 2 "mail_parser type into amk-core" \
   "$(j Write "$WT/crates/amk-core/src/threading.rs" "$WT" "use mail_parser::Message;")"
 check 2 "mail_auth type into amk-store" \
@@ -59,7 +79,7 @@ check 0 "subagent writes its own crate" \
 check 0 "orchestrator edits amk-types" \
   "$(j Write "$ORCH/crates/amk-types/src/ids.rs" "$ORCH" "pub struct X;")"
 check 0 "orchestrator edits the plan" \
-  "$(j Edit "/home/imma/.claude/plans/download-agents-mail-sdk-drifting-frog.md" "$ORCH" "text")"
+  "$(j Edit "$PLAN" "$ORCH" "text")"
 check 0 "comment mentioning Stalwart/JMAP is documentation" \
   "$(j Write "$WT/crates/amk-core/src/threading.rs" "$WT" "// Unlike JMAP, threading here is per-inbox.")"
 check 0 "doc comment mentioning JMAP alongside real code" \
@@ -81,20 +101,26 @@ check 0 "malformed payload does not block work" \
   "not json at all"
 
 echo "== fan-out lock (identity-independent: freezes everyone) =="
-LOCK="$ORCH/.claude/fanout.lock"
-had_lock=0; [ -f "$LOCK" ] && had_lock=1
+# Driven against the staged root, never the project's own lock — see the header.
 touch "$LOCK"
 check 2 "orchestrator cannot edit amk-types while a dispatch is in flight" \
   "$(j Write "$ORCH/crates/amk-types/src/api_key.rs" "$ORCH" "pub struct ApiKey;")"
 check 2 "orchestrator cannot edit the plan while a dispatch is in flight" \
-  "$(j Edit "/home/imma/.claude/plans/download-agents-mail-sdk-drifting-frog.md" "$ORCH" "text")"
+  "$(j Edit "$PLAN" "$ORCH" "text")"
 check 2 "nobody can edit the guard itself while a dispatch is in flight" \
   "$(j Edit "$ORCH/scripts/hooks/guard.sh" "$ORCH" "exit 0")"
 check 0 "ordinary crate work is unaffected by the lock" \
   "$(j Write "$ORCH/crates/amk-store/src/lib.rs" "$ORCH" "pub struct S;")"
-[ "$had_lock" -eq 1 ] || rm -f "$LOCK"
+rm -f "$LOCK"
 check 0 "amk-types is editable again once the lock is gone" \
   "$(j Write "$ORCH/crates/amk-types/src/api_key.rs" "$ORCH" "pub struct ApiKey;")"
+
+# The suite must not be able to pass by accident because it happened to run in a project with no
+# lock: assert the lock rule actually fires on the staged root before trusting the section above.
+touch "$LOCK"
+check 2 "lock rule is armed by the staged root, not the project's" \
+  "$(j Write "$ORCH/crates/amk-types/src/ids.rs" "$ORCH" "pub struct X;")"
+rm -f "$LOCK"
 
 echo "== .amk-scope enforcement =="
 mkdir -p "$WT"
@@ -123,8 +149,6 @@ check 2 "implementer escapes its worktree to the primary checkout" \
 rm -f "$WT/.amk-scope"
 check 0 "orchestrator writes the dispatch contract before .amk-scope exists" \
   "$(j Write "$WT/CLAUDE.md" "$ORCH" "# amk-store contract")"
-printf 'crates/amk-core/*\ncrates/amk-core/src/*\n' > "$WT/.amk-scope"
-rm -f "$WT/.amk-scope"; rmdir "$WT" 2>/dev/null
 
 printf '\nguard tests: %d passed, %d failed\n' "$pass" "$fail"
 exit $(( fail > 0 ))
