@@ -14,7 +14,8 @@ Evidence: `reference/fixtures/` — live captures that define the contract.
 ./scripts/check.sh --fast        # same minus clippy (what the Stop hook runs)
 cargo test --workspace           # unit + fixture-regression tests alone
 ./scripts/shape-provenance.sh    # dependency direction + naming + boundary-type gate
-./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (17 cases, both directions)
+./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (19 cases, both directions)
+./scripts/dev-db.sh up           # Postgres 17 for amk-store on 127.0.0.1:55432 (down|dsn|psql)
 
 # conformance (structural diff vs the live reference API; keys come from sdxd, never inline)
 AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
@@ -42,9 +43,13 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0** — `amk-types` green (59 tests, fixtures wired as regressions). `amk-core`
-is written and under repair: the review panel confirmed two security defects and one cross-module
-collision, so it is NOT merged. See "Open at the boundary" below.
+Current phase: **P0** — `amk-types` (62) and `amk-core` (117) green, both through two review rounds
+and mutation-verified. `amk-store` scaffolded, no logic yet; its dispatch contract is
+`.claude/contracts/amk-store.md`.
+
+**A test that has never failed is not evidence.** Mutation testing found six defects in a green,
+twice-reviewed crate that two rounds of reading had missed — including a fail-open reachable
+through a sibling of the function its regression test guarded. Mutate before claiming a gate.
 
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
 writing to `amk-types`, to the plan, outside its dispatched `.amk-scope`, or introducing a

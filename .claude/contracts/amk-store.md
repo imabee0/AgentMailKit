@@ -61,6 +61,40 @@ then check.
 - **Search: Postgres FTS + `pg_trgm`** for the substring filters, `ts_headline` for highlights. No
   additional service.
 
+## Schema decisions (settled by the orchestrator; the rest you derive from `amk-types`)
+
+Table and column names mirror `amk-types` — that crate already derives from AgentMail's artifacts,
+so re-deriving them here is duplication, not diligence. What follows is only what a reasonable
+implementer could get wrong in a way that matters.
+
+- **Labels are a `text[]` column with a GIN index**, not a join table. This is forced by the
+  admission rule: the exclusion has to be expressible as a predicate in the same `WHERE` clause as
+  the keyset comparison, and `NOT (labels && $excluded)` is one index-backed test. A join table
+  turns every list query into an anti-join whose row count is what leaks. Label order is preserved
+  (`apply_mutation` in amk-core is order-preserving and duplicate-preserving; the column must not
+  silently sort or dedupe).
+- **`inbox_id` is stored lowercased** with the unique index on that stored form. Do not add a
+  functional index on `lower(inbox_id)` over a mixed-case column: the normalized value is the
+  identity, and keeping a second casing around invites a query that compares the wrong one.
+- **The keyset index on messages is `(inbox_id, timestamp, message_id)`**, matching the cursor
+  observed in fixture 04. Same shape per scope for the pod- and org-level mounts. The cursor's
+  tiebreaker is `message_id`, so the index must include it or pagination is non-deterministic on
+  equal timestamps — which the live API's millisecond precision makes likely, not theoretical.
+- **`message_id` is stored with its angle brackets**, exactly as received. It is an RFC 5322
+  header value, not an identifier we mint; stripping and re-adding brackets is a normalization
+  nobody asked for and it breaks byte-equality with the wire.
+- **Timestamps are `timestamptz` stored at millisecond precision.** `amk_types::Timestamp`
+  truncates to milliseconds so the in-memory value always equals what will be serialized; a column
+  with microsecond precision reintroduces the drift that type exists to prevent.
+- **Blobs are content-addressed by SHA-256 of the raw bytes.** The database stores the digest, size
+  and content type; bytes live in the blob tree. Deduplication is a consequence, not a goal — the
+  reason is that immutable objects make the backup incremental and the restore drill cheap.
+- **Idempotency records store the request-body hash, not the body.** Enough to detect a mismatch,
+  nothing more retained than needed.
+- **Every table carrying tenant data has `organization_id` NOT NULL**, and every query pins it.
+  A nullable tenant column is a row that matches nothing and therefore leaks nothing — until
+  someone writes `WHERE organization_id IS NOT DISTINCT FROM $1`.
+
 ## Migrations
 
 Plain SQL files, forward-only, checked in, applied by `amk migrate`. Every migration is runnable on
