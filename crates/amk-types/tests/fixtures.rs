@@ -315,6 +315,80 @@ fn cursor_matches_fixture_04_keyset() {
     assert!(Cursor::decode("bnVsbA==").is_err(), "base64 of `null` is not an object cursor");
 }
 
+/// Fixture 21 closed Register C3 by **reversing** the behaviour we had shipped: a bare,
+/// unbracketed `In-Reply-To` does join the referenced message's thread. The decisive evidence is
+/// not the shared `thread_id` — that could be explained by any number of rules — but the field
+/// asymmetry inside a single captured message: BARE's raw `headers.In-Reply-To` comes back
+/// unbracketed exactly as sent, while its parsed, API-level `in_reply_to` comes back bracketed.
+/// Upstream normalises the parsed value before matching.
+///
+/// That normalisation is a `MessageId` fact, which is why it is pinned here rather than left to
+/// the crate that consumes it: `amk_core::threading` matches on `MessageId::bracketed`, so if this
+/// assertion and the live capture ever disagree, threading is wrong at its input.
+#[test]
+fn bare_in_reply_to_is_rebracketed_fixture_21() {
+    let text = fixture("21-unbracketed-in-reply-to.txt");
+    let msgs: Vec<Value> = verbatim_json_lines(&text)
+        .into_iter()
+        .filter(|v| v.get("message_id").is_some() && v.get("inbox_id").is_some())
+        .collect();
+    assert_eq!(
+        msgs.len(),
+        3,
+        "21 must still carry the three verbatim messages (ROOT, BARE, CONTROL)"
+    );
+
+    let header =
+        |m: &Value| -> Option<String> { m["headers"]["In-Reply-To"].as_str().map(str::to_owned) };
+    let root = msgs
+        .iter()
+        .find(|m| header(m).is_none())
+        .expect("ROOT sends no In-Reply-To");
+    let bare = msgs
+        .iter()
+        .find(|m| header(m).is_some_and(|h| !h.starts_with('<')))
+        .expect("BARE sends an unbracketed In-Reply-To");
+    let ctrl = msgs
+        .iter()
+        .find(|m| header(m).is_some_and(|h| h.starts_with('<')))
+        .expect("CONTROL sends a bracketed In-Reply-To");
+
+    // CONTROL joining is what makes the probe self-validating: had it not joined, BARE's result
+    // would mean nothing. Assert the validity condition, not just the finding.
+    assert_eq!(
+        ctrl["thread_id"], root["thread_id"],
+        "the probe is only valid if CONTROL joined ROOT's thread"
+    );
+    assert_eq!(
+        bare["thread_id"], root["thread_id"],
+        "C3: a bare In-Reply-To must join the referenced thread"
+    );
+
+    // The mechanism, in one message: raw header bare, parsed field bracketed.
+    let raw = header(bare).unwrap();
+    let parsed = bare["in_reply_to"].as_str().expect("BARE has in_reply_to");
+    assert!(!raw.contains('<'), "BARE's raw header must stay as sent: {raw}");
+    assert_eq!(
+        parsed,
+        root["message_id"].as_str().unwrap(),
+        "the parsed value must resolve to ROOT's stored Message-ID"
+    );
+    assert_eq!(
+        amk_types::MessageId::bracketed(&raw).as_str(),
+        parsed,
+        "MessageId::bracketed must reproduce upstream's normalisation of a bare addr-spec"
+    );
+
+    // ...and it must be idempotent, since CONTROL's already-bracketed value goes through the same
+    // path. Double-bracketing would match nothing.
+    let ctrl_raw = header(ctrl).unwrap();
+    assert_eq!(
+        amk_types::MessageId::bracketed(&ctrl_raw).as_str(),
+        ctrl["in_reply_to"].as_str().unwrap(),
+        "normalising an already-bracketed value must be a no-op"
+    );
+}
+
 /// The fixture set is the regression suite; a capture nothing asserts against is a gap. This test
 /// fails when a fixture is added without being wired in, so the gap is visible rather than assumed.
 #[test]
@@ -327,6 +401,7 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         "05-error-catalog.http",
         "18-inbox-case-normalization.txt",
         "19-message-label-patch-gate.txt",
+        "21-unbracketed-in-reply-to.txt",
     ];
     // Deferred WITH a reason and the phase that closes it. Not a parking lot: each entry names the
     // crate that will assert it, and this list may only shrink.
@@ -346,7 +421,6 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         ("16-threading-matrix", "amk-core threading rules, P2"),
         ("17-message-complained.txt", "amk-events complaint payload, P4"),
         ("20-search-and-label-precedence.txt", "amk-core label access modes, P1"),
-        ("21-unbracketed-in-reply-to.txt", "amk-core linkage-header normalisation, P2"),
         ("C1-domain-shape.txt", "amk-types domain shapes, P5"),
     ];
 
