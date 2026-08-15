@@ -201,9 +201,7 @@ mod tests {
 
         let merged = serde_json::to_string(&UpdateInboxRequest {
             display_name: None,
-            metadata: MetadataUpdate::Merge(
-                [("a".to_string(), None)].into_iter().collect(),
-            ),
+            metadata: MetadataUpdate::Merge([("a".to_string(), None)].into_iter().collect()),
         })
         .unwrap();
         assert_eq!(merged, r#"{"metadata":{"a":null}}"#, "per-key null deletes that key");
