@@ -10,6 +10,7 @@ use amk_store::{pods, StoreError};
 use amk_types::api_key::{ApiKeyPermissions, KeyGrants};
 use amk_types::ids::{ApiKeyId, InboxId, OrganizationId};
 use sqlx::Row;
+use uuid::Uuid;
 
 fn org_key(organization_id: &OrganizationId, name: &str) -> NewApiKey {
     NewApiKey {
@@ -799,7 +800,7 @@ async fn org_mount_listing_returns_every_scope_level_within_the_organization() {
     assert!(ids.contains(&inbox_scoped.api_key_id));
 }
 
-// ---- get()/delete() with a syntactically invalid id --------------------------------------
+// ---- get()/delete()/touch_used_at() with a syntactically invalid id -----------------------
 
 #[tokio::test]
 async fn a_non_uuid_api_key_id_is_treated_as_not_found_not_an_error() {
@@ -807,14 +808,8 @@ async fn a_non_uuid_api_key_id_is_treated_as_not_found_not_an_error() {
         return;
     };
     let org = support::seed_org(&pool).await;
-    // A real row exists in the same organization throughout — this is the shape a review lens
-    // used to catch an earlier version of this module: `get`'s `Uuid::parse_str(..).ok()` fed a
-    // `let Some(id) = .. else { return Ok(None) }`, and mutating that early return into
-    // `.unwrap_or_else(Uuid::nil)` made a malformed id resolve any row seeded at the nil UUID.
-    // `get`/`delete`/`touch_used_at` no longer parse the id in Rust at all — the presented string
-    // is compared against the column's own canonical text directly in SQL — so there is no
-    // Rust-side fallback value left for a mutation to substitute, and a garbage id cannot resolve
-    // *this* row (or any row) regardless of what exists alongside it.
+    // A real row exists in the same organization throughout, so a bogus id has something to
+    // (wrongly) resolve to if the guard against it is broken.
     let real = api_keys::create(&pool, org_key(&org, "real-key-in-the-same-org"))
         .await
         .unwrap();
@@ -837,28 +832,135 @@ async fn a_non_uuid_api_key_id_is_treated_as_not_found_not_an_error() {
     assert_eq!(still_there.unwrap().used_at, None, "touch_used_at must not have reached it");
 }
 
-/// `get`/`delete`/`touch_used_at` compare `api_key_id::text = lower($n)` rather than a native
-/// `uuid = uuid` comparison, specifically so a caller-presented id needs no Rust-side parsing —
-/// but that shifts case-insensitivity onto the `lower()` call, which a native `Uuid` comparison
-/// used to give for free. A differently-cased rendering of a real id must still resolve it.
+/// A hostile id (an embedded NUL byte) reproduces a defect a review lens found live against this
+/// crate's *previous* fix: comparing the presented id as `text` in SQL (`api_key_id::text =
+/// lower($n)`) closed the string-equality gap but not the encoding one — Postgres `text` cannot
+/// carry a NUL byte, so binding one as a parameter fails with `22021 invalid byte sequence`
+/// *before* any comparison runs, surfacing as `StoreError::Database` (a 500-class error) rather
+/// than the uniform "not found" every other malformed id gets — a caller-observable
+/// distinguisher, which is a denial-masking defect. `ApiKeyId::from_path_segment`
+/// (`crates/amk-types/src/ids.rs`) only rejects invalid UTF-8, and `%00` percent-decodes to
+/// perfectly valid UTF-8, so this is reachable from the wire, not merely a theoretical string.
+///
+/// The fix parses in Rust (`Uuid::parse_str(..).ok()`) so a NUL byte never reaches a query
+/// parameter as text at all, and binds the *value* — `None` becomes SQL `NULL`, which matches
+/// zero rows and never errors. Asserting `Ok(..)` rather than merely `is_none()`/`!...` is the
+/// whole point of this test: an `Err` here would be exactly the regression this closes, even if
+/// its payload happened to look like "not found" some other way.
 #[tokio::test]
-async fn get_resolves_a_differently_cased_rendering_of_a_real_api_key_id() {
+async fn an_api_key_id_with_an_embedded_nul_byte_returns_ok_not_a_database_error() {
     let Some(pool) = support::pool().await else {
         return;
     };
     let org = support::seed_org(&pool).await;
-    let created = api_keys::create(&pool, org_key(&org, "case-check"))
-        .await
-        .unwrap();
-    let uppercased = ApiKeyId::new(created.api_key_id.as_str().to_uppercase());
-    assert_ne!(uppercased, created.api_key_id, "sanity: the rendering actually differs");
+    let hostile = ApiKeyId::new("abc\0def");
 
-    let resolved = api_keys::get(&pool, &org, &KeyScope::Organization, &uppercased)
+    let got = api_keys::get(&pool, &org, &KeyScope::Organization, &hostile).await;
+    assert!(got.is_ok(), "must be Ok(None), not a database error: {got:?}");
+    assert_eq!(got.unwrap(), None);
+
+    let deleted = api_keys::delete(&pool, &org, &KeyScope::Organization, &hostile).await;
+    assert!(deleted.is_ok(), "must be Ok(false), not a database error: {deleted:?}");
+    assert!(!deleted.unwrap());
+
+    let touched = api_keys::touch_used_at(&pool, &hostile).await;
+    assert!(touched.is_ok(), "must be Ok(false), not a database error: {touched:?}");
+    assert!(!touched.unwrap());
+}
+
+/// The regression that proved the *first* fix (a Rust-side `let Some(id) = parse(..) else {
+/// return Ok(None) }`) was not an equivalent mutant: rewriting that early return into
+/// `.unwrap_or_else(Uuid::nil)` made a non-UUID id silently resolve any row seeded at the nil
+/// UUID sentinel. This seeds exactly that row directly via SQL (bypassing `create`, which always
+/// mints a real v4 UUID and could never produce it), then asserts a non-UUID id still does not
+/// resolve to it — the case a mutant reintroducing that fallback would fail.
+#[tokio::test]
+async fn a_non_uuid_id_never_resolves_the_seeded_nil_uuid_sentinel() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    // The nil UUID is a fixed sentinel by design (that is the whole point of the test), so —
+    // unlike every other seed helper in this suite, which mints a fresh random id specifically to
+    // avoid colliding with another run — this row collides with itself across repeated runs
+    // against the shared dev database (`tests/support/mod.rs`'s own documented lack of per-test
+    // schema isolation). `ON CONFLICT` re-points the existing row at *this* run's fresh org
+    // (and clears any scope an earlier run's row happened to carry) instead of erroring.
+    sqlx::query(
+        "INSERT INTO api_keys (api_key_id, organization_id, name, prefix, hash) \
+         VALUES ($1, $2, 'nil-sentinel', 'am_us_nilsentnl', 'irrelevant-hash') \
+         ON CONFLICT (api_key_id) DO UPDATE SET \
+            organization_id = EXCLUDED.organization_id, pod_id = NULL, inbox_id = NULL",
+    )
+    .bind(Uuid::nil())
+    .bind(org.as_str())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let bogus = ApiKeyId::new("not-a-uuid-at-all");
+    assert!(
+        api_keys::get(&pool, &org, &KeyScope::Organization, &bogus)
+            .await
+            .unwrap()
+            .is_none(),
+        "a non-UUID id must not resolve the seeded nil-UUID row"
+    );
+    assert!(
+        !api_keys::delete(&pool, &org, &KeyScope::Organization, &bogus)
+            .await
+            .unwrap(),
+        "a non-UUID id must not delete the seeded nil-UUID row"
+    );
+
+    // The nil-UUID row itself remains reachable by its own (real, if unusual) id — proving the
+    // miss above is about the bogus id, not about the nil row being unreachable altogether.
+    let nil_id = ApiKeyId::new(Uuid::nil().to_string());
+    assert!(api_keys::get(&pool, &org, &KeyScope::Organization, &nil_id)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// `Uuid::parse_str` accepts several renderings of the same value — hyphenated (any case),
+/// simple-32 (no hyphens), braced, and the `urn:uuid:` form — and binding the *parsed value*
+/// rather than comparing rendered text means all of them resolve a real id, while a different
+/// valid UUID resolves nothing.
+#[tokio::test]
+async fn every_accepted_uuid_rendering_resolves_the_same_key_and_a_different_uuid_resolves_none() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let created = api_keys::create(&pool, org_key(&org, "rendering-check"))
         .await
         .unwrap();
+    let real = Uuid::parse_str(created.api_key_id.as_str()).expect("create always mints a UUID");
+
+    let renderings = [
+        real.hyphenated().to_string().to_uppercase(),
+        real.simple().to_string(),
+        format!("{{{real}}}"),
+        format!("urn:uuid:{real}"),
+    ];
+    for rendering in renderings {
+        let id = ApiKeyId::new(rendering.clone());
+        let resolved = api_keys::get(&pool, &org, &KeyScope::Organization, &id)
+            .await
+            .unwrap();
+        assert_eq!(
+            resolved.map(|k| k.api_key_id),
+            Some(created.api_key_id.clone()),
+            "rendering {rendering:?} must resolve the same key"
+        );
+    }
+
+    let different = ApiKeyId::new(Uuid::new_v4().to_string());
     assert!(
-        resolved.is_some(),
-        "an uppercased rendering of a real UUID must still resolve it"
+        api_keys::get(&pool, &org, &KeyScope::Organization, &different)
+            .await
+            .unwrap()
+            .is_none(),
+        "a different, syntactically valid UUID must resolve nothing"
     );
-    assert_eq!(resolved.unwrap().api_key_id, created.api_key_id);
 }

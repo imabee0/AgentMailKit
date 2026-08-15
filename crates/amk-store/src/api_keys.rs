@@ -252,27 +252,51 @@ fn row_to_authenticated(row: &PgRow) -> Result<AuthenticatedKey, StoreError> {
 //
 // `api_key_id` is stored as a `uuid` column (the migration's own decision) while [`ApiKeyId`] is
 // an opaque string newtype (`amk_types::ids`, frozen — not every id type there is UUID-typed), so
-// a caller-supplied id first has to be checked against the column's real type somehow. An earlier
-// version of this module did that in Rust — `Uuid::parse_str(id.as_str()).ok()`, with a `None`
-// arm returning "not found" before any query ran — and a review lens found that structure
-// mutable into a live bug: replacing the `None` arm with `.unwrap_or_else(Uuid::nil)` (continue
-// with a placeholder instead of returning early) made a malformed id resolve any row a
-// `Uuid::nil()` had been seeded into. Nothing seeds that value today, but "nothing currently
-// seeds it" is not the same as "this cannot happen" — the vulnerability was the existence of a
-// Rust-side branch that a mutation could rewrite to skip the early return, not the specific
-// value it happened to fall back to.
+// a caller-supplied id first has to be checked against the column's real type somehow.
 //
-// [`get`], [`delete`] and [`touch_used_at`] below have no such branch at all: `api_key_id` is
-// bound as the raw presented `&str` and compared with `api_key_id::text = lower($n)` in SQL.
-// There is no Rust code path between "a caller-supplied string" and "a query parameter" for that
-// mutation to rewrite — a malformed id is simply a string that cannot equal any row's canonical
-// lowercase UUID text, which Postgres itself answers with zero rows, never an error. `lower()`
-// on the parameter (not the column, which `::text` already renders in canonical lowercase)
-// preserves case-insensitive matching for a validly-cased-but-differently-cased id, exactly as a
-// parse-then-compare-by-value would have. The one cost is that `api_key_id::text = $n` cannot use
-// the primary key's native `uuid` index for a true index-only scan the way `api_key_id = $n::uuid`
-// would; accepted here because `get`/`delete`/`touch_used_at` are single-row, administrative-rate
-// calls, never the request-per-second `authenticate` path (which looks up by `prefix`, unaffected).
+// Two earlier versions of [`get`]/[`delete`]/[`touch_used_at`] got this wrong in opposite
+// directions, and the fix is `Uuid::parse_str(api_key_id.as_str()).ok()` bound straight into the
+// query as `Option<Uuid>` — a single total expression, with no branch on either side of it.
+//
+// * The first version parsed in Rust with a `let Some(id) = ... else { return Ok(None) }` early
+//   return. A review lens found that structure mutable into a live bug: replacing the `None` arm
+//   with `.unwrap_or_else(Uuid::nil)` (continue with a placeholder instead of returning early)
+//   made a malformed id resolve any row seeded at the nil UUID. Nothing seeds that value today,
+//   but "nothing currently seeds it" is not "this cannot happen" — the vulnerability was the
+//   *existence* of a Rust-side branch a mutation could rewrite to skip the early return, not the
+//   specific fallback value.
+// * The second version removed the branch by not parsing at all: bind the raw string and compare
+//   `api_key_id::text = lower($n)` in SQL, so a malformed id is simply text that cannot equal any
+//   row's canonical UUID rendering. That closes the *comparison* but not the *encoding*: Postgres
+//   `text` cannot carry an embedded NUL byte, and `ApiKeyId::from_path_segment`
+//   (`crates/amk-types/src/ids.rs`) rejects only invalid UTF-8 — `%00` percent-decodes to a
+//   perfectly valid UTF-8 string that Postgres then refuses to encode as a bind parameter
+//   (`22021 invalid byte sequence for encoding "UTF8"`), surfacing as `StoreError::Database`
+//   instead of the uniform "not found" every other malformed id gets. Moving a check to the
+//   database boundary only closes it uniformly if that boundary is itself uniformly closed; `text`
+//   parameter encoding is not, so the check has to stay in front of it.
+//
+// `Uuid::parse_str(..).ok()` fixes both at once: parsing happens in Rust (so a NUL byte, or
+// anything else `text` cannot encode, never reaches a query parameter at all), but the failure
+// mode is a *value* — `None`, which binds as SQL `NULL` — not a branch a mutation can redirect.
+// `api_key_id = NULL` matches zero rows and never errors, so there is still nothing to skip past:
+// deleting the `.ok()` call fails to compile (the `?` on a bare `Result` from `parse_str` doesn't
+// type-check against these functions' `StoreError` return type without a `From` impl this crate
+// deliberately doesn't provide), and there is no early-return arm to rewrite because there is no
+// early return. Binding a `Uuid` also restores the primary key's native index (this had degraded
+// to a full scan under the `::text` comparison) and the full set of forms `Uuid::parse_str`
+// accepts (hyphenated in any case, simple-32, braced, URN) — all narrower comparisons had lost.
+//
+// One more thing this fixes: `api_key_id::text = lower($n)` gave `ApiKeyId` a case-folding
+// equality rule that `amk_types::ids::ApiKeyId` — a plain `string_id!`, byte-exact `PartialEq`,
+// deliberately no `normalized()`/`eq_normalized()` — does not have. [`InboxId`] earned those only
+// because fixture 18 proved case folding for inboxes; nothing proves it for API-key ids, and a
+// storage layer inventing id-equality semantics the type itself doesn't declare is the same shape
+// of defect as `labels.rs`/`permissions.rs` independently inventing the same permission flags.
+// Comparing parsed `Uuid` *values* rather than rendered strings sidesteps the question rather than
+// answering it differently: two renderings of the same UUID are the same value, which was never in
+// doubt, and nothing here asserts anything about `ApiKeyId` string equality that the type doesn't
+// already assert itself.
 
 // One literal per query, matching `messages.rs`'s idiom — sqlx 0.9's `SqlSafeStr` bound accepts
 // only `&'static str`, so the column list is duplicated across these rather than built with
@@ -286,7 +310,7 @@ const INSERT_SQL: &str = "INSERT INTO api_keys \
 const GET_SQL: &str = "SELECT api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, \
         created_at \
      FROM api_keys \
-     WHERE organization_id = $1 AND api_key_id::text = lower($2) \
+     WHERE organization_id = $1 AND api_key_id = $2 \
        AND ($3::uuid IS NULL OR pod_id = $3) \
        AND ($4::text IS NULL OR inbox_id = $4)";
 
@@ -299,7 +323,7 @@ const LIST_SQL: &str = "SELECT api_key_id, prefix, name, pod_id, inbox_id, permi
      ORDER BY created_at ASC, api_key_id ASC";
 
 const DELETE_SQL: &str = "DELETE FROM api_keys \
-     WHERE organization_id = $1 AND api_key_id::text = lower($2) \
+     WHERE organization_id = $1 AND api_key_id = $2 \
        AND ($3::uuid IS NULL OR pod_id = $3) \
        AND ($4::text IS NULL OR inbox_id = $4)";
 
@@ -353,7 +377,7 @@ pub async fn get(
     let (pod_param, inbox_param) = scope_params(scope);
     let row = sqlx::query(GET_SQL)
         .bind(organization_id.as_str())
-        .bind(api_key_id.as_str())
+        .bind(Uuid::parse_str(api_key_id.as_str()).ok())
         .bind(pod_param)
         .bind(inbox_param)
         .fetch_optional(pool)
@@ -387,7 +411,7 @@ pub async fn delete(
     let (pod_param, inbox_param) = scope_params(scope);
     let result = sqlx::query(DELETE_SQL)
         .bind(organization_id.as_str())
-        .bind(api_key_id.as_str())
+        .bind(Uuid::parse_str(api_key_id.as_str()).ok())
         .bind(pod_param)
         .bind(inbox_param)
         .execute(pool)
@@ -431,11 +455,10 @@ pub async fn authenticate(
 /// Record that a key was used, independent of [`authenticate`] — see the module doc for why the
 /// two are separate calls. Returns whether a row was found and updated.
 pub async fn touch_used_at(pool: &PgPool, api_key_id: &ApiKeyId) -> Result<bool, StoreError> {
-    let result =
-        sqlx::query("UPDATE api_keys SET used_at = now() WHERE api_key_id::text = lower($1)")
-            .bind(api_key_id.as_str())
-            .execute(pool)
-            .await?;
+    let result = sqlx::query("UPDATE api_keys SET used_at = now() WHERE api_key_id = $1")
+        .bind(Uuid::parse_str(api_key_id.as_str()).ok())
+        .execute(pool)
+        .await?;
     Ok(result.rows_affected() > 0)
 }
 
