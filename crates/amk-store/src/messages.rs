@@ -63,7 +63,7 @@ pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
             inbox_id, message_id, organization_id, pod_id, thread_id, labels, \"timestamp\", \
             from_address, to_addresses, cc_addresses, bcc_addresses, subject, preview, \
             attachments, in_reply_to, message_references, headers, smtp_id, size, reply_to, \
-            body_text, body_html, extracted_text, extracted_html \
+            text, html, extracted_text, extracted_html \
          ) VALUES ( \
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
             $19, $20, $21, $22, $23, $24 \
@@ -134,8 +134,8 @@ pub(crate) fn row_to_message(row: &PgRow) -> Result<Message, StoreError> {
     Ok(Message {
         item,
         reply_to: row.try_get("reply_to")?,
-        text: row.try_get("body_text")?,
-        html: row.try_get("body_html")?,
+        text: row.try_get("text")?,
+        html: row.try_get("html")?,
         extracted_text: row.try_get("extracted_text")?,
         extracted_html: row.try_get("extracted_html")?,
     })
@@ -144,7 +144,7 @@ pub(crate) fn row_to_message(row: &PgRow) -> Result<Message, StoreError> {
 const GET_SQL: &str =
     "SELECT inbox_id, message_id, organization_id, pod_id, thread_id, labels, \"timestamp\", \
         from_address, to_addresses, cc_addresses, bcc_addresses, subject, preview, attachments, \
-        in_reply_to, message_references, headers, smtp_id, size, reply_to, body_text, body_html, \
+        in_reply_to, message_references, headers, smtp_id, size, reply_to, text, html, \
         extracted_text, extracted_html, created_at, updated_at \
      FROM messages \
      WHERE organization_id = $1 \
@@ -188,7 +188,7 @@ pub struct ListMessagesQuery {
 const LIST_ASC_SQL: &str =
     "SELECT inbox_id, message_id, organization_id, pod_id, thread_id, labels, \"timestamp\", \
         from_address, to_addresses, cc_addresses, bcc_addresses, subject, preview, attachments, \
-        in_reply_to, message_references, headers, smtp_id, size, reply_to, body_text, body_html, \
+        in_reply_to, message_references, headers, smtp_id, size, reply_to, text, html, \
         extracted_text, extracted_html, created_at, updated_at \
      FROM messages \
      WHERE organization_id = $1 \
@@ -202,7 +202,7 @@ const LIST_ASC_SQL: &str =
 const LIST_DESC_SQL: &str =
     "SELECT inbox_id, message_id, organization_id, pod_id, thread_id, labels, \"timestamp\", \
         from_address, to_addresses, cc_addresses, bcc_addresses, subject, preview, attachments, \
-        in_reply_to, message_references, headers, smtp_id, size, reply_to, body_text, body_html, \
+        in_reply_to, message_references, headers, smtp_id, size, reply_to, text, html, \
         extracted_text, extracted_html, created_at, updated_at \
      FROM messages \
      WHERE organization_id = $1 \

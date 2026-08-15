@@ -118,7 +118,7 @@ const GET_ITEM_SQL: &str =
 const THREAD_MESSAGES_SQL: &str =
     "SELECT inbox_id, message_id, organization_id, pod_id, thread_id, labels, \"timestamp\", \
         from_address, to_addresses, cc_addresses, bcc_addresses, subject, preview, attachments, \
-        in_reply_to, message_references, headers, smtp_id, size, reply_to, body_text, body_html, \
+        in_reply_to, message_references, headers, smtp_id, size, reply_to, text, html, \
         extracted_text, extracted_html, created_at, updated_at \
      FROM messages \
      WHERE organization_id = $1 \

@@ -206,3 +206,23 @@ async fn inbox_delete_is_scoped_to_its_organization() {
         .is_none());
     let _ = pod_a; // kept for readability of the seeded triple
 }
+
+/// `inboxes::delete`'s `inbox_id` parameter must be folded to its normalized form before
+/// comparison, exactly like `create` and `get` — every other test reaches `delete` through an
+/// already-normalized id (`seed_org_pod_inbox`'s return value), so this bypasses that and passes a
+/// raw mixed-case id directly.
+#[tokio::test]
+async fn inbox_delete_normalizes_a_mixed_case_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+
+    let (org, _pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let mixed = InboxId::new(inbox.as_str().to_uppercase());
+
+    assert!(
+        inboxes::delete(&pool, &org, &mixed).await.unwrap(),
+        "delete must normalize a mixed-case inbox_id parameter to match the stored lowercase row"
+    );
+    assert!(inboxes::get(&pool, &org, &inbox).await.unwrap().is_none());
+}

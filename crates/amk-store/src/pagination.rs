@@ -270,6 +270,42 @@ mod tests {
         );
     }
 
+    /// `decode` normalizes `inbox_id` itself rather than leaving it to the caller: today
+    /// [`check_inbox_scope`] compares via `eq_normalized`, so a raw, un-normalized `inbox_id` on
+    /// the returned struct would be harmless — but a decoded cursor is meant to be a trustworthy
+    /// value once past validation, and the day a caller reaches for `==` instead of
+    /// `eq_normalized` (as [`MessageCursor::inbox_id`] and [`ThreadCursor::inbox_id`] are ordinary
+    /// public fields, nothing stops that), a non-normalized value silently reopens fixture 18's
+    /// case-fold bug one layer up. Kept and tested rather than deleted as "redundant": the
+    /// redundancy is exactly the point — defense in depth for a value that crossed a trust
+    /// boundary (an attacker-controlled base64 token).
+    #[test]
+    fn message_cursor_decode_normalizes_the_inbox_id() {
+        let token = Cursor::new()
+            .with("message_id", "<a@b.c>")
+            .with("inbox_id", "MiXeD-Case@Example.Test")
+            .with("timestamp", "2026-08-15T05:44:16.768Z")
+            .encode();
+        let decoded = MessageCursor::decode(&token, None).unwrap();
+        assert_eq!(
+            decoded.inbox_id.as_str(),
+            "mixed-case@example.test",
+            "decode must normalize inbox_id itself, not rely on every future caller remembering \
+             eq_normalized"
+        );
+    }
+
+    #[test]
+    fn thread_cursor_decode_normalizes_the_inbox_id() {
+        let token = Cursor::new()
+            .with("thread_id", ThreadId::new_random().to_string())
+            .with("inbox_id", "MiXeD-Case@Example.Test")
+            .with("timestamp", "2026-08-15T05:44:16.768Z")
+            .encode();
+        let decoded = ThreadCursor::decode(&token, None).unwrap();
+        assert_eq!(decoded.inbox_id.as_str(), "mixed-case@example.test");
+    }
+
     #[test]
     fn thread_cursor_round_trips_and_checks_scope() {
         let thread_id = ThreadId::new_random();
