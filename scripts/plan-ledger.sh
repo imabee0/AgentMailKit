@@ -104,15 +104,26 @@ check ci-layer-local-only yes \
 
 # ---------------------------------------------------------------- dispatch contracts
 # 'Every implementer dispatch states, explicitly and in full' six things. Four of six is skipped.
+#
+# Matched against the file FLATTENED to one line, because the first version matched raw lines and
+# a compliant contract failed it: markdown soft-wrap had split '**STOP and\n  report**' across a
+# newline, so the mandated element was present to every reader and absent to grep.
+#
+# The text assertion is separate and comes first. One literal NUL byte, inside a quoted example of
+# the very input the id-safety dispatch is about, made GNU grep treat the contract as binary and
+# return no matches for ANY of the six — reporting six missing elements instead of one bad byte.
+# It failed closed, which is right, but named the wrong defect.
 for c in .claude/contracts/*.md; do
   id="contract-$(basename "$c" .md)"
-  check "$id" yes "6 mandated dispatch elements present" bash -c "
-    grep -q 'SPEC:' '$c' &&
-    grep -qi 'writable' '$c' &&
-    grep -q 'reference/fixtures/' '$c' &&
-    grep -qi 'edge case' '$c' &&
-    grep -qi 'prohibition' '$c' &&
-    grep -qi 'STOP and report' '$c'"
+  check "$id" yes "6 mandated dispatch elements present, in a text file" bash -c "
+    LC_ALL=C tr -d '\000' < '$c' | cmp -s - '$c' || exit 1
+    flat=\$(tr '\n' ' ' < '$c' | tr -s ' ')
+    printf '%s' \"\$flat\" | grep -q 'SPEC:' &&
+    printf '%s' \"\$flat\" | grep -qi 'writable' &&
+    printf '%s' \"\$flat\" | grep -q 'reference/fixtures/' &&
+    printf '%s' \"\$flat\" | grep -qi 'edge case' &&
+    printf '%s' \"\$flat\" | grep -qi 'prohibition' &&
+    printf '%s' \"\$flat\" | grep -qi 'STOP and report'"
 done
 
 # ---------------------------------------------------------------- evidence integrity
