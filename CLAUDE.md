@@ -10,9 +10,11 @@ Evidence: `reference/fixtures/` — live captures that define the contract.
 ## Commands
 
 ```bash
-cargo test --workspace           # unit + fixture-regression tests
-cargo build --workspace
+./scripts/check.sh               # THE verify command: fmt + clippy + tests + provenance
+./scripts/check.sh --fast        # same minus clippy (what the Stop hook runs)
+cargo test --workspace           # unit + fixture-regression tests alone
 ./scripts/shape-provenance.sh    # dependency direction + naming + boundary-type gate
+./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (17 cases, both directions)
 
 # conformance (structural diff vs the live reference API; keys come from sdxd, never inline)
 AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
@@ -40,7 +42,14 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0** — `amk-types` written and green (43 tests); next is `amk-core`.
+Current phase: **P0** — `amk-types` green (59 tests, fixtures wired as regressions). `amk-core`
+is written and under repair: the review panel confirmed two security defects and one cross-module
+collision, so it is NOT merged. See "Open at the boundary" below.
+
+Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
+writing to `amk-types`, to the plan, outside its dispatched `.amk-scope`, or introducing a
+stalwart-labs type into the three protected crates. Subagency is decided by path — inside
+`.claude/worktrees/` or not.
 
 ## Contract facts that are easy to get wrong
 
@@ -60,8 +69,25 @@ Each was observed live; the fixture is the authority.
 - Optionals are **omitted** when absent — never `null`, never `""`.
 - Live responses carry `organization_id`/`pod_id` (and `smtp_id` on messages) that the SDK types
   omit; emit them or the conformance diff fails.
+- `inbox_id` **folds case**: `{"username":"AmkCase"}` stores `amkcase@…`, and lookups resolve any
+  casing. Compare with `InboxId::eq_normalized`, never `==` on raw ids.
+- Permissions: **36** flags (not 34), owned by `amk-types::api_key`. An **absent** permissions
+  object grants everything; a present-but-empty one grants nothing. Never define a second
+  representation of these flags — two modules doing that is what caused the collision above.
+- Restricted-label admission must be a **storage-layer predicate**. Post-filtering a fetched page
+  leaves a gap: `?limit=1` walked across the cursor returns `count:0` with a `next_page_token` on
+  exactly the hidden rows, which discloses how many there are.
 - `smtp-proto` is parser-only — amk-ingest owns the SMTP state machine. `mail-auth` DKIM wants
   **DER** keys.
+
+## Open at the boundary (do not silently resolve)
+
+- Thread labels vs member labels is **unobserved** — no fixture has a mixed-label thread. The
+  fail-closed choice (filter membership, recompute aggregates) is implemented and marked
+  `[INFERRED]` in one function. Register C2.
+- An unbracketed `In-Reply-To` is **not** coerced to match a bracketed id. Register C3 — cheaply
+  closable with a swaks probe, since we control a sender.
+- Whether AgentMail truncates the Svix retry schedule at 5 attempts or runs all 8. Register A2.
 
 ## Secrets
 
