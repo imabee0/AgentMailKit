@@ -19,8 +19,16 @@ would have had to invent a storage shape, which rule 3 forbids.
 
 ## Writable paths (exact)
 
-`crates/amk-store/**` and nothing else. If the work requires a path outside that tree — including
+`crates/amk-store/**`, plus the workspace `Cargo.lock` **only** as the automatic consequence of
+adding a dependency. Nothing else. If the work requires a path outside that tree — including
 `amk-types`, which is frozen — **STOP and report** rather than widening scope.
+
+`Cargo.lock` was missing from this clause on the first pass and the omission was real: adding a
+dependency necessarily rewrites the root lockfile, and **the scope hook never saw it** — the guard
+is a `PreToolUse` hook on `Write`/`Edit`/`Bash`, so it observes what an agent writes and is
+structurally blind to what cargo writes. That left the implementer choosing between violating its
+stated scope and being unable to do what this contract asked. Committing lockfiles is a project
+rule; so the contract names it.
 
 ## `[SPEC:*]` citations governing every shape here
 

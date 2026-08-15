@@ -4,3 +4,10 @@
 .claude/settings.local.json
 .claude/settings.local.json.tmp.*
 .claude/fanout.lock
+
+# Dispatch scaffolding, written by the orchestrator into a worktree and swept with it. Ignored
+# rather than merely excluded by instruction: the api-keys dispatch had to be TOLD not to commit
+# these, and an instruction that must be repeated every dispatch is one that will eventually be
+# forgotten.
+.amk-scope
+.amk-task.md

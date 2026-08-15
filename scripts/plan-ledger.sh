@@ -178,13 +178,30 @@ check deps-pinned-exactly yes \
   bash -c '! grep -E "^(tokio|serde|serde_json|chrono|uuid|thiserror|base64|percent-encoding|sqlx) *= *\{? *(version *= *)?\"[0-9]+\"" Cargo.toml'
 
 # ---------------------------------------------------------------- hygiene
+# The fan-out lock lives in the PRIMARY checkout only — `.claude/fanout.lock` is gitignored, so a
+# worktree never has a copy of it. Both checks below previously resolved it against the script's own
+# parent directory, which inside a dispatch worktree is the WORKTREE root: the lock read as absent
+# while `git worktree list` still reported two, so `hygiene-worktrees-swept` failed and
+# `./scripts/check.sh` could never exit 0 from inside a worktree. Every implementer is told to make
+# that command pass before reporting, so the check made its own instruction impossible to satisfy.
+# Found by the implementer it happened to, who traced it correctly and reported rather than
+# working around it.
+#
+# Resolve against the main worktree instead. `--git-common-dir` is `.git` in the primary and an
+# absolute path to the primary's `.git` from inside any worktree, so its parent is the primary
+# checkout in both cases.
+GCD="$(git rev-parse --git-common-dir 2>/dev/null || echo .git)"
+case "$GCD" in /*) ;; *) GCD="$PWD/$GCD" ;; esac
+PRIMARY="$(cd "$GCD/.." 2>/dev/null && pwd || printf '%s' "$PWD")"
+LOCK="$PRIMARY/.claude/fanout.lock"
+
 check hygiene-worktrees-swept yes \
   "no stale worktrees when no dispatch is in flight" \
-  bash -c '[ -f .claude/fanout.lock ] || [ "$(git worktree list | wc -l)" -eq 1 ]'
+  bash -c '[ -f "$1" ] || [ "$(git worktree list | wc -l)" -eq 1 ]' _ "$LOCK"
 
 check hygiene-lock-released yes \
   "fan-out lock is not left set with no worktree" \
-  bash -c '[ ! -f .claude/fanout.lock ] || [ "$(git worktree list | wc -l)" -gt 1 ]'
+  bash -c '[ ! -f "$1" ] || [ "$(git worktree list | wc -l)" -gt 1 ]' _ "$LOCK"
 
 # ---------------------------------------------------------------- not yet due
 pend p0-gate-sdk-authme      "P0 gate: official Python SDK auth.me() vs localhost (needs amk-http)"

@@ -14,8 +14,17 @@ fidelity to the reference API, not elegance**.
 
 ## Writable paths (exact)
 
-`crates/amk-http/**` and nothing else. Same rule and same hook as every other dispatch: if the work
-requires a path outside that tree, **STOP and report** rather than widening scope.
+`crates/amk-http/**`, plus the workspace `Cargo.lock` **only** as the automatic consequence of
+adding a dependency this contract sanctions. Nothing else. Same rule and same hook as every other
+dispatch: if the work requires a path outside that tree, **STOP and report** rather than widening
+scope.
+
+`Cargo.lock` is named explicitly because the api-keys dispatch proved the omission matters. Its
+contract said `crates/amk-store/**` and nothing else, adding a dependency necessarily rewrote the
+root lockfile, and **the scope hook never saw it** — the guard is a `PreToolUse` hook on
+`Write`/`Edit`/`Bash`, so it observes what an agent writes and is structurally blind to what cargo
+writes. That left the implementer choosing between violating its stated scope and being unable to
+do what the contract asked. Committing lockfiles is a project rule; so the contract names it.
 
 ## `[SPEC:*]` citations governing every shape here
 
