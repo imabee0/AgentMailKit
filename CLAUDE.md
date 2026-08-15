@@ -14,7 +14,7 @@ Evidence: `reference/fixtures/` — live captures that define the contract.
 ./scripts/check.sh --fast        # same minus clippy (what the Stop hook runs)
 cargo test --workspace           # unit + fixture-regression tests alone
 ./scripts/shape-provenance.sh    # dependency direction + naming + boundary-type gate
-./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (19 cases, both directions)
+./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (24 cases, both directions)
 ./scripts/dev-db.sh up           # Postgres 17 for amk-store on 127.0.0.1:55432 (down|dsn|psql)
 
 # conformance (structural diff vs the live reference API; keys come from sdxd, never inline)
@@ -44,8 +44,10 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
 Current phase: **P0** — `amk-types` (62) and `amk-core` (117) green, both through two review rounds
-and mutation-verified. `amk-store` scaffolded, no logic yet; its dispatch contract is
-`.claude/contracts/amk-store.md`.
+and mutation-verified. `amk-store` (31) implemented for the P1 slice on branch `amk/p0/store`:
+migrations, pool, control-plane repositories, keyset pagination, message/thread reads. Deferred by
+decision, not omission: blobs, FTS, signed URLs, jobs, idempotency, and `api_keys` (blocked —
+`amk-types` has no `ApiKey` wire resource yet). Contracts: `.claude/contracts/amk-{store,http}.md`.
 
 **A test that has never failed is not evidence.** Mutation testing found six defects in a green,
 twice-reviewed crate that two rounds of reading had missed — including a fail-open reachable
@@ -89,10 +91,16 @@ Each was observed live; the fixture is the authority.
 
 - Thread labels vs member labels is **unobserved** — no fixture has a mixed-label thread. The
   fail-closed choice (filter membership, recompute aggregates) is implemented and marked
-  `[INFERRED]` in one function. Register C2.
-- An unbracketed `In-Reply-To` is **not** coerced to match a bracketed id. Register C3 — cheaply
-  closable with a swaks probe, since we control a sender.
-- Whether AgentMail truncates the Svix retry schedule at 5 attempts or runs all 8. Register A2.
+  `[INFERRED]` in one function. Register C2. **This is the only one still open.**
+
+Closed by probe, and both reversed an implemented choice — check the fixture before trusting code:
+
+- An unbracketed `In-Reply-To` **does** join the bracketed message's thread (fixture 21). AgentMail
+  re-brackets the parsed value before matching: the same message returns `in_reply_to` bracketed
+  while `headers.In-Reply-To` stays bare. `amk-core::threading` currently asserts the opposite and
+  must be inverted.
+- The Svix retry schedule is **not** truncated at 5 attempts — a 6th fired on two chains (fixture
+  07). Keep all 8, with `message.attempt.exhausted` and the 5-day auto-disable as planned.
 
 ## Secrets
 
