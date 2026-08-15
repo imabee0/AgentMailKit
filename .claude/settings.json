@@ -1,0 +1,48 @@
+{
+  "$comment": [
+    "Harness enforcement for AgentMailKit. The plan's anti-drift rules are prompts until they are",
+    "bound here: the model does not decide whether a hook runs.",
+    "Hooks complement permissions, CI and branch protection — they replace none of them."
+  ],
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/stop-gate.sh",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Read(./reference/fixtures/**/*.key)",
+      "Read(**/*.pem)",
+      "Read(**/id_rsa*)",
+      "Bash(sdxd get:*)",
+      "Bash(tea login:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ],
+    "ask": [
+      "Bash(git push:*)",
+      "Bash(kubectl delete:*)",
+      "Bash(kubectl apply:*)"
+    ]
+  }
+}
