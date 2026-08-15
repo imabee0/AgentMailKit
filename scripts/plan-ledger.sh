@@ -47,18 +47,41 @@ check harness-permissions-deny yes \
   "settings.json records deny explicitly" \
   python3 -c "import json;d=json.load(open('.claude/settings.json'));assert d['permissions']['deny']"
 
-# The plan: 'explicit allow AND deny rules PER SUBAGENT ROLE ... never rely on the tools: frontmatter
-# alone.' A reviewer that is read-only only because Write was omitted from its frontmatter is
-# relying on exactly that.
+# THE CHECK THAT WAS A STRING MATCH, AND SO CHECKED NOTHING.
+#
+# This previously grepped each reviewer file for the literal "deny:" and passed. The files did
+# contain `permissions: { deny: [...] }` — but `permissions:` is a settings.json construct and is
+# NOT valid agent frontmatter, so the block bound nothing at all. Worse, the unsupported key
+# plausibly cost the agents their registration: dispatching any of the five failed with "Agent type
+# not found" while only the built-ins were listed.
+#
+# So the check now asserts the KEY THAT ACTUALLY BINDS, and the next one asserts that no
+# frontmatter key outside the evidenced set can reappear. A check that matches a string the runtime
+# never reads is indistinguishable from no check.
+#
+# Match the tool name as a WHOLE FIELD. A plain `grep Edit` reports MET on
+# `disallowedTools: Write, NotebookEdit` — "Edit" is a substring of "NotebookEdit" — so the first
+# version of this check passed a reviewer that could still call Edit. Found by mutating the check,
+# not by reading it.
 check harness-permissions-per-role yes \
-  "each reviewer agent denies Write/Edit explicitly" \
-  bash -c 'set -e; n=0; for f in .claude/agents/*review*.md; do grep -q "deny:" "$f"; n=$((n+1)); done; [ "$n" -ge 3 ]'
+  "each reviewer denies Write/Edit via disallowedTools (the key that binds)" \
+  bash -c 'set -e; n=0; for f in .claude/agents/*review*.md; do
+             d=$(sed -n "s/^disallowedTools:*//p" "$f" | tr "," "\n" | tr -d " ");
+             printf "%s\n" "$d" | grep -qx "Write" || exit 1;
+             printf "%s\n" "$d" | grep -qx "Edit"  || exit 1;
+             n=$((n+1)); done; [ "$n" -ge 3 ]'
 
-# The plan calls the memory split DECIDED: reviewers ON, implementers OFF. A decision that lives
-# only in the plan binds nothing.
-check mem-subagent-memory yes \
-  "every agent file records its memory setting" \
-  bash -c 'for f in .claude/agents/*.md; do grep -qi "^memory:" "$f" || exit 1; done'
+# The generalisation of that bug: an unsupported frontmatter key can cost an agent its
+# registration, and a silently-unregistered agent means every dispatch quietly ran under the
+# DEFAULT model, effort and tool set instead of the per-role ones the plan assigns. That failure is
+# invisible from inside a dispatch. Allowlist the keys with positive evidence for this Claude Code
+# version; anything else fails here rather than at dispatch.
+check harness-agent-frontmatter yes \
+  "agent frontmatter uses only evidenced keys" \
+  bash -c 'for f in .claude/agents/*.md; do
+             sed -n "2,/^---$/p" "$f" | grep -E "^[a-zA-Z][a-zA-Z]*:" | cut -d: -f1 |
+               grep -qvE "^(name|description|model|tools|disallowedTools)$" && exit 1
+           done; exit 0'
 
 check harness-no-github yes \
   "no .github/ (Gitea only)" \
@@ -159,6 +182,12 @@ attest review-panel-per-diff "three lenses returned on the last merged diff"
 attest mutation-at-gate      "mutation set run for the crate at its gate; survivors accounted for"
 attest evidence-not-assert   "every completion claim in the last report carried its command output"
 attest ci-layer-decision     "CI layer: plan requires it, global rule needs opt-in — USER DECISION OPEN"
+# Named rather than dropped. The plan DECIDES reviewers get memory ON and implementers OFF; the
+# `memory:` frontmatter key is unverified for Claude Code 2.1.233 and an unsupported key can cost
+# an agent its registration, so it is currently absent from all five files and the decision binds
+# nothing. Verify the key in a fresh session, then add it to harness-agent-frontmatter's allowlist
+# and to the reviewer files — in that order, so the allowlist can never be the thing that lags.
+attest mem-subagent-memory   "subagent memory split: DECIDED in the plan, NOT bound — memory: key unverified on 2.1.233"
 
 echo
 if [ "$fail" -gt 0 ]; then

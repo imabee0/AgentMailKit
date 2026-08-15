@@ -3,24 +3,15 @@ name: amk-review-provenance
 description: Review lens 2 of 3 — any Stalwart/JMAP-derived shape, stalwart-labs type in a public signature, or invented field? Read-only.
 model: sonnet
 tools: Read, Glob, Grep, Bash
-memory: on
-# Reviewers accumulate knowledge of recurring violations across diffs, which makes the panel
-# better over time. Safe because they are read-only: a remembered bias cannot write drift into
-# code, only into a report the orchestrator weighs.
-permissions:
-  deny:
-    - Write
-    - Edit
-    - NotebookEdit
-    - Bash(git commit:*)
-    - Bash(git push:*)
-    - Bash(git rebase:*)
-    - Bash(git merge:*)
-    - Bash(git reset:*)
-    - Bash(git checkout:*)
-  # Recorded explicitly. The plan: "The deny list is recorded explicitly — never rely on the
-  # `tools:` frontmatter alone." A reviewer that is read-only only because Write was omitted from
-  # `tools:` is relying on an absence, and an absence is not a rule.
+disallowedTools: Write, Edit, NotebookEdit
+# Read-only is stated TWICE on purpose. `tools:` is an allowlist, so omitting Write would already
+# exclude it — but the plan is explicit that the deny list is recorded, "never rely on the `tools:`
+# frontmatter alone", because a capability withheld by absence is not a rule anyone can read.
+#
+# `memory:` is deliberately ABSENT even though the plan decides reviewers get memory ON. The key is
+# unverified against Claude Code 2.1.233 and an unsupported frontmatter key can cost the agent its
+# registration entirely — which is precisely what happened here. Registration beats memory. The
+# plan ledger carries this as an open, named gap rather than a silent one.
 ---
 
 Effort: **medium** (passed by the orchestrator at dispatch).

@@ -9,7 +9,12 @@
     "pushing to Gitea, worktree lifecycle — is ALLOWED and must not interrupt the user. Anything",
     "that leaves the repo, spends money, touches production, or could disclose a secret is ASK or",
     "DENY. An allow-list that is too narrow is not 'safe': it trains the user to approve without",
-    "reading, which is strictly worse than a correct list."
+    "reading, which is strictly worse than a correct list.",
+    "",
+    "`sdxd run` is ALLOWED for that reason: it is the only sanctioned way a credential reaches a",
+    "command here, it injects by reference and the value is never read, and both the Gitea push and",
+    "the conformance harness need it as routine work. `sdxd get` — the one form that PRINTS a",
+    "secret — is DENIED, and deny outranks allow."
   ],
   "hooks": {
     "PreToolUse": [
@@ -67,6 +72,8 @@
       "Bash(git push origin main:*)",
       "Bash(git push -q origin main:*)",
       "Bash(git push origin amk/:*)",
+      "Bash(git -C /home/imma/projects/AgentMailKit push origin main:*)",
+      "Bash(sdxd run:*)",
       "Bash(git rebase:*)",
       "Bash(git merge --ff-only:*)",
       "Bash(git worktree:*)",
