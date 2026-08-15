@@ -17,6 +17,14 @@ sqlx = { workspace = true, features = ["macros"] }
 thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+# api_keys.rs only. Not workspace-pinned (nothing else in the workspace needs them yet), but
+# pinned exactly here for the same reason the workspace deps are: reproducibility. argon2 0.5.3
+# is the latest non-prerelease release (0.6 is only available as a release candidate); its
+# `password-hash` dependency pulls `rand_core` 0.6, so `rand` is pinned to the 0.8 line (which
+# targets that same `rand_core`) rather than the newer 0.10 line, to avoid two incompatible
+# `RngCore` traits at the `SaltString::generate` call site.
+argon2 = "=0.5.3"
+rand = "=0.8.5"
 
 # Deliberately absent, and each for a reason the plan states:
 #   serde       — this crate stores and retrieves; wire shapes live in amk-types. A Serialize
