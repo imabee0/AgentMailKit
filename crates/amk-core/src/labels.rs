@@ -874,13 +874,42 @@ mod tests {
         assert!(admits(&rows[3], &flagged));
     }
 
+    /// The `count=` on a fixture-20 section-D observation line, plus the rest of that line.
+    ///
+    /// The fixture is the authority; a comment quoting it is a copy that can rot. This reads the
+    /// capture at test time so that editing the file to say something else fails the test rather
+    /// than silently disagreeing with it.
+    fn fixture_20_observation(needle: &str) -> (u64, String) {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../reference/fixtures/20-search-and-label-precedence.txt"
+        );
+        let text = std::fs::read_to_string(path).expect("fixture 20 is on disk");
+        let line = text
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("fixture 20 no longer records {needle:?}"));
+        let (_, after) = line.split_once("count=").expect("the line reports a count");
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        (digits.parse().expect("count is a number"), line.to_string())
+    }
+
     #[test]
     fn fixture_20_search_returns_the_message_the_list_endpoint_hid() {
-        // reference/fixtures/20-search-and-label-precedence.txt (D), verbatim:
-        //   PATCH …/messages/{mid} {"add_labels":["spam"]}
-        //   GET   …/messages?limit=50     -> count=5, the message ABSENT
-        //   GET   …/messages/search?q=FW: -> count=1, the message STILL RETURNED
-        // Same inbox, same unrestricted credential, same moment.
+        // reference/fixtures/20-search-and-label-precedence.txt (D). Same inbox, same unrestricted
+        // credential, same moment: PATCH add_labels=["spam"], then search still finds the message
+        // while the plain list no longer contains it.
+        let (search_before, _) = fixture_20_observation("search BEFORE");
+        let (search_after, after_line) = fixture_20_observation("search AFTER");
+        let (_, list_line) = fixture_20_observation("plain list");
+        assert!(search_before > 0, "the probe found the message before labelling it");
+        assert_eq!(
+            search_after, search_before,
+            "fixture 20 records search returning the same count after the spam label as before"
+        );
+        assert!(after_line.contains("STILL FOUND"));
+        assert!(list_line.contains("message ABSENT"));
+
         let grants = KeyGrants::Unrestricted;
         let row = v(&["received", "unread", "spam"]);
 
@@ -1276,6 +1305,13 @@ mod tests {
             at(message("<b@x>", &["received"], "alice@x", &["amk-probe@agentmail.to"], 20), 2),
         ]);
         t.item.labels.push("spam".to_string());
+        // Two aggregates deliberately set to values recomputation would CHANGE, so "no aggregate is
+        // re-derived" is a claim the assertions can fail. Without them the early return below could
+        // be deleted with every test still green: a mutation run found exactly that. `senders` gains
+        // a member nobody sent from (recomputation drops it); `received_timestamp` stays None while
+        // both members carry `received` (recomputation would fill it in).
+        t.item.senders.push("ghost@nowhere".to_string());
+        assert_eq!(t.item.received_timestamp, None);
 
         assert_eq!(redact_thread(&mut t, &access), ThreadRedaction::Redacted);
         assert_eq!(t.item.labels, v(&["received"]));
@@ -1283,6 +1319,15 @@ mod tests {
         assert_eq!(t.messages.len(), 2, "no member offended, so no member is dropped");
         assert_eq!(t.item.message_count, 2, "and no aggregate is re-derived");
         assert_eq!(t.item.size, 30);
+        assert_eq!(
+            t.item.senders,
+            v(&["alice@x", "ghost@nowhere"]),
+            "a labels-only redaction hid no message, so it may not rewrite membership aggregates"
+        );
+        assert_eq!(
+            t.item.received_timestamp, None,
+            "and it may not invent a value the unredacted thread did not carry"
+        );
     }
 
     #[test]
