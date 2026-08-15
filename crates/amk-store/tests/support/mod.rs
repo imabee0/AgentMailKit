@@ -38,9 +38,33 @@ const DATABASE_URL: &str = "postgres://amk:amk-dev-local@127.0.0.1:55432/amk";
 /// with it set, an unreachable database is a **panic**, not a skip, so a developer whose local
 /// Postgres breaks gets a loud failure instead of a quiet, meaningless pass. Any other value, or
 /// the variable unset, keeps today's skip behaviour.
+///
+/// `amk_store::connect` does two distinct things behind one `Result`: it opens the connection,
+/// then runs the embedded migrations against it — so a failure here is not always "unreachable".
+/// This was found live: a shared dev database that already had migration 0007 applied made every
+/// suite on a checkout with only 0001–0006 fail `connect` with *"migration 7 was previously
+/// applied but is missing in the resolved migrations"* — `sqlx::Error::Migrate(_)` — which the
+/// single "unreachable" message below rendered indistinguishably from Postgres genuinely being
+/// down, sending the next reader to restart a database that was never the problem. The panic (and
+/// the skip message) branch on the error variant so a migration mismatch reads as one.
 pub async fn pool() -> Option<PgPool> {
     match amk_store::connect(DATABASE_URL).await {
         Ok(p) => Some(p),
+        Err(e @ sqlx::Error::Migrate(_)) => {
+            let msg = format!(
+                "the dev database is reachable but its migration history disagrees with this \
+                 checkout's migrations/ directory ({e}). This is not a connectivity problem — do \
+                 not restart the database. Likely cause: this checkout and another checkout (or \
+                 branch) sharing the same dev database disagree about which migrations exist. \
+                 Reconcile the schema (or point AMK_DATABASE_URL/DATABASE_URL at a fresh \
+                 database) before re-running."
+            );
+            if std::env::var("AMK_REQUIRE_DB").as_deref() == Ok("1") {
+                panic!("{msg}");
+            }
+            eprintln!("skipping: {msg}");
+            None
+        }
         Err(e) => {
             if std::env::var("AMK_REQUIRE_DB").as_deref() == Ok("1") {
                 panic!(

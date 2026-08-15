@@ -169,6 +169,67 @@ async fn authenticate_with_the_right_secret_resolves_the_key() {
     assert_eq!(resolved.inbox_id, None);
 }
 
+/// `AUTHENTICATE_SQL`'s `WHERE prefix = $1` is this dispatch's entire reason for existing — the
+/// O(1) lookup path — but every other `authenticate` test above creates exactly one key, so any
+/// query that returns *a* row (an `ORDER BY ... LIMIT 1` with no `WHERE` at all, say) passes them
+/// by accident. Three keys, across the three different scopes, each asserted to resolve to
+/// *itself specifically* — not merely `Some(_)` — so a mutation that drops the `WHERE` clause
+/// cannot survive on luck of insertion order: presenting A's secret must resolve A even though B
+/// and C both exist, and likewise for B and C.
+#[tokio::test]
+async fn authenticate_resolves_the_specific_key_presented_not_merely_any_key() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let key_a = api_keys::create(&pool, org_key(&org, "selectivity-a"))
+        .await
+        .unwrap();
+    let key_b = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: Some(pod),
+            inbox_id: None,
+            name: "selectivity-b".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+    let key_c = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox.clone()),
+            name: "selectivity-c".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let resolved_a = api_keys::authenticate(&pool, &key_a.api_key)
+        .await
+        .unwrap()
+        .expect("key A's own secret must authenticate");
+    assert_eq!(resolved_a.api_key_id, key_a.api_key_id, "A must resolve to A, not B or C");
+
+    let resolved_b = api_keys::authenticate(&pool, &key_b.api_key)
+        .await
+        .unwrap()
+        .expect("key B's own secret must authenticate");
+    assert_eq!(resolved_b.api_key_id, key_b.api_key_id, "B must resolve to B, not A or C");
+
+    let resolved_c = api_keys::authenticate(&pool, &key_c.api_key)
+        .await
+        .unwrap()
+        .expect("key C's own secret must authenticate");
+    assert_eq!(resolved_c.api_key_id, key_c.api_key_id, "C must resolve to C, not A or B");
+}
+
 #[tokio::test]
 async fn authenticate_rejects_every_kind_of_miss() {
     let Some(pool) = support::pool().await else {
@@ -237,6 +298,37 @@ async fn authenticate_never_writes_used_at() {
         .unwrap()
         .unwrap();
     assert!(touched.used_at.is_some(), "touch_used_at is the only call that sets it");
+}
+
+/// `touch_used_at`'s `WHERE` clause names one row; nothing above proved it touches only that row.
+#[tokio::test]
+async fn touch_used_at_updates_only_the_named_key() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let key_a = api_keys::create(&pool, org_key(&org, "touch-a"))
+        .await
+        .unwrap();
+    let key_b = api_keys::create(&pool, org_key(&org, "touch-b"))
+        .await
+        .unwrap();
+
+    assert!(api_keys::touch_used_at(&pool, &key_a.api_key_id)
+        .await
+        .unwrap());
+
+    let touched_a = api_keys::get(&pool, &org, &KeyScope::Organization, &key_a.api_key_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(touched_a.used_at.is_some(), "the named key must be touched");
+
+    let untouched_b = api_keys::get(&pool, &org, &KeyScope::Organization, &key_b.api_key_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(untouched_b.used_at, None, "a sibling key must not be touched");
 }
 
 // ---- inbox-scoped key + case folding (fixture 18) -----------------------------------------
@@ -557,6 +649,73 @@ async fn get_pins_the_named_inbox_not_just_the_scope() {
         .is_some());
 }
 
+/// The inbox-mount sibling of [`get_and_delete_also_pin_the_pod_scope_not_only_list`]:
+/// `KeyScope::Inbox` had appeared with `get` and `list`, never with `delete`, so a mutation of
+/// `DELETE_SQL`'s `inbox_id = $4` predicate specifically had nothing exercising it.
+#[tokio::test]
+async fn delete_pins_the_named_inbox_not_just_the_scope() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let inbox_b = support::seed_inbox(&pool, &org, pod, "sibling").await;
+
+    let key_a = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox_a.clone()),
+            name: "inbox-a-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+    let key_b = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox_b.clone()),
+            name: "inbox-b-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Inbox B's scope must not be able to delete inbox A's key, and vice versa.
+    assert!(
+        !api_keys::delete(&pool, &org, &KeyScope::Inbox(inbox_b.clone()), &key_a.api_key_id)
+            .await
+            .unwrap(),
+        "inbox_b must not delete inbox_a's key by naming its id directly"
+    );
+    assert!(
+        !api_keys::delete(&pool, &org, &KeyScope::Inbox(inbox_a.clone()), &key_b.api_key_id)
+            .await
+            .unwrap(),
+        "inbox_a must not delete inbox_b's key by naming its id directly"
+    );
+    // Both keys must have survived the cross-scope attempts...
+    assert!(api_keys::get(&pool, &org, &KeyScope::Inbox(inbox_a.clone()), &key_a.api_key_id)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(api_keys::get(&pool, &org, &KeyScope::Inbox(inbox_b.clone()), &key_b.api_key_id)
+        .await
+        .unwrap()
+        .is_some());
+    // ...while each inbox can delete its own.
+    assert!(api_keys::delete(&pool, &org, &KeyScope::Inbox(inbox_a), &key_a.api_key_id)
+        .await
+        .unwrap());
+    assert!(api_keys::delete(&pool, &org, &KeyScope::Inbox(inbox_b), &key_b.api_key_id)
+        .await
+        .unwrap());
+}
+
 #[tokio::test]
 async fn listing_at_org_scope_never_leaks_a_sibling_organizations_keys() {
     let Some(pool) = support::pool().await else {
@@ -648,7 +807,18 @@ async fn a_non_uuid_api_key_id_is_treated_as_not_found_not_an_error() {
         return;
     };
     let org = support::seed_org(&pool).await;
-    let bogus = ApiKeyId::new("not-a-uuid");
+    // A real row exists in the same organization throughout — this is the shape a review lens
+    // used to catch an earlier version of this module: `get`'s `Uuid::parse_str(..).ok()` fed a
+    // `let Some(id) = .. else { return Ok(None) }`, and mutating that early return into
+    // `.unwrap_or_else(Uuid::nil)` made a malformed id resolve any row seeded at the nil UUID.
+    // `get`/`delete`/`touch_used_at` no longer parse the id in Rust at all — the presented string
+    // is compared against the column's own canonical text directly in SQL — so there is no
+    // Rust-side fallback value left for a mutation to substitute, and a garbage id cannot resolve
+    // *this* row (or any row) regardless of what exists alongside it.
+    let real = api_keys::create(&pool, org_key(&org, "real-key-in-the-same-org"))
+        .await
+        .unwrap();
+    let bogus = ApiKeyId::new("not-a-uuid-at-all");
 
     assert!(api_keys::get(&pool, &org, &KeyScope::Organization, &bogus)
         .await
@@ -658,4 +828,37 @@ async fn a_non_uuid_api_key_id_is_treated_as_not_found_not_an_error() {
         .await
         .unwrap());
     assert!(!api_keys::touch_used_at(&pool, &bogus).await.unwrap());
+
+    // And the real key is untouched by any of the three attempts above.
+    let still_there = api_keys::get(&pool, &org, &KeyScope::Organization, &real.api_key_id)
+        .await
+        .unwrap();
+    assert!(still_there.is_some(), "the real key must survive every bogus-id attempt");
+    assert_eq!(still_there.unwrap().used_at, None, "touch_used_at must not have reached it");
+}
+
+/// `get`/`delete`/`touch_used_at` compare `api_key_id::text = lower($n)` rather than a native
+/// `uuid = uuid` comparison, specifically so a caller-presented id needs no Rust-side parsing —
+/// but that shifts case-insensitivity onto the `lower()` call, which a native `Uuid` comparison
+/// used to give for free. A differently-cased rendering of a real id must still resolve it.
+#[tokio::test]
+async fn get_resolves_a_differently_cased_rendering_of_a_real_api_key_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let created = api_keys::create(&pool, org_key(&org, "case-check"))
+        .await
+        .unwrap();
+    let uppercased = ApiKeyId::new(created.api_key_id.as_str().to_uppercase());
+    assert_ne!(uppercased, created.api_key_id, "sanity: the rendering actually differs");
+
+    let resolved = api_keys::get(&pool, &org, &KeyScope::Organization, &uppercased)
+        .await
+        .unwrap();
+    assert!(
+        resolved.is_some(),
+        "an uppercased rendering of a real UUID must still resolve it"
+    );
+    assert_eq!(resolved.unwrap().api_key_id, created.api_key_id);
 }

@@ -31,13 +31,14 @@
 //! [`authenticate`] must not let a caller distinguish "no key starts with this prefix" from
 //! "a key starts with this prefix but the secret is wrong" — `reference/fixtures/05-error-catalog.http`
 //! shows both cases behind the identical bare `403 {"message":"Forbidden"}`, and a timing gap
-//! would reopen that distinction at the network layer. Every path through the function performs
-//! **exactly one** argon2id verify of the presented value: a resolvable prefix verifies against
-//! its own stored hash (whether the secret matches or not — both a hit and a wrong-secret miss
-//! cost one verify against a *real* row's hash, so those two cannot be told apart by cost either),
-//! and an unresolvable prefix (unknown, malformed, absent, or too short to have a prefix at all)
-//! verifies against a fixed dummy hash computed once at first use. No branch skips the verify
-//! call, so a caller cannot cheaply enumerate valid prefixes by timing "found" against "not found".
+//! would reopen that distinction at the network layer. There is **one** call to `verify_secret` in
+//! the whole function, unconditional, on a hash a pure fallback selects: the row's own hash on a
+//! hit, a fixed dummy hash (computed once at first use) on every kind of miss — unknown prefix,
+//! malformed presented value, or a resolved row whose secret turns out to be wrong. Structuring it
+//! as one call site rather than a branch that decides whether to call it at all means "skip the
+//! verify on a miss" cannot be written without deleting the only place `verify_secret` is called,
+//! which `authenticate_with_the_right_secret_resolves_the_key` already kills — the timing
+//! invariant does not depend on a reviewer noticing a second call site was left out.
 //!
 //! # What this module does not do
 //!
@@ -247,16 +248,31 @@ fn row_to_authenticated(row: &PgRow) -> Result<AuthenticatedKey, StoreError> {
     })
 }
 
-/// `api_key_id` is stored as a `uuid` column (the migration's own decision) while
-/// [`ApiKeyId`] is an opaque string newtype (`amk_types::ids`, frozen — not every id type there is
-/// UUID-typed). A caller-supplied id that is not valid UUID text cannot name any stored row, so
-/// parsing it here and treating a parse failure as "not found" is exact, not an approximation: it
-/// is the same answer a real lookup miss would give.
-fn parse_id(id: &ApiKeyId) -> Option<Uuid> {
-    Uuid::parse_str(id.as_str()).ok()
-}
-
 // ---- repository ------------------------------------------------------------------------------
+//
+// `api_key_id` is stored as a `uuid` column (the migration's own decision) while [`ApiKeyId`] is
+// an opaque string newtype (`amk_types::ids`, frozen — not every id type there is UUID-typed), so
+// a caller-supplied id first has to be checked against the column's real type somehow. An earlier
+// version of this module did that in Rust — `Uuid::parse_str(id.as_str()).ok()`, with a `None`
+// arm returning "not found" before any query ran — and a review lens found that structure
+// mutable into a live bug: replacing the `None` arm with `.unwrap_or_else(Uuid::nil)` (continue
+// with a placeholder instead of returning early) made a malformed id resolve any row a
+// `Uuid::nil()` had been seeded into. Nothing seeds that value today, but "nothing currently
+// seeds it" is not the same as "this cannot happen" — the vulnerability was the existence of a
+// Rust-side branch that a mutation could rewrite to skip the early return, not the specific
+// value it happened to fall back to.
+//
+// [`get`], [`delete`] and [`touch_used_at`] below have no such branch at all: `api_key_id` is
+// bound as the raw presented `&str` and compared with `api_key_id::text = lower($n)` in SQL.
+// There is no Rust code path between "a caller-supplied string" and "a query parameter" for that
+// mutation to rewrite — a malformed id is simply a string that cannot equal any row's canonical
+// lowercase UUID text, which Postgres itself answers with zero rows, never an error. `lower()`
+// on the parameter (not the column, which `::text` already renders in canonical lowercase)
+// preserves case-insensitive matching for a validly-cased-but-differently-cased id, exactly as a
+// parse-then-compare-by-value would have. The one cost is that `api_key_id::text = $n` cannot use
+// the primary key's native `uuid` index for a true index-only scan the way `api_key_id = $n::uuid`
+// would; accepted here because `get`/`delete`/`touch_used_at` are single-row, administrative-rate
+// calls, never the request-per-second `authenticate` path (which looks up by `prefix`, unaffected).
 
 // One literal per query, matching `messages.rs`'s idiom — sqlx 0.9's `SqlSafeStr` bound accepts
 // only `&'static str`, so the column list is duplicated across these rather than built with
@@ -270,7 +286,7 @@ const INSERT_SQL: &str = "INSERT INTO api_keys \
 const GET_SQL: &str = "SELECT api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, \
         created_at \
      FROM api_keys \
-     WHERE organization_id = $1 AND api_key_id = $2 \
+     WHERE organization_id = $1 AND api_key_id::text = lower($2) \
        AND ($3::uuid IS NULL OR pod_id = $3) \
        AND ($4::text IS NULL OR inbox_id = $4)";
 
@@ -283,7 +299,7 @@ const LIST_SQL: &str = "SELECT api_key_id, prefix, name, pod_id, inbox_id, permi
      ORDER BY created_at ASC, api_key_id ASC";
 
 const DELETE_SQL: &str = "DELETE FROM api_keys \
-     WHERE organization_id = $1 AND api_key_id = $2 \
+     WHERE organization_id = $1 AND api_key_id::text = lower($2) \
        AND ($3::uuid IS NULL OR pod_id = $3) \
        AND ($4::text IS NULL OR inbox_id = $4)";
 
@@ -334,13 +350,10 @@ pub async fn get(
     scope: &KeyScope,
     api_key_id: &ApiKeyId,
 ) -> Result<Option<ApiKey>, StoreError> {
-    let Some(id) = parse_id(api_key_id) else {
-        return Ok(None);
-    };
     let (pod_param, inbox_param) = scope_params(scope);
     let row = sqlx::query(GET_SQL)
         .bind(organization_id.as_str())
-        .bind(id)
+        .bind(api_key_id.as_str())
         .bind(pod_param)
         .bind(inbox_param)
         .fetch_optional(pool)
@@ -371,13 +384,10 @@ pub async fn delete(
     scope: &KeyScope,
     api_key_id: &ApiKeyId,
 ) -> Result<bool, StoreError> {
-    let Some(id) = parse_id(api_key_id) else {
-        return Ok(false);
-    };
     let (pod_param, inbox_param) = scope_params(scope);
     let result = sqlx::query(DELETE_SQL)
         .bind(organization_id.as_str())
-        .bind(id)
+        .bind(api_key_id.as_str())
         .bind(pod_param)
         .bind(inbox_param)
         .execute(pool)
@@ -402,34 +412,30 @@ pub async fn authenticate(
         None => None,
     };
 
-    match row {
-        Some(row) => {
-            let stored_hash: String = row.try_get("hash")?;
-            if verify_secret(presented, &stored_hash) {
-                Ok(Some(row_to_authenticated(&row)?))
-            } else {
-                Ok(None)
-            }
-        }
-        None => {
-            // Unknown prefix, or a value with no recoverable prefix at all: pay the same one
-            // verify a real lookup would have paid, against a hash that can never match.
-            let _ = verify_secret(presented, dummy_hash());
-            Ok(None)
-        }
+    // Exactly one argon2id verify, on every path, against a hash chosen by a pure fallback:
+    // the row's own hash on a hit, the fixed dummy hash on every kind of miss. This is
+    // deliberately the ONLY call to `verify_secret` in this function — there is no second call
+    // site to skip and no branch that can bypass this one, so "verify only on a hit" is not
+    // merely untested, it is unwritable without deleting this line, which
+    // `authenticate_with_the_right_secret_resolves_the_key` already kills.
+    let stored_hash: Option<String> = row.as_ref().map(|r| r.try_get("hash")).transpose()?;
+    let hash_to_check = stored_hash.as_deref().unwrap_or(dummy_hash());
+    let matched = verify_secret(presented, hash_to_check);
+
+    match (row, matched) {
+        (Some(row), true) => Ok(Some(row_to_authenticated(&row)?)),
+        _ => Ok(None),
     }
 }
 
 /// Record that a key was used, independent of [`authenticate`] — see the module doc for why the
 /// two are separate calls. Returns whether a row was found and updated.
 pub async fn touch_used_at(pool: &PgPool, api_key_id: &ApiKeyId) -> Result<bool, StoreError> {
-    let Some(id) = parse_id(api_key_id) else {
-        return Ok(false);
-    };
-    let result = sqlx::query("UPDATE api_keys SET used_at = now() WHERE api_key_id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?;
+    let result =
+        sqlx::query("UPDATE api_keys SET used_at = now() WHERE api_key_id::text = lower($1)")
+            .bind(api_key_id.as_str())
+            .execute(pool)
+            .await?;
     Ok(result.rows_affected() > 0)
 }
 
