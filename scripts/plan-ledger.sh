@@ -87,6 +87,14 @@ check harness-no-github yes \
   "no .github/ (Gitea only)" \
   bash -c '[ ! -d .github ]'
 
+# CI layer: DECIDED 2026-08-15 by the user — local-only, no forge CI. This is a deliberate
+# departure from the plan's "CI remains the authoritative gate", recorded there with what it costs.
+# Kept as a check rather than an attestation so the decision cannot be reversed by accident: a
+# workflow file appearing here means someone added CI without reopening the decision.
+check ci-layer-local-only yes \
+  "no forge CI — local-only gating, decided" \
+  bash -c '[ ! -d .gitea/workflows ] && [ ! -d .github/workflows ]'
+
 # ---------------------------------------------------------------- dispatch contracts
 # 'Every implementer dispatch states, explicitly and in full' six things. Four of six is skipped.
 for c in .claude/contracts/*.md; do
@@ -181,7 +189,6 @@ pend p6-restore-drill        "P6: restore drill passes from backups alone, befor
 attest review-panel-per-diff "three lenses returned on the last merged diff"
 attest mutation-at-gate      "mutation set run for the crate at its gate; survivors accounted for"
 attest evidence-not-assert   "every completion claim in the last report carried its command output"
-attest ci-layer-decision     "CI layer: plan requires it, global rule needs opt-in — USER DECISION OPEN"
 # Named rather than dropped. The plan DECIDES reviewers get memory ON and implementers OFF; the
 # `memory:` frontmatter key is unverified for Claude Code 2.1.233 and an unsupported key can cost
 # an agent its registration, so it is currently absent from all five files and the decision binds
