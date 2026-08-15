@@ -4,6 +4,9 @@ DELETED
 - webhook ep_3HwIKSSVTUWz1aznPYS3s00oMiL (200 capture sink) -> 204 at 2026-08-15 ~06:47Z
   (A9 payloads, A11 complaint, A14 unauthenticated all already captured to fixtures)
 - inbox amk-probe2@agentmail.to (threading matrix case e) -> see status above
+- inbox amkcase@agentmail.to (fixture 18, inbox_id case normalization) -> 202 at 2026-08-15 12:17Z,
+  confirmed absent from the pod listing afterwards. Created 12:15Z as {"username":"AmkCase"};
+  the observation it produced is recorded in 18-inbox-case-normalization.txt.
 
 STILL LIVE (deliberately, until the A2 retry tail completes ~T+28h from 2026-08-15T05:44Z)
 - pod    9047724b-2879-416b-8424-82ef81ab9397  "amk-probe-throwaway"
