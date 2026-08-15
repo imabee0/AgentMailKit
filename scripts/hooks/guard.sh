@@ -128,11 +128,15 @@ case "$FILE" in
 Those crates live only in amk-ingest/amk-outbound and are converted at the boundary.
 Shape provenance: every type here derives from AgentMail's artifacts, never from Stalwart."
     fi
-    if printf '%s' "$CONTENT" | grep -qiE '(jmap|sieve|rocksdb|mailbox_?role)' \
-       && ! printf '%s' "$CONTENT" | grep -qiE '^\s*(//|///|//!|\*)' ; then
-      deny "Stalwart/JMAP concept in a protected crate.
+    # Strip comment lines FIRST, then look for the concept in what remains. Testing the whole
+    # payload for "does any line look like a comment" exempts every Rust file ever written, since
+    # they all carry doc comments — the check would have passed anything.
+    code_only=$(printf '%s\n' "$CONTENT" | grep -vE '^\s*(//|///|//!|\*|/\*)' || true)
+    if printf '%s' "$code_only" | grep -qiE '(jmap|sieve|rocksdb|mailbox_?role)'; then
+      deny "Stalwart/JMAP concept in a protected crate:
+$(printf '%s' "$code_only" | grep -inE '(jmap|sieve|rocksdb|mailbox_?role)' | head -5 | sed 's/^/    /')
 These crates derive from AgentMail's artifacts only — not even as an optional or legacy field.
-(Comments contrasting with Stalwart are allowed; this looked like code.)"
+(A comment contrasting with Stalwart is fine; this was code.)"
     fi
     ;;
 esac

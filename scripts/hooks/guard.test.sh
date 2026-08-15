@@ -55,6 +55,15 @@ check 0 "orchestrator edits the plan" \
   "$(j Edit "/home/imma/.claude/plans/download-agents-mail-sdk-drifting-frog.md" "$ORCH" "text")"
 check 0 "comment mentioning Stalwart/JMAP is documentation" \
   "$(j Write "$WT/crates/amk-core/src/threading.rs" "$WT" "// Unlike JMAP, threading here is per-inbox.")"
+check 0 "doc comment mentioning JMAP alongside real code" \
+  "$(j Write "$WT/crates/amk-core/src/threading.rs" "$WT" "//! Unlike JMAP, per-inbox.
+pub struct ThreadIndex;")"
+# The regression that motivated stripping comments per-line: a real file carries doc comments AND
+# code, and the old check exempted the whole payload the moment any line looked like a comment.
+check 2 "JMAP in code is caught even when the file also has doc comments" \
+  "$(j Write "$WT/crates/amk-core/src/labels.rs" "$WT" "//! Labels module.
+/// Role of a mailbox.
+pub struct JmapMailboxRole;")"
 check 0 "mail_parser inside amk-ingest is correct" \
   "$(j Write "$WT/crates/amk-ingest/src/parse.rs" "$WT" "use mail_parser::Message;")"
 check 0 "ordinary git commit from a worktree" \
