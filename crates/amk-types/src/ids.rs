@@ -18,6 +18,29 @@ use uuid::Uuid;
 pub enum IdDecodeError {
     #[error("path segment is not valid UTF-8 after percent-decoding")]
     Utf8,
+    #[error("identifier contains a NUL byte")]
+    Nul,
+}
+
+/// Whether a decoded identifier carries a byte no identifier may contain.
+///
+/// **Exactly one rule: a NUL byte.** `%00` percent-decodes to a perfectly valid UTF-8 string, so
+/// the UTF-8 check above passes it — and PostgreSQL `text` cannot represent `0x00` at all. A
+/// NUL-bearing id therefore fails at *parameter encoding* (`SQLSTATE 22021`), before any
+/// comparison, surfacing as a database error where every other unresolvable id returns not-found.
+/// That is two defects: a 500 on caller-controlled input, and a side channel that distinguishes
+/// "malformed" from "absent" in a codebase whose contract requires denial to mask as `not_found`.
+///
+/// Rejected, never sanitised. Stripping the byte would silently make two different ids equal, and
+/// this project has already spent three review rounds on the difference between rejecting a value
+/// and redefining what makes two values the same.
+///
+/// **Deliberately no wider than NUL.** Control characters, newlines and over-long ids are all
+/// arguable, but `message_id` is an RFC 5322 grammar that permits a great deal, no fixture governs
+/// any of them, and an over-broad rule here rejects legitimate ids — a worse failure than the one
+/// being fixed. `[ASSUMED]`, and narrow on purpose.
+pub fn has_forbidden_byte(s: &str) -> bool {
+    s.contains('\0')
 }
 
 /// Characters that must be escaped inside a single URL path segment.
@@ -61,11 +84,19 @@ macro_rules! string_id {
             /// params), so this is not the request path. It exists because the encoding has to be
             /// *reversible* — `message_id` carries `<`, `>` and `@`, and any code that builds a URL
             /// must be able to read its own output back, in tests and in the conformance harness.
+            ///
+            /// Rejects a NUL byte — see [`has_forbidden_byte`]. `%00` survives percent-decoding as
+            /// valid UTF-8, and this is one of only two wire-reachable ways an untrusted byte
+            /// becomes an id; the other is the page-token cursor decoder, which does not route
+            /// through here and needs its own check.
             pub fn from_path_segment(segment: &str) -> Result<Self, IdDecodeError> {
-                percent_decode_str(segment)
+                let decoded = percent_decode_str(segment)
                     .decode_utf8()
-                    .map(|s| Self(s.into_owned()))
-                    .map_err(|_| IdDecodeError::Utf8)
+                    .map_err(|_| IdDecodeError::Utf8)?;
+                if has_forbidden_byte(&decoded) {
+                    return Err(IdDecodeError::Nul);
+                }
+                Ok(Self(decoded.into_owned()))
             }
         }
 
@@ -297,5 +328,48 @@ mod tests {
         assert_eq!(serde_json::to_string(&InboxId::new("a@b.c")).unwrap(), "\"a@b.c\"");
         let t = ThreadId::from(uuid::uuid!("c1197a89-02ad-4bdf-8461-c03136b481aa"));
         assert_eq!(serde_json::to_string(&t).unwrap(), "\"c1197a89-02ad-4bdf-8461-c03136b481aa\"");
+    }
+
+    /// `%00` percent-decodes to valid UTF-8, so the UTF-8 check alone passes it — and PostgreSQL
+    /// `text` cannot hold `0x00`, so it fails at parameter encoding (`22021`) rather than
+    /// resolving to nothing. Rejected here instead, at the boundary, for every id type.
+    #[test]
+    fn a_nul_byte_is_rejected_at_the_path_boundary_for_every_id_type() {
+        for encoded in ["%00", "abc%00def", "%00abc", "abc%00"] {
+            assert!(
+                matches!(InboxId::from_path_segment(encoded), Err(IdDecodeError::Nul)),
+                "InboxId must reject {encoded:?} as Nul"
+            );
+            assert!(
+                matches!(MessageId::from_path_segment(encoded), Err(IdDecodeError::Nul)),
+                "MessageId must reject {encoded:?} as Nul"
+            );
+            assert!(
+                matches!(ApiKeyId::from_path_segment(encoded), Err(IdDecodeError::Nul)),
+                "ApiKeyId must reject {encoded:?} as Nul"
+            );
+        }
+        // The error must be distinguishable from a UTF-8 failure: they have different causes and a
+        // caller that collapses them cannot report either accurately.
+        assert!(matches!(InboxId::from_path_segment("%FF%FE"), Err(IdDecodeError::Utf8)));
+    }
+
+    /// The regression that matters more than the fix: an over-broad rejection breaks real ids.
+    /// `message_id` is an RFC 5322 angle-bracket value carrying `<`, `>` and `@`
+    /// (`reference/fixtures/03-id-formats.http`), and `inbox_id` is an email address that folds
+    /// ASCII case (`reference/fixtures/18-inbox-case-normalization.txt`). Both must still round
+    /// trip untouched.
+    #[test]
+    fn rejecting_nul_does_not_disturb_any_legitimate_id() {
+        let msg = MessageId::new("<0100019891f3ab2c-abc@email.amazonses.com>");
+        assert_eq!(MessageId::from_path_segment(&msg.to_path_segment()).expect("round trips"), msg);
+        let inbox = InboxId::new("AmkCase+tag@agentmail.to");
+        assert_eq!(
+            InboxId::from_path_segment(&inbox.to_path_segment()).expect("round trips"),
+            inbox
+        );
+        // Control characters other than NUL are NOT rejected — narrow on purpose, since no fixture
+        // governs them and message_id's grammar is permissive.
+        assert!(MessageId::from_path_segment("a%09b").is_ok(), "tab must not be rejected");
     }
 }
