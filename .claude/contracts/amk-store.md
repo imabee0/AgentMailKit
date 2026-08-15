@@ -12,6 +12,41 @@ URLs. It is the only crate that talks to the database. It depends on `amk-types`
 and on nothing else in the workspace. Nothing depends on it except `amk-http` and, at P6,
 `amk-import`.
 
+## Writable paths (exact)
+
+`crates/amk-store/**` and nothing else. `Cargo.lock` may change as a side effect of `cargo` doing
+its job; that is not a licence to edit another crate's `Cargo.toml`. A hook enforces this at write
+time, keyed on the writer and on the target, so neither a stray absolute path nor a shell sitting
+in the wrong directory gets through.
+
+If the work genuinely requires a path outside that tree, **STOP and report**. Do not widen scope on
+your own judgement — one authorised exception this phase (`scripts/check.sh`) was granted by the
+orchestrator in writing, and that is the only shape an exception takes.
+
+## `[SPEC:*]` citations governing every shape here
+
+Every storage model derives from these. Where a fixture and the spec text disagree, **the fixture
+wins and you report the contradiction** — that has already happened once on this project, when the
+OpenAPI descriptions said the system-label gate applied only to threads and a live capture proved
+it applies to messages too.
+
+- `[TESTED]` `reference/fixtures/04-pagination.http` — the page token is `base64(JSON)` of the
+  keyset `{message_id, inbox_id, timestamp}`; **absent** on the last page, never `""`.
+- `[TESTED]` `reference/fixtures/18-inbox-case-normalization.txt` — `inbox_id` folds ASCII case:
+  `{"username":"AmkCase"}` stores `amkcase@…` and any casing resolves it. Also the source for
+  `limit_exceeded`'s `resource`/`limit` extras and the fact that the quota is organization-wide.
+- `[TESTED]` `reference/fixtures/09b-unauthenticated-variant.txt` — restricted-label rows are
+  excluded from list endpoints **with no gap in the page sequence**; the live API leaks neither a
+  count nor a cursor. This is why admission is a `WHERE` predicate, not a post-filter.
+- `[TESTED]` `reference/fixtures/20-search-and-label-precedence.txt` — three access modes:
+  list-with-include-flags, search (permission only, restricted mail IS returned), get-by-id.
+- `[TESTED]` `reference/fixtures/03-id-formats.http` — `message_id` is an RFC 5322 angle-bracket
+  value, stored exactly as received; `thread_id` is a UUID.
+- `[TESTED]` `reference/fixtures/06-download-url-expiry.txt` — ~1h TTL, **403** once expired.
+  (Signed downloads are a later slice; cited so the shape is not re-derived when it arrives.)
+- `[SPEC:openapi]` / `[SPEC:sdk]` — reached **only** through `amk-types`. This crate never
+  re-derives a wire shape; if a needed type is absent there, STOP and report.
+
 ## The two rules that come from the P0 review, not from taste
 
 ### 1. Restricted-label admission is a QUERY predicate, never a post-filter

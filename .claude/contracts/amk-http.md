@@ -12,6 +12,33 @@ pagination parameter parsing, and the P0/P1 handlers. It depends on `amk-types`,
 `amk-store`. It is the crate the official SDKs actually talk to, so **its job is byte-level
 fidelity to the reference API, not elegance**.
 
+## Writable paths (exact)
+
+`crates/amk-http/**` and nothing else. Same rule and same hook as every other dispatch: if the work
+requires a path outside that tree, **STOP and report** rather than widening scope.
+
+## `[SPEC:*]` citations governing every shape here
+
+- `[TESTED]` `reference/fixtures/05-error-catalog.http` — the auth/app error asymmetry (bare
+  `{"message":…}` at 401/403 **even for a well-formed but unknown key**; full envelope for app
+  errors), and inbox collision as `already_exists` at **HTTP 403** with `suggestions[]`.
+- `[TESTED]` `reference/fixtures/01-auth-me.http` — the Identity shape returned by `auth/me`, which
+  is the P0 gate's subject.
+- `[TESTED]` `reference/fixtures/04-pagination.http` — envelope `{count, limit?, next_page_token?,
+  <resource>: []}`; token absent on the last page.
+- `[TESTED]` `reference/fixtures/18-inbox-case-normalization.txt` — case-folded `inbox_id` in a
+  path segment; `limit_exceeded` extras (`resource`, `limit`; `upgrade_url` deliberately omitted —
+  no billing surface).
+- `[TESTED]` `reference/fixtures/20-search-and-label-precedence.txt` — the `LabelAccess` mode is
+  chosen by route, not by a global default. The `include_*` flags exist on **4 of 33** paginated
+  GETs.
+- `[TESTED]` `reference/fixtures/03-id-formats.http` — percent-encoded angle-bracket `message_id`
+  in a path segment; live responses carry `organization_id`/`pod_id`/`smtp_id`.
+- `[SPEC:openapi]` — 82 paths / 242 schemas, and the three mounts (org, `pods/{pod_id}`,
+  `inboxes/{inbox_id}`) sharing one handler set.
+- `[SPEC:sdk]` — 128 endpoints; the SDKs are the acceptance test, so their expectations are the
+  contract where the spec is silent.
+
 ## The rule that governs every other decision
 
 A response that is structurally different from `api.agentmail.to`'s is a defect, even when it is

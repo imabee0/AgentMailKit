@@ -48,6 +48,12 @@ run cargo test --workspace
 step "shape provenance"
 run ./scripts/shape-provenance.sh
 
+# The plan's obligations, mechanically. Runs LAST so its output is the final thing read: an audit
+# found eleven plan steps skipped, and the failure mode was always the same — the obligation was
+# remembered rather than checked. A due-but-unmet obligation now fails the build.
+step "plan ledger"
+run ./scripts/plan-ledger.sh
+
 printf '\n'
 if [ "$fail" -eq 0 ]; then
   echo "check: PASS"

@@ -3,6 +3,24 @@ name: amk-review-provenance
 description: Review lens 2 of 3 — any Stalwart/JMAP-derived shape, stalwart-labs type in a public signature, or invented field? Read-only.
 model: sonnet
 tools: Read, Glob, Grep, Bash
+memory: on
+# Reviewers accumulate knowledge of recurring violations across diffs, which makes the panel
+# better over time. Safe because they are read-only: a remembered bias cannot write drift into
+# code, only into a report the orchestrator weighs.
+permissions:
+  deny:
+    - Write
+    - Edit
+    - NotebookEdit
+    - Bash(git commit:*)
+    - Bash(git push:*)
+    - Bash(git rebase:*)
+    - Bash(git merge:*)
+    - Bash(git reset:*)
+    - Bash(git checkout:*)
+  # Recorded explicitly. The plan: "The deny list is recorded explicitly — never rely on the
+  # `tools:` frontmatter alone." A reviewer that is read-only only because Write was omitted from
+  # `tools:` is relying on an absence, and an absence is not a rule.
 ---
 
 Effort: **medium** (passed by the orchestrator at dispatch).

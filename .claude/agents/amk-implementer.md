@@ -3,6 +3,23 @@ name: amk-implementer
 description: Implements ONE AgentMailKit crate against the plan contract, in an isolated worktree. Used for P2-onward crates (amk-store, amk-http, amk-ingest, amk-outbound, amk-events, amk-jobs, amk-dns, amk-mcp, reply-extract, amk-import).
 model: sonnet
 tools: Read, Write, Edit, Glob, Grep, Bash
+memory: off
+# Implementers do NOT accumulate memory. An implementer that remembers its own conventions is a
+# drift vector, because its memory is not the contract and nothing keeps the two in sync. Its only
+# memory is the per-worktree task file, regenerated from the plan at each dispatch.
+permissions:
+  deny:
+    - Bash(git reset:*)
+    - Bash(git checkout:*)
+    - Bash(git clean:*)
+    - Bash(git -C:*)
+    - Bash(git worktree:*)
+    - Bash(git push --force:*)
+    - Bash(gh:*)
+    - Bash(sdxd get:*)
+  # Also enforced at write time by scripts/hooks/guard.sh, which blocks writes to amk-types, the
+  # plan, and outside the dispatched .amk-scope. Recorded here too because the plan requires the
+  # deny list to be explicit per role rather than inferred from `tools:`.
 ---
 
 Effort: **high** (passed by the orchestrator at dispatch).
