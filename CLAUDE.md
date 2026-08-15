@@ -43,17 +43,18 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0**, 291 tests green on `main`. `amk-types`, `amk-core` and `amk-store` (incl.
+Current phase: **P0**, 294 tests green on `main`. `amk-types`, `amk-core` and `amk-store` (incl.
 `api_keys`) merged and mutation-verified; Register C3 applied to `amk-core::threading`.
 
-**Next: `.claude/contracts/amk-store-id-safety.md`, then `.claude/contracts/amk-http.md`.**
-A caller-supplied id carrying a NUL (`%00` in a path segment, or a tampered page token) reaches a
-Postgres `text` parameter and errors `22021` instead of returning not-found — a 500 where the
-contract requires uniform `not_found`, and a side channel that distinguishes malformed from absent.
-Reachable in `inboxes::get`/`delete`, `messages::get`, `threads::get_with_messages`/`list`, and via
-`MessageCursor`/`ThreadCursor::decode`. **Fixing `from_path_segment` alone does NOT close it** — the
-cursor decoders build ids through raw `::new()` and never touch that function. Two entry points.
-Unreachable only until `amk-http` exists, which is why it goes first.
+**In flight: `.claude/contracts/amk-store-id-safety.md` (branch `amk/p0/store-id-safety`). Then
+`.claude/contracts/amk-http.md`.** A caller-supplied id carrying a NUL reaches a Postgres `text`
+parameter and errors `22021` instead of returning not-found — a 500 where the contract requires
+uniform `not_found`, and a side channel that distinguishes malformed from absent. An id newtype has
+**two wire-reachable doors**: `from_path_segment` (closed at `59d5b20`; `has_forbidden_byte` is the
+single definition of the rule) and `MessageCursor`/`ThreadCursor::decode`, which build ids through
+raw `::new()` from page-token JSON and never touch that function. A third opens in P2, when
+`amk-ingest` hands `messages::insert` a `MessageId` parsed from hostile MIME — which is why the
+store functions are made total, not just the doors closed.
 
 Still deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
 
