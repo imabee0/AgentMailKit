@@ -34,29 +34,45 @@ pub mod labels {
     pub const SENT: &str = "sent";
     pub const UNREAD: &str = "unread";
     pub const SCHEDULED: &str = "scheduled";
-    /// A delivery failure recorded by the pipeline. Named as a system label by the spec sentence
-    /// quoted on [`KNOWN_SYSTEM`]; it was missing here until a reviewer caught that a client could
-    /// therefore forge or erase a bounce verdict through a label PATCH.
+    /// A delivery failure recorded by the pipeline.
     pub const BOUNCED: &str = "bounced";
+    /// A recipient reported the message as junk. Observed live on the message that drew the
+    /// Outlook FBL complaint (`reference/fixtures/19-message-label-patch-gate.txt`).
+    pub const COMPLAINED: &str = "complained";
     // Restricted:
     pub const SPAM: &str = "spam";
     pub const BLOCKED: &str = "blocked";
     pub const UNAUTHENTICATED: &str = "unauthenticated";
     pub const TRASH: &str = "trash";
 
+    /// Labels that hide a message from list endpoints unless explicitly included.
+    ///
+    /// **Restricted and system are different axes.** Restricted governs who may SEE a label;
+    /// system governs who may SET one. Neither implies the other — a client may freely PATCH
+    /// `spam` onto a message (observed), and `unread` is settable but not restricted.
     pub const RESTRICTED: [&str; 4] = [SPAM, BLOCKED, UNAUTHENTICATED, TRASH];
 
-    /// System labels we can name from the spec — **known-incomplete by construction**.
+    /// Labels a client may not add or remove — **observed exactly**, not inferred.
     ///
-    /// `openapi.json` says: *"Cannot add or remove system labels (sent, received, bounced,
-    /// etc.)."* That `etc.` means no hand-rolled list can be exhaustive, so this is a floor, not
-    /// the rule. Policy — which endpoints reject which labels — belongs to amk-core; this constant
-    /// only records what the spec actually names, and an enumeration presented as complete would
-    /// be a claim the evidence does not support.
-    pub const KNOWN_SYSTEM: [&str; 3] = [SENT, RECEIVED, BOUNCED];
+    /// `reference/fixtures/19-message-label-patch-gate.txt` PATCHed each candidate onto a live
+    /// message: `sent`, `received`, `bounced` and `scheduled` returned 400 `validation_error`
+    /// ("Cannot use system label: …"), while `unread`, all four restricted labels, and an
+    /// arbitrary user tag were accepted.
+    ///
+    /// This supersedes reading the OpenAPI description, which names only "(sent, received,
+    /// bounced, etc.)" on the *thread* update schema and says nothing on the message schema —
+    /// two reviewers concluded from that text that messages are ungated. The live API gates both,
+    /// and a request naming one system label rejects the whole mutation rather than the offending
+    /// element. `complained` was not exercised, so its system-ness is unobserved.
+    pub const SYSTEM: [&str; 4] = [SENT, RECEIVED, BOUNCED, SCHEDULED];
 
     pub fn is_restricted(label: &str) -> bool {
         RESTRICTED.contains(&label)
+    }
+
+    /// Whether a client is forbidden from adding or removing this label.
+    pub fn is_system(label: &str) -> bool {
+        SYSTEM.contains(&label)
     }
 }
 

@@ -326,6 +326,7 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         "04-pagination.http",
         "05-error-catalog.http",
         "18-inbox-case-normalization.txt",
+        "19-message-label-patch-gate.txt",
     ];
     // Deferred WITH a reason and the phase that closes it. Not a parking lot: each entry names the
     // crate that will assert it, and this list may only shrink.
@@ -370,4 +371,53 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         "fixtures with no assertion and no recorded deferral: {unaccounted:?}\n\
          Wire it into a test, or add it to DEFERRED with the crate and phase that will."
     );
+}
+
+/// Fixture 19 probed each candidate label against a live message PATCH. It overturned a reading
+/// two reviewers and the orchestrator had all agreed on from the OpenAPI descriptions, so the
+/// constants are pinned to the observation rather than to the prose.
+#[test]
+fn system_and_restricted_labels_match_fixture_19() {
+    use amk_types::message::labels;
+    let text = fixture("19-message-label-patch-gate.txt");
+
+    // Parse the observed table: "  <label>  -> 400 ..." rejected, "-> 200" accepted.
+    let (mut rejected, mut accepted) = (Vec::new(), Vec::new());
+    for line in text.lines() {
+        let t = line.trim();
+        let Some((name, rest)) = t.split_once("->") else {
+            continue;
+        };
+        let name = name.trim();
+        if name.is_empty() || name.contains(' ') || name.contains('/') {
+            continue;
+        }
+        if rest.trim_start().starts_with("400") {
+            rejected.push(name.to_string());
+        } else if rest.trim_start().starts_with("200") {
+            accepted.push(name.to_string());
+        }
+    }
+    assert!(
+        rejected.len() >= 4,
+        "19 must still record the rejected labels; got {rejected:?}"
+    );
+    assert!(
+        accepted.len() >= 5,
+        "19 must still record the accepted labels; got {accepted:?}"
+    );
+
+    // Every label the live API rejected is system; every one it accepted is not.
+    for name in &rejected {
+        assert!(labels::is_system(name), "{name} was rejected live, so it must be system");
+    }
+    for name in &accepted {
+        assert!(!labels::is_system(name), "{name} was accepted live, so it must NOT be system");
+    }
+    assert_eq!(rejected.len(), labels::SYSTEM.len(), "SYSTEM must be exactly the observed set");
+
+    // The trap this fixture exists to document: the two axes are independent.
+    assert!(labels::is_restricted(labels::SPAM) && !labels::is_system(labels::SPAM));
+    assert!(labels::is_system(labels::SCHEDULED) && !labels::is_restricted(labels::SCHEDULED));
+    assert!(!labels::is_system(labels::UNREAD) && !labels::is_restricted(labels::UNREAD));
 }

@@ -1,0 +1,61 @@
+# Fixture 19 — the label gate on MESSAGE patch. Live api.agentmail.to, 2026-08-15 12:4xZ.
+# Throwaway inbox amk-probe@agentmail.to.
+#
+# WHY: two amk-core reviewers read the OpenAPI descriptions and concluded that the system-label
+# restriction applies to THREAD patch only — type_threads:UpdateThreadRequest says "Cannot be
+# system labels" on both fields, while type_messages:UpdateMessageRequest says only "Label or
+# labels to add to message". The orchestrator accepted that reading and instructed the implementer
+# to gate threads and leave messages ungated. **The live API disagrees.** Evidence beats the spec
+# description; this fixture is the authority.
+
+## PATCH /v0/inboxes/amk-probe@agentmail.to/messages/{mid}  {"add_labels":["<label>"]}
+  sent               -> 400  validation_error | "Cannot use system label: sent"
+  received           -> 400  validation_error | "Cannot use system label: received"
+  bounced            -> 400  validation_error | "Cannot use system label: bounced"
+  scheduled          -> 400  validation_error | "Cannot use system label: scheduled"
+  unread             -> 200  ACCEPTED
+  spam               -> 200  ACCEPTED
+  trash              -> 200  ACCEPTED
+  blocked            -> 200  ACCEPTED
+  unauthenticated    -> 200  ACCEPTED
+  arbitrary-tag      -> 200  ACCEPTED   (an unknown user label is fine)
+
+=> MESSAGE patch DOES have a system-label gate. It rejects exactly:
+     SYSTEM = { sent, received, bounced, scheduled }
+=> RESTRICTED labels are NOT system. A client may set spam / trash / blocked / unauthenticated on
+   a message itself. This is the opposite of what "restricted" suggests, and it is the trap:
+   restricted governs who may SEE a label, system governs who may SET it. They are different axes
+   and neither implies the other.
+=> `scheduled` IS system — the implementer had classified it so by inference ("a client adding it
+   would assert a schedule that no job exists for") and a reviewer flagged that as unevidenced.
+   The inference was right; it is now observed.
+=> The same 4 names are rejected in `remove_labels` too — a first cleanup attempt using
+   {"remove_labels":["spam","bounced"]} failed 400 as a whole, so a request naming one system
+   label rejects the ENTIRE mutation rather than applying the valid part.
+
+## Verbatim validation_error body
+{"name":"ValidationError","code":"validation_error","message":"Request validation failed","errors":[{"code":"custom","message":"Cannot use system label: bounced","path":["add_labels",0]}],"fix":"One or more request fields are invalid. Inspect the 'errors' array — each entry has a 'path' and 'message' — correct the offending fields and resend.","docs":"https://docs.agentmail.to/errors#validation_error"}
+
+=> `errors[].path` is `["add_labels", 0]` — field name THEN array index, so path is a JSON-pointer
+   path with mixed string/integer members, not a list of field names. `errors[].code` is "custom",
+   confirming again that this vocabulary is distinct from the envelope's ErrorCode catalog.
+=> The message names the offending label. Ours may do the same: nothing is concealed by a
+   validation error, unlike the not_found masking path.
+
+## INCIDENTAL — a label we do not model
+GET /v0/inboxes/amk-probe@agentmail.to/messages?limit=50 shows a message labelled:
+  ['sent', 'complained']
+=> `complained` is a real pipeline-verdict label, applied to the message that drew the Outlook FBL
+   complaint captured in 17-message-complained.txt. It is absent from amk-types::message::labels.
+   Not rejected by the message PATCH gate above (it was not tested there), so its system-ness is
+   UNOBSERVED.
+
+## INCIDENTAL — restricted-label list exclusion confirmed for a CLIENT-APPLIED label
+While the probe message carried a client-added `spam`, it was ABSENT from
+GET /v0/inboxes/amk-probe@agentmail.to/messages?limit=50 (which returned the other 5). After
+{"remove_labels":["spam"]} it returns to ['received','unread'] and reappears.
+=> The exclusion in 09b is not special to pipeline-applied labels: a label a CLIENT sets hides the
+   message from list endpoints just the same. The rule is about the label, not its provenance.
+
+## Teardown
+All labels added by this probe were reverted; the probe message is back to ['received','unread'].

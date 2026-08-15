@@ -11,6 +11,9 @@ description = "Domain logic: scope resolution, permission intersection, label ru
 amk-types = { path = "../amk-types" }
 serde.workspace = true
 thiserror.workspace = true
+# scope.rs compares `Identity::scope_id` (a text column) against `PodId` (a UUID) by VALUE, not
+# by rendering — otherwise a brace-wrapped or uppercase scope_id locks a key out of its own pod.
+uuid.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
