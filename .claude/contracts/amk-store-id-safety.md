@@ -1,10 +1,10 @@
-# amk-store + amk-types — hostile id bytes reaching SQL — dispatch contract
+# amk-store — hostile id bytes reaching SQL — dispatch contract
 
 Written by the orchestrator before dispatch. The design decisions here are settled; the
 implementer resolves ordinary coding detail inside them and escalates anything else.
 
-**This must land before `amk-http`.** Every path below is unreachable today only because there is
-no HTTP surface. `amk-http` is what makes them reachable, all at once.
+**This must land before `amk-http`.** Every wire path below is unreachable today only because there
+is no HTTP surface. `amk-http` is what makes them reachable, all at once.
 
 ## What this dispatch is
 
@@ -18,23 +18,25 @@ Two things make that a defect rather than a curiosity:
 - **It is denial-distinguishing.** The contract requires scope and label denial to mask as
   `not_found` so a caller cannot learn that a resource exists. An error that fires only for
   *malformed* ids hands the caller a side channel the uniform path denies them.
-- **It is wire-reachable.** `from_path_segment` (`crates/amk-types/src/ids.rs`) rejects only
-  invalid UTF-8. `%00` percent-decodes to a perfectly valid UTF-8 string containing a NUL.
+- **It is wire-reachable.** `from_path_segment` rejected only invalid UTF-8, and `%00`
+  percent-decodes to a perfectly valid UTF-8 string containing a NUL.
 
-The api-keys dispatch closed this for `api_key_id` alone, by binding `Option<Uuid>` — the value
-never reaches a `text` parameter. Every other id in the crate is still bound as `text`.
+## Two doors, and only one of them is closed
 
-## The finding that decides the shape of the fix
-
-**Fixing `from_path_segment` is not sufficient, and believing otherwise is the trap.** The review
+**Fixing `from_path_segment` was not sufficient, and believing otherwise is the trap.** The review
 panel checked the other constructors and found `MessageCursor::decode` / `ThreadCursor::decode`
 (`crates/amk-store/src/pagination.rs`) build `InboxId`/`MessageId` through the raw `::new()`
 constructor from base64(JSON) page-token fields — never through `from_path_segment` at all. A
-tampered token carrying `"inbox_id":"abc\x00def"` was reproduced live reaching the keyset query
-and erroring `22021` on parameter `$6`.
+tampered token carrying `"inbox_id":"abc\x00def"` was reproduced live reaching the keyset query and
+erroring `22021` on parameter `$6`.
 
-So there are **two independent wire-reachable entry points** into the same id newtypes, and a fix
-at one leaves the other open while looking complete. Cover both.
+So an id newtype has **two independent wire-reachable entry points**, and a fix at one leaves the
+other open while looking complete. The path-segment door is shut; the page-token door is yours.
+
+**And a third door opens in P2.** `amk-ingest` will call `messages::insert` with a `MessageId`
+parsed out of hostile MIME, and `amk-import` will call the same functions with values read from
+Stalwart. Neither goes through a path segment or a page token. That is why this dispatch closes the
+door *and* makes the store functions themselves total — see the layering decision below.
 
 ## Writable paths (exact)
 
@@ -46,7 +48,7 @@ Nothing else. `amk-types` is **frozen**, as always. If the work requires a path 
 `crates/amk-types/src/ids.rs` as writable, which was wrong twice over: the plan reserves `amk-types`
 to the orchestrator and never fans it out, and the guard's rule 2 blocks any worktree write to that
 tree regardless of the lock — so the dispatch would have been blocked at its first edit. The
-orchestrator made that change directly instead. What already exists on `main` for you to use:
+orchestrator made that change directly instead (commit `59d5b20`). What exists on `main` for you:
 
 - `amk_types::ids::has_forbidden_byte(&str) -> bool` — public, the single definition of the rule.
 - `IdDecodeError::Nul` — a variant distinct from `Utf8`, because the two have different causes.
@@ -58,48 +60,92 @@ defining the same predicate is precisely the fan-out collision that cost this pr
 
 ## `[SPEC:*]` citations
 
+- `[TESTED]` `reference/fixtures/04-pagination.http` — page tokens are `base64(JSON keyset cursor)`
+  over `{message_id, inbox_id, timestamp}`. That is the door you are closing.
 - `[TESTED]` `reference/fixtures/03-id-formats.http` — `message_id` is an RFC 5322 angle-bracket
-  value carrying `<`, `>`, `@`, percent-encoded in a path segment. Whatever you reject must not
-  reject a legitimate `message_id`; this fixture is the shape that has to keep working.
+  value carrying `<`, `>`, `@`. Whatever you reject must not reject a legitimate `message_id`.
 - `[TESTED]` `reference/fixtures/18-inbox-case-normalization.txt` — `inbox_id` folds ASCII case and
   is compared via `InboxId::eq_normalized`. Your check runs *before* normalisation and must not
   disturb it.
-- `[TESTED]` `reference/fixtures/04-pagination.http` — page tokens are `base64(JSON keyset cursor)`
-  over `{message_id, inbox_id, timestamp}`. That is the second entry point.
 - `[SPEC:openapi]` — ids appear in path segments across the 82 paths; none of the schemas constrain
-  their byte content, so the rejection rule below is **`[ASSUMED]`** and must be tagged as such.
+  their byte content, so the rejection rule is **`[ASSUMED]`** and must be tagged as such.
 
 ## Decisions (settled — implement, do not relitigate)
 
-- **Reject at construction from untrusted bytes, not at every query.** Guarding each `.bind()` is
-  N places that must all stay right forever; guarding the constructors is two. The plan's own
-  security section already takes this position for header inputs ("CR/LF rejection"), and its
-  edge-case list names a null byte explicitly.
-- **What is rejected:** a NUL byte, unconditionally. Reject the whole id — do not strip, trim or
-  sanitise it. Silently rewriting a caller's id is how two ids become equal that should not be.
-- **Where (yours):** the cursor decoders. `from_path_segment` is already done. `MessageCursor::decode`
-  and `ThreadCursor::decode` must fail closed with a `PageTokenError` variant, never a panic and
-  never a silently-altered value.
-- **A tampered page token is already an expected condition.** `Cursor::decode` has error cases for
-  malformed base64 and non-object payloads; this is one more of the same kind, not a new class.
-- **Do not make `::new()` fallible.** It is used throughout the codebase on values that are already
-  ours — a row read back from our own database, a freshly minted id — and making it `Result` would
-  ripple into every call site for no safety gain. The untrusted paths are the two named above.
-- **`api_key_id` keeps its `Option<Uuid>` binding.** It is already total and already reviewed
-  across five rounds; do not rewrite it to use the new check.
+### What is rejected
+
+A NUL byte, unconditionally, via `has_forbidden_byte`. Reject the whole value — do not strip, trim
+or sanitise it. Silently rewriting a caller's id is how two ids become equal that should not be.
+
+### Two layers, because they serve different callers
+
+- **The page-token door** — `MessageCursor::decode` and `ThreadCursor::decode` reject a NUL in
+  `message_id` or `inbox_id` with a **new** `PageTokenError::ForbiddenByte(&'static str)` naming the
+  field. Distinct from `WrongType` on purpose: the type is right and the bytes are not, and a caller
+  that collapses them cannot tell a client "your token is corrupt" from "your token carries a byte
+  we refuse". `thread_id` already parses as a UUID and is total — leave it.
+- **The store functions themselves** — `amk-store` is a library whose callers are not only
+  `amk-http`. A public function that 500s on a byte its parameter type permits is a defect in that
+  function, not in its caller. Make them total, per the table below.
+
+Both layers are required and they are not redundant: the first gives a precise error to a wire
+client, the second gives a uniform result to every caller that will ever exist.
+
+### How the store functions become total
+
+| Kind | Functions | Behaviour on a NUL-bearing id |
+|---|---|---|
+| lookup / delete | `inboxes::{get,delete}`, `messages::{get,list}`, `threads::{get_with_messages,list}` | the function's own existing not-found result — `Ok(None)`, `Ok(false)`, an empty `Page`. **Never `Err`.** |
+| insert / create | `messages::insert`, `threads::insert`, `inboxes::create`, `pods::create` | a **new** `StoreError::InvalidValue(&'static str)` naming the field |
+
+**Use an early return, not a `None` bind.** The api-keys dispatch made `api_key_id` total by binding
+`Option<Uuid>` and letting `($3::uuid IS NULL OR …)` absorb it, and that idiom is *wrong here*:
+`filter.inbox_id()` is bound as a **pin**, where NULL means "no pin" and would widen the query
+across every inbox in the org. A dropped pin is a cross-tenant read; a missed early return is a 500.
+Choose the option whose failure mode is smaller, and do not mix the two idioms in one function.
+
+### `client_id` — decided, and it is a rejection
+
+`pods::create` and `inboxes::create` bind a caller-supplied `client_id` into an `INSERT`, so a NUL
+fails at the bind rather than at a lookup. It gets `StoreError::InvalidValue`, **not** the not-found
+treatment and **not** a silent NULL, because `ON CONFLICT (organization_id, client_id) WHERE
+client_id IS NOT NULL` is the idempotency key: nulling it stops the conflict target firing and
+turns an idempotent create into a duplicating one. Rejecting is the only option that preserves the
+semantics the `client_id` contract promises.
+
+### `organization_id` gets no guard, deliberately
+
+It is bound in nearly every function and is never caller-supplied — it comes from the resolved
+credential, i.e. a value this crate itself stored. Guarding it would imply a threat that does not
+exist and add a test that can never fail. Recorded here so its absence reads as a decision rather
+than an oversight; if you disagree, **STOP and report** rather than adding it.
+
+### Do not make `::new()` fallible
+
+It is used throughout the codebase on values that are already ours — a row read back from our own
+database, a freshly minted id — and making it `Result` would ripple into every call site for no
+safety gain. The untrusted paths are the doors named above.
+
+### `api_key_id` keeps its `Option<Uuid>` binding
+
+Already total, already reviewed across five rounds. Do not rewrite it to use the new check.
 
 ## Assigned edge cases (write the test before the code it targets)
 
-- A page token whose decoded JSON carries a NUL in `inbox_id` or `message_id` → a decode error, not
-  a database error. Assert on the error **type**, not merely that it failed.
-- A page token that is otherwise valid and NUL-free still decodes and still paginates — assert the
-  keyset walk is unaffected.
-- The five `amk-store` call paths the panel reproduced live, each asserted to return `Ok`/not-found
-  rather than `Err` when handed a NUL-bearing id: `inboxes::get`, `inboxes::delete`,
-  `messages::get`, `threads::get_with_messages`, `threads::list`.
-- `pods::create` / `inboxes::create` with a NUL-bearing `client_id`: this one fails at the `INSERT`
-  bind rather than a lookup, so it is an ungraceful 500 rather than a masking defect. Decide
-  explicitly whether `client_id` gets the same treatment and **say which**, with reasoning.
+- A page token whose decoded JSON carries a NUL in `inbox_id`, and one in `message_id` → assert the
+  error **type** is `ForbiddenByte` with the right field, not merely that it failed.
+- A page token that is otherwise valid and NUL-free still decodes, and a keyset walk across two
+  pages still resumes correctly — the regression that matters most, because an over-broad rejection
+  breaks real pagination.
+- **One test per row of the table above, calling that function directly.** Not one test behind a
+  shared helper: the api-keys dispatch shipped a regression test that guarded `get` while
+  `delete`'s call site went unmutated, and an uppercase rendering really deleted the row. A shared
+  helper with one test behind it looks covered and is not.
+- A legitimate percent-encoded `message_id` from fixture 03 and a mixed-case `inbox_id` from
+  fixture 18 still resolve, unchanged, through every function you touch.
+- `pods::create` and `inboxes::create` with a NUL-bearing `client_id` → `InvalidValue`; and a
+  **second** create with the same clean `client_id` still replays to the original resource, proving
+  the idempotency path is intact.
 
 ## Prohibitions
 
@@ -112,11 +158,13 @@ defining the same predicate is precisely the fan-out collision that cost this pr
   over-long ids are all arguably hostile, but no fixture governs them and `message_id` is a
   famously permissive grammar. If you believe another byte class must be rejected, **STOP and
   report** with the reasoning rather than adding it.
-- Do not edit the plan, any contract file, or `scripts/hooks/**`.
+- Do not edit `amk-types`, `amk-core`, the plan, any contract file, or `scripts/hooks/**`.
+- Do not commit `.amk-task.md` or `.amk-scope`; they are gitignored dispatch scaffolding.
 
 ## Reporting
 
-Report the command you ran and its actual output: `cargo test --workspace`, `./scripts/check.sh`,
+Report the command you ran and its actual output: `cargo test -p amk-store`, `./scripts/check.sh`,
 and the mutation table. **`cargo-mutants` does not mutate string literals**, so mutate the rejection
 predicate and every SQL scope pin you touch by hand. Deleting the check must kill a test; so must
-inverting it. Name anything you did not do and why.
+inverting it; so must deleting it at **each individual call site** in the table. Name anything you
+did not do and why.
