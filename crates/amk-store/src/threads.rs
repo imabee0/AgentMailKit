@@ -123,7 +123,8 @@ const THREAD_MESSAGES_SQL: &str =
      FROM messages \
      WHERE organization_id = $1 \
        AND ($2::uuid IS NULL OR pod_id = $2) \
-       AND thread_id = $3 \
+       AND ($3::text IS NULL OR inbox_id = $3) \
+       AND thread_id = $4 \
      ORDER BY \"timestamp\" ASC, message_id ASC";
 
 /// Fetch one thread with its messages, ascending by timestamp (`amk_types::thread::Thread`'s own
@@ -154,6 +155,7 @@ pub async fn get_with_messages(
     let message_rows = sqlx::query(THREAD_MESSAGES_SQL)
         .bind(filter.organization_id().as_str())
         .bind(filter.pod_id().map(|p| p.0))
+        .bind(filter.inbox_id().map(InboxId::as_str))
         .bind(thread_id.0)
         .fetch_all(pool)
         .await?;
@@ -209,6 +211,12 @@ pub async fn list(
     excluded_labels: &[&str],
     query: ListThreadsQuery,
 ) -> Result<Page<ThreadItem>, StoreError> {
+    // See the identical guard in `messages::list`: a zero-row page has no row to anchor a cursor
+    // on, so return it directly rather than let `items.last()` become `None` while `has_more` is
+    // still true.
+    if query.limit == 0 {
+        return Ok(Page { items: Vec::new(), next: None });
+    }
     let sql = match query.direction {
         SortDirection::Ascending => LIST_ASC_SQL,
         SortDirection::Descending => LIST_DESC_SQL,

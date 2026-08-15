@@ -149,13 +149,21 @@ const GET_SQL: &str =
      FROM messages \
      WHERE organization_id = $1 \
        AND ($2::uuid IS NULL OR pod_id = $2) \
-       AND inbox_id = $3 \
-       AND message_id = $4 \
-       AND NOT (labels && $5)";
+       AND ($3::text IS NULL OR inbox_id = $3) \
+       AND inbox_id = $4 \
+       AND message_id = $5 \
+       AND NOT (labels && $6)";
 
 /// Fetch one message by id. The scope pin and the restricted-label exclusion are both in the
 /// `WHERE` clause: a row this credential may not see is never fetched, so there is nothing to
 /// post-filter and nothing to leak through a denial's shape.
+///
+/// Both `filter.inbox_id()` (the scope's own pin, if any) and `inbox_id` (the caller's parameter)
+/// constrain the query — not the parameter alone. `Scope::resolve` happens to guarantee the two
+/// agree today, but that guarantee lives one layer up; this query does not trust it. If a caller
+/// ever passed a `filter` pinned to one inbox and an `inbox_id` parameter naming another, the
+/// parameter could not widen the scope's own pin — the row would have to satisfy both, and no row
+/// can, so the fetch returns nothing rather than resolving in the parameter's favour.
 pub async fn get(
     pool: &PgPool,
     filter: &ScopeFilter,
@@ -168,6 +176,7 @@ pub async fn get(
     let row = sqlx::query(GET_SQL)
         .bind(filter.organization_id().as_str())
         .bind(filter.pod_id().map(|p| p.0))
+        .bind(filter.inbox_id().map(InboxId::as_str))
         .bind(normalized_inbox.as_str())
         .bind(message_id.as_str())
         .bind(&excluded)
@@ -195,9 +204,9 @@ const LIST_ASC_SQL: &str =
        AND ($2::uuid IS NULL OR pod_id = $2) \
        AND ($3::text IS NULL OR inbox_id = $3) \
        AND NOT (labels && $4) \
-       AND ($5::timestamptz IS NULL OR (\"timestamp\", message_id) > ($5, $6)) \
-     ORDER BY \"timestamp\" ASC, message_id ASC \
-     LIMIT $7";
+       AND ($5::timestamptz IS NULL OR (\"timestamp\", inbox_id, message_id) > ($5, $6, $7)) \
+     ORDER BY \"timestamp\" ASC, inbox_id ASC, message_id ASC \
+     LIMIT $8";
 
 const LIST_DESC_SQL: &str =
     "SELECT inbox_id, message_id, organization_id, pod_id, thread_id, labels, \"timestamp\", \
@@ -209,9 +218,9 @@ const LIST_DESC_SQL: &str =
        AND ($2::uuid IS NULL OR pod_id = $2) \
        AND ($3::text IS NULL OR inbox_id = $3) \
        AND NOT (labels && $4) \
-       AND ($5::timestamptz IS NULL OR (\"timestamp\", message_id) < ($5, $6)) \
-     ORDER BY \"timestamp\" DESC, message_id DESC \
-     LIMIT $7";
+       AND ($5::timestamptz IS NULL OR (\"timestamp\", inbox_id, message_id) < ($5, $6, $7)) \
+     ORDER BY \"timestamp\" DESC, inbox_id DESC, message_id DESC \
+     LIMIT $8";
 
 /// List messages in a scope, excluding restricted labels this credential may not see.
 ///
@@ -220,20 +229,40 @@ const LIST_DESC_SQL: &str =
 /// into the query text). A row this call excludes is never fetched, so it cannot be counted,
 /// cannot consume a page slot, and cannot appear in the returned cursor — the regression this
 /// crate exists to prevent (`reference/fixtures/09b-unauthenticated-variant.txt`).
+///
+/// The keyset is `(timestamp, inbox_id, message_id)`, not `(timestamp, message_id)`: a
+/// Message-ID is only guaranteed unique *within* one inbox (0005's own header comment, and the
+/// `messages` primary key is `(inbox_id, message_id)`), so at the org/pod mounts — where
+/// `inbox_id` is unpinned and many inboxes share the scan — two different inboxes can hold the
+/// same Message-ID at the same millisecond. Without `inbox_id` in the tiebreak, `(timestamp,
+/// message_id)` is not a total order there and a cursor walk can silently drop a row. At the
+/// inbox mount `inbox_id` is constant across every row in scope, so this degenerates to the old
+/// two-column behaviour exactly. [`MessageCursor`] already carries `inbox_id` (fixture 04's
+/// cursor shape), so no new field and no token format change.
 pub async fn list(
     pool: &PgPool,
     filter: &ScopeFilter,
     excluded_labels: &[&str],
     query: ListMessagesQuery,
 ) -> Result<Page<MessageItem>, StoreError> {
+    // A zero-row page has no row to anchor a cursor on, so there is nothing meaningful to fetch:
+    // return it directly rather than let `fetch_limit` become 1 and `items.last()` become `None`
+    // while `has_more` is still true (see `threads::list`'s identical guard).
+    if query.limit == 0 {
+        return Ok(Page { items: Vec::new(), next: None });
+    }
     let sql = match query.direction {
         SortDirection::Ascending => LIST_ASC_SQL,
         SortDirection::Descending => LIST_DESC_SQL,
     };
     let excluded: Vec<&str> = excluded_labels.to_vec();
-    let (cursor_ts, cursor_id) = match &query.cursor {
-        Some(c) => (Some(c.timestamp), Some(c.message_id.as_str().to_owned())),
-        None => (None, None),
+    let (cursor_ts, cursor_inbox, cursor_id) = match &query.cursor {
+        Some(c) => (
+            Some(c.timestamp),
+            Some(c.inbox_id.as_str().to_owned()),
+            Some(c.message_id.as_str().to_owned()),
+        ),
+        None => (None, None, None),
     };
     // Fetch one extra row to know whether a next page exists, without a second round trip.
     let fetch_limit = query.limit as i64 + 1;
@@ -244,6 +273,7 @@ pub async fn list(
         .bind(filter.inbox_id().map(InboxId::as_str))
         .bind(&excluded)
         .bind(cursor_ts)
+        .bind(cursor_inbox)
         .bind(cursor_id)
         .bind(fetch_limit)
         .fetch_all(pool)

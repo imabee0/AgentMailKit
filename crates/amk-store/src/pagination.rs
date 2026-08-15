@@ -306,6 +306,18 @@ mod tests {
         assert_eq!(decoded.inbox_id.as_str(), "mixed-case@example.test");
     }
 
+    /// A malformed (non-UUID) `thread_id` field must be rejected outright, never silently coerced
+    /// to the nil UUID or any other default — a token is attacker-controlled input.
+    #[test]
+    fn thread_cursor_decode_rejects_a_non_uuid_thread_id() {
+        let token = Cursor::new()
+            .with("thread_id", "not-a-uuid")
+            .with("inbox_id", "a@b.c")
+            .with("timestamp", "2026-08-15T05:44:16.768Z")
+            .encode();
+        assert_eq!(ThreadCursor::decode(&token, None), Err(PageTokenError::WrongType("thread_id")));
+    }
+
     #[test]
     fn thread_cursor_round_trips_and_checks_scope() {
         let thread_id = ThreadId::new_random();

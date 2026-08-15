@@ -1039,6 +1039,54 @@ async fn thread_list_descending_also_excludes_restricted_labels_with_no_gap() {
     assert!(page3.next.is_none());
 }
 
+/// `messages::get`'s `inbox_id` *parameter* must not be able to widen `filter.inbox_id()`'s own
+/// pin: the scope is pinned to `inbox_a`, but the caller's parameter names `inbox_b` (a real
+/// message) directly. Neither may win over the other — the row must satisfy both, and no row can,
+/// so the fetch returns nothing. `Scope::resolve` happens to keep the two equal today, but A2's
+/// fix does not depend on that: the query itself binds and checks both.
+#[tokio::test]
+async fn get_does_not_let_the_inbox_id_parameter_widen_the_scopes_own_pin() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox_a = support::seed_inbox(&pool, &org, pod, "a").await;
+    let inbox_b = support::seed_inbox(&pool, &org, pod, "b").await;
+
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox_b,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<b@x>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox_b, &org, pod, thread_id, "<b@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox_a);
+    let leaked = messages::get(&pool, &filter, &inbox_b, &MessageId::new("<b@x>"), &[])
+        .await
+        .unwrap();
+    assert!(
+        leaked.is_none(),
+        "an inbox_id parameter naming a DIFFERENT inbox than the scope's own pin must not widen \
+         the scope"
+    );
+}
+
 /// Isolates the `threads::list` inbox pin, mirroring [`list_pins_inbox_within_the_same_pod`] for
 /// messages, in both directions.
 #[tokio::test]
@@ -1793,4 +1841,713 @@ async fn a_page_token_is_unaffected_by_a_row_inserted_after_it_was_minted() {
         "a row inserted into the still-unscanned region after the token was minted must appear \
          exactly once on the resumed page, never skipped or duplicated"
     );
+}
+
+// --- Round 3: threads::get_with_messages's inbox pin (A1's fix), identity of the returned
+// thread, and sibling-thread isolation of its messages sub-query. ---
+
+/// Isolates `threads::get_with_messages`'s item-lookup inbox pin (`GET_ITEM_SQL` already had
+/// this pin; nothing tested it before now): same org and pod, but the thread actually lives in a
+/// *different* inbox than the one named in the inbox-scoped filter.
+#[tokio::test]
+async fn thread_get_with_messages_pins_the_inbox_not_just_the_scope() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let right_inbox = support::seed_inbox(&pool, &org, pod, "right").await;
+    let wrong_inbox = support::seed_inbox(&pool, &org, pod, "wrong").await;
+
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &right_inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<r@x>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &wrong_inbox);
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::by_id(&grants);
+    let leaked = threads::get_with_messages(&pool, &filter, thread_id, &access)
+        .await
+        .unwrap();
+    assert!(
+        leaked.is_none(),
+        "an inbox-scoped credential must not read a thread living in a sibling inbox, even \
+         naming it directly"
+    );
+}
+
+/// Isolates `THREAD_MESSAGES_SQL`'s inbox pin (added by A1: the sub-query previously pinned only
+/// organization and pod) against a rogue row: correct organization_id/pod_id, but inbox_id names
+/// a sibling inbox within the same pod, while its thread_id still matches the real thread.
+#[tokio::test]
+async fn thread_get_with_messages_sub_query_pins_the_inbox_against_a_mismatched_message_row() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox_real = support::seed_inbox(&pool, &org, pod, "real").await;
+    let inbox_wrong = support::seed_inbox(&pool, &org, pod, "wrong").await;
+
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox_real,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<a@x>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(
+            &inbox_real,
+            &org,
+            pod,
+            thread_id,
+            "<a@x>",
+            &["sent"],
+            "2026-08-15T05:00:01.000Z",
+        ),
+    )
+    .await
+    .unwrap();
+    // Correct organization_id/pod_id, but inbox_id names a sibling inbox within the same pod.
+    messages::insert(
+        &pool,
+        new_message(
+            &inbox_wrong,
+            &org,
+            pod,
+            thread_id,
+            "<rogue@x>",
+            &["sent"],
+            "2026-08-15T05:00:02.000Z",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox_real);
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::by_id(&grants);
+    let thread = threads::get_with_messages(&pool, &filter, thread_id, &access)
+        .await
+        .unwrap()
+        .expect("the real thread must still be found");
+    let ids: Vec<_> = thread
+        .messages
+        .iter()
+        .map(|m| m.item.message_id.as_str().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["<a@x>"],
+        "a message row whose inbox_id diverges from the thread's own inbox must never surface, \
+         even though its thread_id matches"
+    );
+}
+
+/// `threads::get_with_messages` must return the *specific* thread requested, not merely a thread
+/// somewhere in scope: two threads in the same inbox, request the second one, assert the item's
+/// own `thread_id` is the one requested.
+#[tokio::test]
+async fn thread_get_with_messages_returns_the_requested_thread_not_any_thread_in_scope() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let thread_1 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_1,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<one@x>",
+        ),
+    )
+    .await
+    .unwrap();
+    let thread_2 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_2,
+            &["received"],
+            "2026-08-15T05:00:01.000Z",
+            "<two@x>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::by_id(&grants);
+    let thread = threads::get_with_messages(&pool, &filter, thread_2, &access)
+        .await
+        .unwrap()
+        .expect("thread_2 exists");
+    assert_eq!(
+        thread.item.thread_id, thread_2,
+        "must return the specific thread requested, not merely a thread in scope"
+    );
+}
+
+/// `THREAD_MESSAGES_SQL`'s `thread_id` predicate must exclude a sibling thread's messages, not
+/// return every message in scope as this thread's membership.
+#[tokio::test]
+async fn thread_get_with_messages_sub_query_excludes_a_sibling_threads_messages() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let thread_1 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox, &org, pod, thread_1, &["received"], "2026-08-15T05:00:00.000Z", "<a@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox, &org, pod, thread_1, "<a@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let thread_2 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox, &org, pod, thread_2, &["received"], "2026-08-15T05:00:02.000Z", "<b@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox, &org, pod, thread_2, "<b@x>", &["sent"], "2026-08-15T05:00:03.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::by_id(&grants);
+    let thread = threads::get_with_messages(&pool, &filter, thread_1, &access)
+        .await
+        .unwrap()
+        .expect("thread_1 exists");
+    let ids: Vec<_> = thread
+        .messages
+        .iter()
+        .map(|m| m.item.message_id.as_str().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["<a@x>"],
+        "a sibling thread's message must never surface as this thread's membership"
+    );
+}
+
+// --- Round 3: A4 regression (the messages keyset now includes inbox_id) and the general
+// timestamp-tiebreak gap the review named — every prior test used distinct timestamps, so the
+// `ORDER BY`'s final tiebreak column was never exercised by an actual walk across a tie. ---
+
+/// The regression A4 fixes: two different inboxes (same org/pod) each holding a message with the
+/// *same* Message-ID at the *same* millisecond — legal, since a Message-ID is only guaranteed
+/// unique within one inbox (0005's header comment; one message addressed to two of an org's own
+/// addresses is an ordinary case). At the pod mount, `inbox_id` is unpinned, so without it in the
+/// keyset tiebreak `(timestamp, message_id)` is not a total order and a `limit: 1` walk can drop
+/// one of the two rows silently. Both must be seen, exactly once each.
+#[tokio::test]
+async fn list_at_the_pod_mount_uses_inbox_id_to_break_a_timestamp_tie_across_inboxes() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox1 = support::seed_inbox(&pool, &org, pod, "i1").await;
+    let inbox2 = support::seed_inbox(&pool, &org, pod, "i2").await;
+
+    let t1 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox1, &org, pod, t1, &["received"], "2026-08-15T05:00:00.000Z", "<shared@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox1, &org, pod, t1, "<shared@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let t2 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox2, &org, pod, t2, &["received"], "2026-08-15T05:00:00.000Z", "<shared@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox2, &org, pod, t2, "<shared@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = pod_filter(&org, pod);
+    let query =
+        |cursor| ListMessagesQuery { limit: 1, direction: SortDirection::Ascending, cursor };
+    let page1 = messages::list(&pool, &filter, &[], query(None))
+        .await
+        .unwrap();
+    assert_eq!(page1.items.len(), 1);
+    let cursor1 = MessageCursor::decode(
+        page1.next.as_deref().expect("second row remains"),
+        filter.inbox_id(),
+    )
+    .unwrap();
+    let page2 = messages::list(&pool, &filter, &[], query(Some(cursor1)))
+        .await
+        .unwrap();
+    assert_eq!(page2.items.len(), 1);
+    assert!(page2.next.is_none(), "the last page must omit the token");
+
+    let seen: std::collections::BTreeSet<_> = [&page1, &page2]
+        .iter()
+        .flat_map(|p| p.items.iter().map(|m| m.inbox_id.clone()))
+        .collect();
+    assert_eq!(
+        seen.len(),
+        2,
+        "both same-timestamp, same-message_id rows from different inboxes must be seen exactly \
+         once each, not dropped or duplicated"
+    );
+}
+
+/// Descending sibling of [`list_at_the_pod_mount_uses_inbox_id_to_break_a_timestamp_tie_across_inboxes`]:
+/// `LIST_ASC_SQL` and `LIST_DESC_SQL` are two independent literal query strings, so an ASC-only
+/// regression test cannot prove A4's fix reached the DESC branch too.
+#[tokio::test]
+async fn list_at_the_pod_mount_uses_inbox_id_to_break_a_timestamp_tie_across_inboxes_descending() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox1 = support::seed_inbox(&pool, &org, pod, "i1").await;
+    let inbox2 = support::seed_inbox(&pool, &org, pod, "i2").await;
+
+    let t1 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox1, &org, pod, t1, &["received"], "2026-08-15T05:00:00.000Z", "<shared@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox1, &org, pod, t1, "<shared@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let t2 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox2, &org, pod, t2, &["received"], "2026-08-15T05:00:00.000Z", "<shared@x>"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox2, &org, pod, t2, "<shared@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = pod_filter(&org, pod);
+    let query =
+        |cursor| ListMessagesQuery { limit: 1, direction: SortDirection::Descending, cursor };
+    let page1 = messages::list(&pool, &filter, &[], query(None))
+        .await
+        .unwrap();
+    assert_eq!(page1.items.len(), 1);
+    let cursor1 = MessageCursor::decode(
+        page1.next.as_deref().expect("second row remains"),
+        filter.inbox_id(),
+    )
+    .unwrap();
+    let page2 = messages::list(&pool, &filter, &[], query(Some(cursor1)))
+        .await
+        .unwrap();
+    assert_eq!(page2.items.len(), 1);
+    assert!(page2.next.is_none(), "the last page must omit the token");
+
+    let seen: std::collections::BTreeSet<_> = [&page1, &page2]
+        .iter()
+        .flat_map(|p| p.items.iter().map(|m| m.inbox_id.clone()))
+        .collect();
+    assert_eq!(
+        seen.len(),
+        2,
+        "both same-timestamp, same-message_id rows from different inboxes must be seen exactly \
+         once each, not dropped or duplicated, descending"
+    );
+}
+
+/// The general tiebreak gap: two messages in the *same* inbox at the exact same timestamp — every
+/// other test in this file uses distinct timestamps, so `message_id` (the keyset's final
+/// tiebreaker) was never exercised by an actual walk across a tie.
+#[tokio::test]
+async fn list_breaks_a_timestamp_tie_by_message_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    // Inserted out of message_id order, at the exact same timestamp: the ORDER BY, not insertion
+    // order, must decide the walk.
+    messages::insert(
+        &pool,
+        new_message(&inbox, &org, pod, thread_id, "<b@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox, &org, pod, thread_id, "<a@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let query =
+        |cursor| ListMessagesQuery { limit: 1, direction: SortDirection::Ascending, cursor };
+    let page1 = messages::list(&pool, &filter, &[], query(None))
+        .await
+        .unwrap();
+    assert_eq!(page1.items[0].message_id.as_str(), "<a@x>", "message_id breaks a timestamp tie");
+    let cursor1 =
+        MessageCursor::decode(page1.next.as_deref().expect("one row remains"), filter.inbox_id())
+            .unwrap();
+    let page2 = messages::list(&pool, &filter, &[], query(Some(cursor1)))
+        .await
+        .unwrap();
+    assert_eq!(page2.items[0].message_id.as_str(), "<b@x>");
+    assert!(page2.next.is_none());
+}
+
+/// Thread-side sibling of [`list_breaks_a_timestamp_tie_by_message_id`]: `thread_id` is a random
+/// UUID (no predictable ordering), so this proves the walk sees both same-timestamp threads
+/// exactly once each rather than asserting a specific order.
+#[tokio::test]
+async fn thread_list_breaks_a_timestamp_tie_without_dropping_or_duplicating() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let t1 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox, &org, pod, t1, &["received"], "2026-08-15T05:00:01.000Z", "<a@x>"),
+    )
+    .await
+    .unwrap();
+    let t2 = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(&inbox, &org, pod, t2, &["received"], "2026-08-15T05:00:01.000Z", "<b@x>"),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let query = |cursor| ListThreadsQuery { limit: 1, direction: SortDirection::Ascending, cursor };
+    let page1 = threads::list(&pool, &filter, &[], query(None))
+        .await
+        .unwrap();
+    let first = page1.items[0].thread_id;
+    let cursor1 =
+        ThreadCursor::decode(page1.next.as_deref().expect("one row remains"), filter.inbox_id())
+            .unwrap();
+    let page2 = threads::list(&pool, &filter, &[], query(Some(cursor1)))
+        .await
+        .unwrap();
+    let second = page2.items[0].thread_id;
+    assert!(page2.next.is_none());
+    assert_ne!(first, second, "must not return the same thread twice");
+
+    let mut seen = [first, second];
+    seen.sort();
+    let mut expected = [t1, t2];
+    expected.sort();
+    assert_eq!(
+        seen, expected,
+        "both same-timestamp threads must be seen exactly once each across the walk"
+    );
+}
+
+// --- Round 3: limit: 2 somewhere — every prior walking test used limit: 1, where `first()` and
+// `last()` on a one-item page are the same expression, so anchoring the next token on the wrong
+// end of the page survives every one of them. ---
+
+#[tokio::test]
+async fn list_with_limit_two_anchors_the_next_token_on_the_last_item_not_the_first() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    for (id, when) in [
+        ("<a@x>", "2026-08-15T05:00:01.000Z"),
+        ("<b@x>", "2026-08-15T05:00:02.000Z"),
+        ("<c@x>", "2026-08-15T05:00:03.000Z"),
+    ] {
+        messages::insert(&pool, new_message(&inbox, &org, pod, thread_id, id, &["sent"], when))
+            .await
+            .unwrap();
+    }
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let page1 = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery { limit: 2, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        page1
+            .items
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["<a@x>", "<b@x>"]
+    );
+    let cursor =
+        MessageCursor::decode(page1.next.as_deref().expect("one row remains"), filter.inbox_id())
+            .unwrap();
+    assert_eq!(
+        cursor.message_id.as_str(),
+        "<b@x>",
+        "the next token must anchor on the LAST item of the page (<b@x>), not the first (<a@x>)"
+    );
+
+    let page2 = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery { limit: 2, direction: SortDirection::Ascending, cursor: Some(cursor) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        page2
+            .items
+            .iter()
+            .map(|m| m.message_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["<c@x>"]
+    );
+    assert!(page2.next.is_none());
+}
+
+#[tokio::test]
+async fn thread_list_with_limit_two_anchors_the_next_token_on_the_last_item_not_the_first() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let mut ids = Vec::new();
+    for (n, when) in [
+        "2026-08-15T05:00:01.000Z",
+        "2026-08-15T05:00:02.000Z",
+        "2026-08-15T05:00:03.000Z",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let thread_id = ThreadId::new_random();
+        let last_message_id = format!("<t{n}@x>");
+        threads::insert(
+            &pool,
+            new_thread(&inbox, &org, pod, thread_id, &["received"], when, &last_message_id),
+        )
+        .await
+        .unwrap();
+        ids.push(thread_id);
+    }
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let page1 = threads::list(
+        &pool,
+        &filter,
+        &[],
+        ListThreadsQuery { limit: 2, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        page1.items.iter().map(|t| t.thread_id).collect::<Vec<_>>(),
+        vec![ids[0], ids[1]]
+    );
+    let cursor =
+        ThreadCursor::decode(page1.next.as_deref().expect("one row remains"), filter.inbox_id())
+            .unwrap();
+    assert_eq!(
+        cursor.thread_id, ids[1],
+        "the next token must anchor on the LAST item of the page, not the first"
+    );
+
+    let page2 = threads::list(
+        &pool,
+        &filter,
+        &[],
+        ListThreadsQuery { limit: 2, direction: SortDirection::Ascending, cursor: Some(cursor) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page2.items.iter().map(|t| t.thread_id).collect::<Vec<_>>(), vec![ids[2]]);
+    assert!(page2.next.is_none());
+}
+
+// --- Round 3: A3's limit: 0 guard. ---
+
+#[tokio::test]
+async fn list_with_limit_zero_returns_an_empty_page_without_panicking() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox, &org, pod, thread_id, "<a@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let page = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery { limit: 0, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items, Vec::new());
+    assert!(page.next.is_none(), "a zero-limit page has no row to anchor a cursor on");
+}
+
+#[tokio::test]
+async fn thread_list_with_limit_zero_returns_an_empty_page_without_panicking() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let page = threads::list(
+        &pool,
+        &filter,
+        &[],
+        ListThreadsQuery { limit: 0, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items, Vec::new());
+    assert!(page.next.is_none());
 }
