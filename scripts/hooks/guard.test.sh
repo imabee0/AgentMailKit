@@ -85,6 +85,14 @@ mkdir -p "$WT"
 printf 'crates/amk-core/*\ncrates/amk-core/src/*\n' > "$WT/.amk-scope"
 check 0 "in-scope write allowed"  "$(j Write "$WT/crates/amk-core/src/scope.rs" "$WT" "pub struct S;")"
 check 2 "out-of-scope write blocked" "$(j Write "$WT/crates/amk-store/src/lib.rs" "$WT" "pub struct S;")"
+# Scope is a property of the WRITER, so it must catch an implementer escaping its worktree
+# entirely — and must NOT catch the orchestrator writing the dispatch contract in.
+check 2 "implementer writes out of its worktree into the primary checkout" \
+  "$(j Write "$ORCH/crates/amk-core/src/scope.rs" "$WT" "pub struct S;")"
+check 2 "implementer climbs out with a relative path" \
+  "$(j Write "../../../etc/passwd" "$WT" "root::0:0")"
+check 0 "orchestrator writes the dispatch contract into a scoped worktree" \
+  "$(j Write "$WT/CLAUDE.md" "$ORCH" "# amk-store contract")"
 rm -f "$WT/.amk-scope"; rmdir "$WT" 2>/dev/null
 
 printf '\nguard tests: %d passed, %d failed\n' "$pass" "$fail"

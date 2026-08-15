@@ -107,12 +107,28 @@ If you need a type that does not exist, STOP and report — do not add it."
 esac
 
 # 3. Per-worktree scope. The orchestrator writes .amk-scope at dispatch listing the paths this
-#    agent may write. Enforced only when present, so an un-dispatched worktree is not bricked.
-case "$FILE" in
+#    agent may write.
+#
+#    Keyed on the WRITER (CWD), not on the target, because the question it answers is "may THIS
+#    AGENT write here?". Keying it on the target got both directions wrong: it never fired on an
+#    implementer writing an absolute path OUT of its worktree (nothing else catches that), and it
+#    fired on the orchestrator writing the dispatch contract IN, which is the one write that has to
+#    work for a fan-out to start at all.
+#
+#    Enforced only when .amk-scope is present, so an un-dispatched worktree is not bricked.
+case "$CWD" in
   */.claude/worktrees/*)
-    WT="${FILE%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${FILE#*/.claude/worktrees/}" | cut -d/ -f1)"
+    WT="${CWD%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${CWD#*/.claude/worktrees/}" | cut -d/ -f1)"
     if [ -f "$WT/.amk-scope" ]; then
-      REL="${FILE#"$WT"/}"
+      case "$FILE" in
+        "$WT"/*) REL="${FILE#"$WT"/}" ;;
+        /*) deny "Write outside your worktree: $FILE
+Your worktree is $WT. Everything you write goes inside it; the orchestrator merges.
+If the contract requires touching another path, STOP and report." ;;
+        # A relative path resolves against CWD, i.e. inside the worktree. Anything that climbs out
+        # of it fails the pattern match below and is denied — fail closed.
+        *) REL="$FILE" ;;
+      esac
       ok=0
       while IFS= read -r pat; do
         [ -z "$pat" ] && continue
