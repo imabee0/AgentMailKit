@@ -172,6 +172,8 @@ pub struct ReferenceChainThreading;
 
 impl ThreadAssigner for ReferenceChainThreading {
     fn assign(&self, index: &dyn ThreadIndex, candidate: &ThreadCandidate<'_>) -> ThreadAssignment {
+        // Both sides of the self-reference test are put in canonical linkage form, so a
+        // self-reference is recognised whichever way the sender spelled the brackets.
         let own = candidate.message_id.and_then(canonical_link);
         // A message referencing itself cannot join its own not-yet-existing thread, and a
         // redelivery of an id this inbox already holds is storage's dedup problem, not a
@@ -229,27 +231,54 @@ impl ThreadAssigner for ReferenceChainThreading {
     }
 }
 
-/// Normalise a linkage header value for comparison against stored Message-IDs.
+/// Normalise a linkage header value (`In-Reply-To`, `References`) for comparison against stored
+/// Message-IDs. Blank and `<>` values carry no linkage and are dropped first, so neither can be
+/// bracketed into something link-shaped.
 ///
-/// Only surrounding folding whitespace is stripped — RFC 5322 permits FWS around the `msg-id`,
-/// so `"\t<a@b> "` and `"<a@b>"` are the same header value. Nothing else is rewritten.
+/// Two rewrites, both narrow:
 ///
-/// **Not** re-bracketed. Stored `message_id`s are angle-bracketed
-/// (`reference/fixtures/03-id-formats.http`), but that fixture establishes the form of the
-/// *stored id*, not that an unbracketed `In-Reply-To: root@probe.test` should be coerced into
-/// `<root@probe.test>`. No fixture shows an unbracketed linkage header at all, and coercion is
-/// the one path by which a message could join a thread upstream would have left alone — a
-/// sender chooses that header, so the lenient reading is attacker-reachable. Strict wins.
+/// * **Surrounding folding whitespace is stripped.** RFC 5322 permits FWS around a `msg-id`, so
+///   `"\t<a@b> "` and `"<a@b>"` are the same header value.
+/// * **A bare `addr-spec` is wrapped in angle brackets** — `root@probe.test` is matched as
+///   `<root@probe.test>`.
 ///
-/// **[INFERRED]** the cost: a sloppy real-world sender that omits the brackets will
-/// under-thread (its reply opens a new thread) rather than mis-thread. A swaks probe sending
-/// `In-Reply-To: <bare-id-without-brackets>` to a probe inbox would settle it outright — we
-/// control a sender, so this gap is closable whenever the orchestrator wants it closed.
+/// **[TESTED]** `reference/fixtures/21-unbracketed-in-reply-to.txt`. Three messages with three
+/// *different* subjects: a ROOT, a BARE reply carrying `In-Reply-To: amkc3-root-…@appsynergy.io`
+/// with no angle brackets and no `References` header at all, and a CONTROL carrying the same
+/// value bracketed. All three landed in one thread (`message_count: 3`), and subject cannot
+/// explain it (R2). The mechanism is observed directly rather than inferred from the outcome:
+/// BARE's API-level `in_reply_to` is returned as `<amkc3-root-…@appsynergy.io>` while its raw
+/// `headers.In-Reply-To` stays unbracketed exactly as sent — upstream normalises the parsed value
+/// before matching. CONTROL joining is what makes the probe self-validating.
+///
+/// **[INFERRED]** that `References` normalises identically. Fixture 21's own NOT-COVERED list
+/// says only `In-Reply-To` was exercised; BARE carried no `References` header. One rule for both
+/// linkage headers is the consistent reading, not an observation.
+///
+/// Normalisation stops at the linkage header. The **stored** `message_id` is left exactly as it
+/// arrived — fixture 03 establishes the stored form, and rewriting what we store is a different
+/// (and unobserved) claim; see [`index_key`]. A partially-bracketed value is not repaired either:
+/// `<a@b` becomes `<<a@b>` and matches nothing, which is the fail-closed reading of a shape no
+/// fixture covers (matrix gap G6).
 ///
 /// Comparison is otherwise **byte-exact** — no case folding: RFC 5322's `id-left` is
-/// case-sensitive, and the matrix says nothing about malformed ids (gap G6). Blank and `<>`
-/// values carry no linkage and are dropped.
+/// case-sensitive. (Inbox ids *do* fold ASCII case, fixture 18. Message-IDs do not.)
 fn canonical_link(id: &MessageId) -> Option<MessageId> {
+    let trimmed = id.as_str().trim();
+    if trimmed.is_empty() || trimmed == "<>" {
+        return None;
+    }
+    Some(MessageId::bracketed(trimmed))
+}
+
+/// Normalise a Message-ID for use as an index key: folding whitespace stripped, nothing else.
+///
+/// Deliberately *not* [`canonical_link`]. A stored id is kept as it arrived, so re-bracketing
+/// happens on exactly one side of the comparison — the sender-chosen linkage header, which is the
+/// spelling fixture 21 shows upstream normalising away. Whether a message whose *own* `Message-ID`
+/// header arrives unbracketed is itself re-bracketed on storage is listed in that fixture's
+/// NOT-COVERED section (ROOT was sent already bracketed), so it stays unobserved and untouched.
+fn index_key(id: &MessageId) -> Option<MessageId> {
     let trimmed = id.as_str().trim();
     if trimmed.is_empty() || trimmed == "<>" {
         return None;
@@ -258,9 +287,10 @@ fn canonical_link(id: &MessageId) -> Option<MessageId> {
 }
 
 /// An in-memory [`ThreadIndex`], for tests and for callers that need to thread a batch before
-/// anything is persisted. Message-ID keys are normalised exactly as [`ReferenceChainThreading`]
-/// normalises links, so the fake cannot drift from the rule it is used to exercise, and inbox
-/// keys are [`InboxId::normalized`] so one inbox spelled two ways is one index (R4).
+/// anything is persisted. Message-ID keys are [`index_key`] — the id as it arrived, less folding
+/// whitespace — so the fake stores what a real store stores and re-bracketing stays on the
+/// linkage side alone. Inbox keys are [`InboxId::normalized`] so one inbox spelled two ways is
+/// one index (R4).
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryThreadIndex {
     entries: BTreeMap<(InboxId, MessageId), ThreadId>,
@@ -274,7 +304,7 @@ impl InMemoryThreadIndex {
     /// Record that `inbox_id` holds `message_id` in `thread_id`. A blank Message-ID is not
     /// indexable and is ignored.
     pub fn insert(&mut self, inbox_id: InboxId, message_id: &MessageId, thread_id: ThreadId) {
-        if let Some(key) = canonical_link(message_id) {
+        if let Some(key) = index_key(message_id) {
             self.entries.insert((inbox_id.normalized(), key), thread_id);
         }
     }
@@ -290,7 +320,7 @@ impl InMemoryThreadIndex {
 
 impl ThreadIndex for InMemoryThreadIndex {
     fn thread_of(&self, inbox_id: &InboxId, message_id: &MessageId) -> Option<ThreadId> {
-        let key = canonical_link(message_id)?;
+        let key = index_key(message_id)?;
         self.entries.get(&(inbox_id.normalized(), key)).copied()
     }
 }
@@ -301,6 +331,14 @@ mod tests {
 
     const PROBE: &str = "amk-probe@agentmail.to";
     const PROBE2: &str = "amk-probe2@agentmail.to";
+
+    // reference/fixtures/21-unbracketed-in-reply-to.txt — the three messages of the C3 probe, in
+    // the fixture's own inbox (PROBE) with its own Message-IDs. `F21_ROOT_BARE` is the string
+    // BARE actually put on the wire: ROOT's id with the angle brackets removed.
+    const F21_ROOT: &str = "<amkc3-root-ccc7baa7@appsynergy.io>";
+    const F21_ROOT_BARE: &str = "amkc3-root-ccc7baa7@appsynergy.io";
+    const F21_BARE: &str = "<amkc3-bare-ccc7baa7@appsynergy.io>";
+    const F21_CTRL: &str = "<amkc3-ctrl-ccc7baa7@appsynergy.io>";
 
     /// Delivers messages the way ingest will: assign, then index the result. Mints a fresh
     /// ThreadId on `New`, which is exactly the caller's job.
@@ -523,6 +561,9 @@ mod tests {
     }
 
     /// Blank / `<>` linkage values carry nothing and must not read as "linked but unknown".
+    /// `NoLinkage` rather than `UnknownLinkage` is the discriminating assertion: it holds only if
+    /// both are dropped *before* re-bracketing, which is what keeps `"   "` from becoming `<>`
+    /// and `<>` from becoming a link-shaped `<<>>`.
     #[test]
     fn empty_linkage_values_are_no_linkage_at_all() {
         let index = InMemoryThreadIndex::new();
@@ -550,16 +591,110 @@ mod tests {
         assert_eq!(padded, root);
     }
 
-    /// An *unbracketed* linkage header does NOT match a bracketed stored id. No fixture shows an
-    /// unbracketed In-Reply-To; re-bracketing one would let a sender join a thread upstream may
-    /// well have left alone, and the sender picks that header. [INFERRED] under-threading is the
-    /// accepted cost; a swaks probe with an unbracketed In-Reply-To would settle it.
+    /// Fixture 21 replayed, with its own inbox and Message-IDs
+    /// (`reference/fixtures/21-unbracketed-in-reply-to.txt`): an *unbracketed* `In-Reply-To`
+    /// joins the referenced message's thread. All three probe messages carried **different**
+    /// subjects and landed in one thread (`message_count: 3`), so nothing but the linkage header
+    /// explains the grouping (R2). CONTROL is what makes the replay self-validating: had the
+    /// bracketed form not joined, BARE's result would mean nothing.
     #[test]
-    fn an_unbracketed_linkage_header_is_not_coerced_into_a_match() {
+    fn a_bare_in_reply_to_joins_the_referenced_thread() {
+        let mut ingest = Ingest::default();
+        let root = ingest.deliver_plain(PROBE, F21_ROOT);
+        let bare = ingest.deliver(PROBE, F21_BARE, Some(F21_ROOT_BARE), &[]);
+        let control = ingest.deliver(PROBE, F21_CTRL, Some(F21_ROOT), &[]);
+
+        assert_eq!(control, root, "CONTROL: the bracketed form joins — the probe is valid");
+        assert_eq!(bare, root, "BARE: no angle brackets, no References at all, same thread");
+        let distinct: BTreeSet<ThreadId> = [root, bare, control].into_iter().collect();
+        assert_eq!(distinct.len(), 1, "one thread, message_count: 3");
+        assert_eq!(
+            ingest.new_reasons,
+            vec![NewThreadReason::NoLinkage],
+            "only ROOT opened a thread; BARE and CONTROL both joined it"
+        );
+    }
+
+    /// The decisive detail of fixture 21 is not the `thread_id` but the field: BARE's API-level
+    /// `in_reply_to` came back as `<amkc3-root-ccc7baa7@appsynergy.io>` while its raw
+    /// `headers.In-Reply-To` stayed unbracketed exactly as sent. Upstream normalises the parsed
+    /// value before matching, so `linked_by` — the id that resolved the thread — is the canonical
+    /// bracketed form, not the sender's spelling.
+    #[test]
+    fn a_bare_link_resolves_to_the_canonical_bracketed_id() {
+        let mut ingest = Ingest::default();
+        let root_thread = ingest.deliver_plain(PROBE, F21_ROOT);
+        let inbox = InboxId::new(PROBE);
+        let mid = MessageId::new(F21_BARE);
+        let bare = MessageId::new(F21_ROOT_BARE);
+        let out = assign_with(
+            &ingest.index,
+            &ThreadCandidate::new(&inbox)
+                .with_message_id(&mid)
+                .with_in_reply_to(&bare),
+        );
+        assert_eq!(
+            out,
+            ThreadAssignment::Existing {
+                thread_id: root_thread,
+                linked_by: MessageId::new(F21_ROOT)
+            },
+            "the bare header resolves through its bracketed canonical form"
+        );
+    }
+
+    /// Both normalisations at once. Fixture 21's NOT-COVERED list flags a bare value *with*
+    /// surrounding whitespace as untested; RFC 5322 permits FWS around a `msg-id` and the trim
+    /// predates this change, so the composition is asserted rather than assumed.
+    #[test]
+    fn a_bare_link_matches_across_folding_whitespace() {
         let mut ingest = Ingest::default();
         let root = ingest.deliver_plain(PROBE, "<root@probe.test>");
-        let bare = ingest.deliver(PROBE, "<r2@probe.test>", Some("root@probe.test"), &[]);
-        assert_ne!(bare, root, "a bare addr-spec is not the stored bracketed id");
+        let padded = ingest.deliver(PROBE, "<r2@probe.test>", Some("\t root@probe.test  "), &[]);
+        assert_eq!(padded, root, "FWS around a bare addr-spec is still FWS");
+    }
+
+    /// Re-bracketing widens what *can* match; it does not invent a match. A bare value naming a
+    /// Message-ID this inbox does not hold still opens its own thread.
+    #[test]
+    fn a_bare_link_naming_an_unknown_id_opens_a_new_thread() {
+        let mut ingest = Ingest::default();
+        let root = ingest.deliver_plain(PROBE, "<root@probe.test>");
+        let inbox = InboxId::new(PROBE);
+        let mid = MessageId::new("<orphan@probe.test>");
+        let ghost = MessageId::new("never-seen@elsewhere.test");
+        let out = assign_with(
+            &ingest.index,
+            &ThreadCandidate::new(&inbox)
+                .with_message_id(&mid)
+                .with_in_reply_to(&ghost),
+        );
+        assert_eq!(out, ThreadAssignment::New(NewThreadReason::UnknownLinkage));
+        assert_ne!(out.thread_id(), Some(root));
+    }
+
+    /// Normalising brackets must not smuggle in case folding: RFC 5322's `id-left` is
+    /// case-sensitive. Both directions — bare link against a shouted stored id, and the reverse.
+    #[test]
+    fn re_bracketing_does_not_case_fold() {
+        let mut ingest = Ingest::default();
+        let upper = ingest.deliver_plain(PROBE, "<Root@probe.test>");
+        let lower = ingest.deliver_plain(PROBE, "<root@other.test>");
+        let a = ingest.deliver(PROBE, "<r1@probe.test>", Some("root@probe.test"), &[]);
+        let b = ingest.deliver(PROBE, "<r2@probe.test>", Some("ROOT@other.test"), &[]);
+        assert_ne!(a, upper, "differing-case ids stay different ids once bracketed");
+        assert_ne!(b, lower, "differing-case ids stay different ids once bracketed");
+    }
+
+    /// **[INFERRED]** — fixture 21 exercised `In-Reply-To` only, and says so in its own
+    /// NOT-COVERED list: BARE carried no `References` header at all. One normalisation for both
+    /// linkage headers is the consistent reading, but it is a choice, not an observation.
+    #[test]
+    fn a_bare_value_in_references_is_normalised_the_same_way_inferred() {
+        let mut ingest = Ingest::default();
+        let root = ingest.deliver_plain(PROBE, "<root@probe.test>");
+        let reply = ingest.deliver(PROBE, "<r1@probe.test>", None, &["root@probe.test"]);
+        assert_eq!(reply, root);
     }
 
     /// No case folding: `id-left` is case-sensitive, and the matrix never tested malformed ids.
@@ -852,16 +987,18 @@ mod tests {
         assert_eq!(index.len(), 2, "a case variant must not create a second index");
         assert_eq!(index.thread_of(&InboxId::new("AMK-PROBE@AGENTMAIL.TO"), &mid), Some(t1));
 
-        // Message-ID lookup strips folding whitespace, and nothing else.
+        // Message-ID keys strip folding whitespace, and nothing else. Re-bracketing lives in the
+        // linkage rule (`canonical_link`), which is the side a sender chooses; the index holds the
+        // id as it arrived, so a raw unbracketed lookup finds nothing.
         assert_eq!(
             index.thread_of(&InboxId::new(PROBE), &MessageId::new(" <same@probe.test> ")),
             Some(t1),
-            "lookup normalises exactly as linkage does"
+            "lookup strips folding whitespace"
         );
         assert_eq!(
             index.thread_of(&InboxId::new(PROBE), &MessageId::new("same@probe.test")),
             None,
-            "unbracketed is a different id; the index does not coerce either"
+            "the index stores the id as it arrived; it is the linkage value that gets bracketed"
         );
         assert_eq!(index.thread_of(&InboxId::new("other@agentmail.to"), &mid), None);
     }
