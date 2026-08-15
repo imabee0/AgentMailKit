@@ -1,0 +1,151 @@
+# Fixture 21 — Register C3: does a BARE (unbracketed) In-Reply-To value still join the
+# referenced message's thread? Live api.agentmail.to, captured 2026-08-15 ~13:25-13:26Z.
+# Throwaway inbox amk-probe@agentmail.to (pod 9047724b-2879-416b-8424-82ef81ab9397). RUN token = ccc7baa7.
+#
+# QUESTION (C3): amk-core's threading implementation currently trims CFWS only on In-Reply-To/
+# References per RFC 5322 and does NOT re-bracket a bare value before matching it against stored
+# Message-IDs (which are always canonically bracketed). That choice is marked [INFERRED]. Does
+# AgentMail's own threading engine re-bracket/normalize a bare In-Reply-To before matching, or
+# does it require the exact bracketed form?
+#
+# TOOLING NOTE: this prompt's instructions call the sender step "swaks". `which swaks` on the OVH
+# box (root@144.217.66.212) returns nothing — swaks is NOT installed there, contradicting the
+# prompt. What IS present, and what every prior P-1 inbound probe (fixtures 09b, 16) actually used,
+# is /root/amksend.py, a small python3/smtplib sender that writes headers verbatim (no bracket
+# coercion of its own) and talks directly to inbound-smtp.us-east-1.amazonaws.com:25. Reused as-is,
+# per the instruction to reuse the working invocation style rather than inventing a new one.
+# Observation wins over the prompt's assumption; noting the discrepancy rather than silently
+# substituting.
+
+## /root/amksend.py --help (confirms it forwards --inreplyto verbatim, no bracket handling)
+usage: amksend.py [-h] --mailfrom MAILFROM --headerfrom HEADERFROM
+                  [--rcpt RCPT] --subject SUBJECT [--messageid MESSAGEID]
+                  [--inreplyto INREPLYTO] [--references REFERENCES]
+                  [--body BODY] [--mx MX] [--ehlo EHLO]
+# Source confirms: `if a.inreplyto: L.append("In-Reply-To: " + a.inreplyto)` — string is emitted
+# character-for-character, so a bare (no-bracket) value stays bare on the wire. --references was
+# NOT passed for BARE or CONTROL below, so neither message carries a References header at all.
+
+================= SEND (three messages, one run, self-validating) =================
+
+--- ROOT: no In-Reply-To ---
+$ ssh -o BatchMode=yes -o ConnectTimeout=15 root@144.217.66.212 \
+    python3 /root/amksend.py --mailfrom c3root@probe.test \
+      --headerfrom 'C3 Root <c3root@probe.test>' \
+      --subject 'AMKc3root ccc7baa7' \
+      --messageid '<amkc3-root-ccc7baa7@appsynergy.io>' \
+      --body 'case C3 root message (no In-Reply-To)'
+MAILFROM: 250 Ok
+RCPT:     250 Ok
+DATA:     250 OK 27e14km3ei469sdisv53vfoelh6t2mo981pe1ng1
+sent_utc=2026-08-15T13:25:31Z
+
+--- BARE: In-Reply-To WITHOUT angle brackets, no References header at all ---
+$ ssh -o BatchMode=yes -o ConnectTimeout=15 root@144.217.66.212 \
+    python3 /root/amksend.py --mailfrom c3bare@probe.test \
+      --headerfrom 'C3 Bare <c3bare@probe.test>' \
+      --subject 'AMKc3bare ccc7baa7' \
+      --messageid '<amkc3-bare-ccc7baa7@appsynergy.io>' \
+      --inreplyto 'amkc3-root-ccc7baa7@appsynergy.io' \
+      --body 'case C3 bare unbracketed In-Reply-To test'
+MAILFROM: 250 Ok
+RCPT:     250 Ok
+DATA:     250 OK iprofekpta8qfdritp01bfcteiagj0uhm745kp01
+sent_utc=2026-08-15T13:25:37Z
+
+--- CONTROL: In-Reply-To WITH angle brackets, no References header at all ---
+$ ssh -o BatchMode=yes -o ConnectTimeout=15 root@144.217.66.212 \
+    python3 /root/amksend.py --mailfrom c3ctrl@probe.test \
+      --headerfrom 'C3 Control <c3ctrl@probe.test>' \
+      --subject 'AMKc3ctrl ccc7baa7' \
+      --messageid '<amkc3-ctrl-ccc7baa7@appsynergy.io>' \
+      --inreplyto '<amkc3-root-ccc7baa7@appsynergy.io>' \
+      --body 'case C3 control bracketed In-Reply-To test'
+MAILFROM: 250 Ok
+RCPT:     250 Ok
+DATA:     250 OK pvvjcgqv3krncfv8pfa11vrlq8pqu9bn3i014b01
+sent_utc=2026-08-15T13:25:40Z
+
+All three sender domains are probe.test (no SPF record; OVH 144.217.66.212 is not authorized
+either way), same as fixtures 09b/16 — mail is expected to land labeled ["received","unread",
+"unauthenticated"], reachable by id/webhook but excluded from list endpoints.
+
+================= WAIT / POLL METHODOLOGY =================
+Polled (not guessed): each read-back GET was retried up to 30x at 5s intervals against
+GET /v0/inboxes/amk-probe@agentmail.to/messages/{url-encoded-Message-ID} until HTTP 200.
+ROOT (sent 13:25:31Z), BARE (13:25:37Z) and CONTROL (13:25:40Z) each returned HTTP 200 on the
+FIRST poll attempt when checked starting ~13:26:00Z — i.e. all three were already ingested within
+roughly 20-30 seconds of being sent (faster than the "roughly a minute" the earlier threading
+matrix needed; no message required a retry). Total wall time from first send to last successful
+read: well under a minute.
+
+================= READ-BACK: GET by id (raw JSON, credential-free) =================
+
+--- GET /v0/inboxes/amk-probe@agentmail.to/messages/%3Camkc3-root-ccc7baa7%40appsynergy.io%3E ---
+{"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"9047724b-2879-416b-8424-82ef81ab9397","inbox_id":"amk-probe@agentmail.to","thread_id":"886a4b21-a608-4182-b105-03c4652e8cd1","message_id":"<amkc3-root-ccc7baa7@appsynergy.io>","labels":["received","unread","unauthenticated"],"timestamp":"2026-08-15T13:25:31.000Z","from":"C3 Root <c3root@probe.test>","to":["amk-probe@agentmail.to"],"subject":"AMKc3root ccc7baa7","preview":"case C3 root message (no In-Reply-To)\n","headers":{"Authentication-Results":"amazonses.com; spf=none (spfCheck: 144.217.66.212 is neither permitted nor denied by domain of probe.test) client-ip=144.217.66.212; envelope-from=c3root@probe.test; helo=server1.appsynergy.io; dmarc=none header.from=probe.test;"},"smtp_id":"27e14km3ei469sdisv53vfoelh6t2mo981pe1ng1","size":1943,"updated_at":"2026-08-15T13:25:31.127Z","created_at":"2026-08-15T13:25:31.127Z","text":"case C3 root message (no In-Reply-To)\n","extracted_text":"case C3 root message (no In-Reply-To)"}
+=> no in_reply_to field at all (none was sent). thread_id = 886a4b21-a608-4182-b105-03c4652e8cd1
+
+--- GET /v0/inboxes/amk-probe@agentmail.to/messages/%3Camkc3-bare-ccc7baa7%40appsynergy.io%3E ---
+{"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"9047724b-2879-416b-8424-82ef81ab9397","inbox_id":"amk-probe@agentmail.to","thread_id":"886a4b21-a608-4182-b105-03c4652e8cd1","message_id":"<amkc3-bare-ccc7baa7@appsynergy.io>","labels":["received","unread","unauthenticated"],"timestamp":"2026-08-15T13:25:36.000Z","from":"C3 Bare <c3bare@probe.test>","to":["amk-probe@agentmail.to"],"subject":"AMKc3bare ccc7baa7","preview":"case C3 bare unbracketed In-Reply-To test\n","in_reply_to":"<amkc3-root-ccc7baa7@appsynergy.io>","headers":{"In-Reply-To":"amkc3-root-ccc7baa7@appsynergy.io","Authentication-Results":"amazonses.com; spf=none (spfCheck: 144.217.66.212 is neither permitted nor denied by domain of probe.test) client-ip=144.217.66.212; envelope-from=c3bare@probe.test; helo=server1.appsynergy.io; dmarc=none header.from=probe.test;"},"smtp_id":"iprofekpta8qfdritp01bfcteiagj0uhm745kp01","size":1995,"updated_at":"2026-08-15T13:25:36.956Z","created_at":"2026-08-15T13:25:36.956Z","text":"case C3 bare unbracketed In-Reply-To test\n","extracted_text":"case C3 bare unbracketed In-Reply-To test"}
+=> headers.In-Reply-To (raw, as received) = "amkc3-root-ccc7baa7@appsynergy.io"  — BARE, exactly as sent.
+=> the parsed/API-level `in_reply_to` field = "<amkc3-root-ccc7baa7@appsynergy.io>" — AgentMail
+   itself RE-BRACKETS the value for the structured field. thread_id = 886a4b21-a608-4182-b105-03c4652e8cd1
+   — SAME as ROOT's.
+
+--- GET /v0/inboxes/amk-probe@agentmail.to/messages/%3Camkc3-ctrl-ccc7baa7%40appsynergy.io%3E ---
+{"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"9047724b-2879-416b-8424-82ef81ab9397","inbox_id":"amk-probe@agentmail.to","thread_id":"886a4b21-a608-4182-b105-03c4652e8cd1","message_id":"<amkc3-ctrl-ccc7baa7@appsynergy.io>","labels":["received","unread","unauthenticated"],"timestamp":"2026-08-15T13:25:39.000Z","from":"C3 Control <c3ctrl@probe.test>","to":["amk-probe@agentmail.to"],"subject":"AMKc3ctrl ccc7baa7","preview":"case C3 control bracketed In-Reply-To test\n","in_reply_to":"<amkc3-root-ccc7baa7@appsynergy.io>","headers":{"In-Reply-To":"<amkc3-root-ccc7baa7@appsynergy.io>","Authentication-Results":"amazonses.com; spf=none (spfCheck: 144.217.66.212 is neither permitted nor denied by domain of probe.test) client-ip=144.217.66.212; envelope-from=c3ctrl@probe.test; helo=server1.appsynergy.io; dmarc=none header.from=probe.test;"},"smtp_id":"pvvjcgqv3krncfv8pfa11vrlq8pqu9bn3i014b01","size":2001,"updated_at":"2026-08-15T13:25:39.929Z","created_at":"2026-08-15T13:25:39.929Z","text":"case C3 control bracketed In-Reply-To test\n","extracted_text":"case C3 control bracketed In-Reply-To test"}
+=> headers.In-Reply-To (raw) = "<amkc3-root-ccc7baa7@appsynergy.io>" — bracketed, as sent.
+   thread_id = 886a4b21-a608-4182-b105-03c4652e8cd1 — SAME as ROOT's.
+
+================= READ-BACK: GET /v0/inboxes/amk-probe@agentmail.to/messages?limit=50 =================
+{"count":6, ...}   -- none of the 3 probe messages (token ccc7baa7) appear in this list.
+=> Consistent with the established restricted-label exclusion for unauthenticated mail (fixtures
+   09b, 16): these three landed labeled "unauthenticated" and are excluded from the list endpoint,
+   reachable only by id (as used above) or thread (below). This is why the read-back used GET-by-id
+   rather than the list endpoint as the source of truth.
+
+================= READ-BACK: GET /v0/inboxes/amk-probe@agentmail.to/threads/886a4b21-a608-4182-b105-03c4652e8cd1 =================
+{"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"9047724b-2879-416b-8424-82ef81ab9397","inbox_id":"amk-probe@agentmail.to","thread_id":"886a4b21-a608-4182-b105-03c4652e8cd1","labels":["received","unread","unauthenticated"],"timestamp":"2026-08-15T13:25:39.000Z","received_timestamp":"2026-08-15T13:25:39.000Z","senders":["C3 Root <c3root@probe.test>","C3 Bare <c3bare@probe.test>","C3 Control <c3ctrl@probe.test>"],"recipients":["amk-probe@agentmail.to"],"subject":"AMKc3root ccc7baa7","preview":"case C3 control bracketed In-Reply-To test\n","last_message_id":"<amkc3-ctrl-ccc7baa7@appsynergy.io>","message_count":3,"size":5939,"updated_at":"2026-08-15T13:25:39.929Z","created_at":"2026-08-15T13:25:31.127Z","messages":[ ... the 3 messages above, verbatim, omitted here for brevity ... ]}
+=> message_count=3, all three Message-IDs (root/bare/ctrl) present under this single thread_id,
+   subject taken from ROOT (the three subjects differ, confirming subject played no role — R2 from
+   fixture 16 holds here too).
+
+================= RESULT TABLE =================
+message   Message-ID                                    In-Reply-To (as sent on the wire)              thread_id
+ROOT      <amkc3-root-ccc7baa7@appsynergy.io>            (none)                                          886a4b21-a608-4182-b105-03c4652e8cd1
+BARE      <amkc3-bare-ccc7baa7@appsynergy.io>            amkc3-root-ccc7baa7@appsynergy.io  (NO brackets) 886a4b21-a608-4182-b105-03c4652e8cd1
+CONTROL   <amkc3-ctrl-ccc7baa7@appsynergy.io>            <amkc3-root-ccc7baa7@appsynergy.io> (brackets)   886a4b21-a608-4182-b105-03c4652e8cd1
+
+=> VERDICT (C3, CLOSED): CONTROL joins ROOT's thread_id (886a4b21...) — the probe is valid. BARE
+   ALSO joins ROOT's thread_id (886a4b21..., identical to CONTROL's), despite carrying In-Reply-To
+   with NO angle brackets and NO References header at all. AgentMail's threading engine RE-BRACKETS
+   (or otherwise normalizes) a bare In-Reply-To value before matching it against stored Message-IDs:
+   the API-level `in_reply_to` field for BARE is returned as "<amkc3-root-ccc7baa7@appsynergy.io>"
+   even though `headers.In-Reply-To` (the raw received header) is the unbracketed string exactly as
+   sent. This is the LENIENT reading. amk-core's current [INFERRED] choice — trim CFWS only, do NOT
+   re-bracket before matching — does NOT match observed live behavior and should be changed to
+   re-bracket (or otherwise normalize to the canonical bracketed form) before thread-matching.
+
+================= NOT COVERED (explicit gaps; do not infer coverage) =================
+- A bare value in References (rather than In-Reply-To) was not tested — BARE's References header
+  was absent entirely, so only In-Reply-To's bracket-handling was exercised.
+- Multi-hop chains (A<-B<-C) with a bare reference partway through the chain were not tested.
+- A bare value with surrounding whitespace or RFC 5322 CFWS comments (e.g. " amkc3-root-...  " or
+  "amkc3-root-...(comment)") was not tested — only a bare value with no extra whitespace/comments.
+- Whether the *stored* `message_id` of the referenced (ROOT) message would itself need normalizing
+  was not exercised — ROOT's Message-ID header was sent already bracketed, per its design; this
+  fixture says nothing about a message whose own Message-ID header arrives unbracketed.
+- Only one bare-value shape was tested (a syntactically well-formed addr-spec with no brackets).
+  Malformed or partial addr-specs (missing @, multiple @, non-ASCII) were not tested.
+- n=1 trial; not repeated.
+- Authenticated (SPF/DKIM-pass) mail was not exercised here (as in fixture 16, all probe.test
+  sends are unauthenticated); whether re-bracketing behavior differs for authenticated mail is
+  unobserved.
+
+================= TEARDOWN =================
+No mutation was made (no PATCH, no label change, no inbox/pod/webhook create or delete). The three
+probe messages remain in amk-probe@agentmail.to as sent; nothing to revert.
+
+================= CREDENTIAL HANDLING =================
+The Authorization header was injected via `sdxd run` / `AGENTMAIL_API_KEY` and never echoed,
+printed, or captured in any command output above. No response body in this fixture contains a key.

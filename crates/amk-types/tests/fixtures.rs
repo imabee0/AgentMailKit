@@ -346,6 +346,7 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         ("16-threading-matrix", "amk-core threading rules, P2"),
         ("17-message-complained.txt", "amk-events complaint payload, P4"),
         ("20-search-and-label-precedence.txt", "amk-core label access modes, P1"),
+        ("21-unbracketed-in-reply-to.txt", "amk-core linkage-header normalisation, P2"),
         ("C1-domain-shape.txt", "amk-types domain shapes, P5"),
     ];
 
