@@ -1,0 +1,29 @@
+[package]
+name = "amk-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Persistence: Postgres via sqlx, migrations, blob store, full-text search, signed downloads."
+
+[dependencies]
+amk-types = { path = "../amk-types" }
+amk-core = { path = "../amk-core" }
+sqlx.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+
+# Deliberately absent, and each for a reason the plan states:
+#   serde       — this crate stores and retrieves; wire shapes live in amk-types. A Serialize
+#                 derive here is a second wire shape outside the frozen-types boundary.
+#   mail-parser / mail-auth / mail-send / mail-builder / smtp-proto — stalwart-labs crates belong
+#                 to amk-ingest and amk-outbound, converted at that boundary. A shape-provenance
+#                 check fails the build if one appears here.
+#   amk-import  — the translation boundary must not invert; amk-import depends on this crate,
+#                 never the reverse, so that it stays deletable after cutover.
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json.workspace = true
