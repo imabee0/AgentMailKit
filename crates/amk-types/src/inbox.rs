@@ -53,14 +53,70 @@ pub struct CreateInboxRequest {
     pub metadata: Option<Metadata>,
 }
 
+/// The three states `UpdateInboxRequest::metadata` can be in on the wire.
+///
+/// `openapi.json` types the field `oneOf [UpdateMetadata, null]` and says, verbatim: *"Keys you
+/// include are added or overwritten; keys you omit are left unchanged. To remove a single key,
+/// send it with a null value. **To clear all metadata, send `metadata` as null.** Sending an empty
+/// object is rejected; use null to clear."*
+///
+/// So absent, `null`, and `{…}` mean three different things. Modelled as an enum rather than
+/// `Option<Option<…>>` because the states have names worth writing down, matching how
+/// [`crate::api_key::KeyGrants`] already handles the same absent-versus-empty trap.
+///
+/// The bug this replaces: the field was `Option<BTreeMap<…>>` with `#[serde(default)]`, under
+/// which `{"metadata": null}` and `{}` both deserialize to `None` — three wire states collapsed
+/// into two, while the doc comment above the field asserted the distinction existed. A frozen
+/// wire-type crate documenting behaviour its type cannot represent is worse than one that stays
+/// silent, because downstream trusts it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum MetadataUpdate {
+    /// Field absent: metadata untouched.
+    #[default]
+    Unchanged,
+    /// `"metadata": null` — clear every key.
+    Clear,
+    /// `"metadata": {…}` — merge; a key mapped to `null` deletes just that key.
+    Merge(BTreeMap<String, Option<MetadataValue>>),
+}
+
+impl MetadataUpdate {
+    pub fn is_unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+}
+
+impl Serialize for MetadataUpdate {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            // `Unchanged` is skipped by `skip_serializing_if`, so it never reaches the wire
+            // through the request type; serializing one directly is meaningless rather than
+            // illegal, and `null` is the closest honest rendering.
+            Self::Unchanged | Self::Clear => s.serialize_none(),
+            Self::Merge(m) => m.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MetadataUpdate {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        // Absence never reaches here — `#[serde(default)]` on the field supplies `Unchanged` —
+        // which is precisely what makes the three states separable. A present `null` does reach
+        // here, and becomes `Clear`.
+        Ok(match Option::<BTreeMap<String, Option<MetadataValue>>>::deserialize(d)? {
+            None => Self::Clear,
+            Some(m) => Self::Merge(m),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UpdateInboxRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Merge semantics: a key mapped to `null` deletes that key; the whole field `null`
-    /// clears all metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<BTreeMap<String, Option<MetadataValue>>>,
+    /// Absent, `null` and `{…}` are three distinct requests — see [`MetadataUpdate`].
+    #[serde(default, skip_serializing_if = "MetadataUpdate::is_unchanged")]
+    pub metadata: MetadataUpdate,
 }
 
 list_response!(
@@ -102,9 +158,55 @@ mod tests {
     fn update_request_distinguishes_delete_key_from_absent() {
         let req: UpdateInboxRequest =
             serde_json::from_str(r#"{"metadata":{"keep":"v","drop":null}}"#).unwrap();
-        let m = req.metadata.unwrap();
+        let MetadataUpdate::Merge(m) = req.metadata else {
+            panic!("a present object is a merge");
+        };
         assert!(m["drop"].is_none(), "null value means delete the key");
         assert!(m["keep"].is_some());
+    }
+
+    #[test]
+    fn update_metadata_has_three_distinct_wire_states() {
+        // openapi.json, verbatim: "To remove a single key, send it with a null value. To clear all
+        // metadata, send `metadata` as null." Absent, null and {…} are three different requests,
+        // and the previous Option<BTreeMap> collapsed the first two into None.
+        let absent: UpdateInboxRequest = serde_json::from_str(r#"{"display_name":"x"}"#).unwrap();
+        let clear: UpdateInboxRequest = serde_json::from_str(r#"{"metadata":null}"#).unwrap();
+        let merge: UpdateInboxRequest = serde_json::from_str(r#"{"metadata":{"a":"1"}}"#).unwrap();
+
+        assert_eq!(absent.metadata, MetadataUpdate::Unchanged);
+        assert_eq!(clear.metadata, MetadataUpdate::Clear);
+        assert!(matches!(merge.metadata, MetadataUpdate::Merge(_)));
+        assert_ne!(
+            absent.metadata, clear.metadata,
+            "leaving metadata alone and wiping it are different requests"
+        );
+    }
+
+    #[test]
+    fn update_metadata_round_trips_each_state_to_the_right_json() {
+        let omitted = serde_json::to_string(&UpdateInboxRequest {
+            display_name: Some("x".into()),
+            metadata: MetadataUpdate::Unchanged,
+        })
+        .unwrap();
+        assert!(!omitted.contains("metadata"), "unchanged is omitted entirely: {omitted}");
+
+        let cleared = serde_json::to_string(&UpdateInboxRequest {
+            display_name: None,
+            metadata: MetadataUpdate::Clear,
+        })
+        .unwrap();
+        assert_eq!(cleared, r#"{"metadata":null}"#, "clear is the ONE place null is correct");
+
+        let merged = serde_json::to_string(&UpdateInboxRequest {
+            display_name: None,
+            metadata: MetadataUpdate::Merge(
+                [("a".to_string(), None)].into_iter().collect(),
+            ),
+        })
+        .unwrap();
+        assert_eq!(merged, r#"{"metadata":{"a":null}}"#, "per-key null deletes that key");
     }
 
     #[test]

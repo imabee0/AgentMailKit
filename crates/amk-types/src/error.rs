@@ -61,6 +61,22 @@ pub struct ErrorEnvelope {
     pub suggestions: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
+    /// `limit_exceeded` extras, observed together in
+    /// `reference/fixtures/18-inbox-case-normalization.txt`: `"resource":"inbox","limit":3`.
+    ///
+    /// A third per-code extra set, after `validation_error`'s `errors[]` and `already_exists`'
+    /// `suggestions[]` — which is the point: the envelope's extras are **per code**, not a fixed
+    /// set, so `type_:ErrorResponse` is a floor rather than a ceiling. Neither this pair nor
+    /// `suggestions` appears in any openapi schema; both are live-only.
+    ///
+    /// The same body carries `upgrade_url`, which we deliberately do **not** model — no billing
+    /// surface. That omission is a decision, recorded here so nobody later "completes" the shape.
+    /// The quota itself stays real: a self-hosted deployment may still impose a configured cap,
+    /// and it is counted organization-wide, not per pod.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docs: Option<String>,
 }
@@ -74,11 +90,20 @@ impl ErrorEnvelope {
             errors: Vec::new(),
             suggestions: Vec::new(),
             fix: None,
+            resource: None,
+            limit: None,
             docs: Some(code.docs_url()),
         }
     }
     pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
         self.fix = Some(fix.into());
+        self
+    }
+    /// `limit_exceeded`'s per-code extras. Paired in one builder because they were observed
+    /// together and neither is meaningful alone.
+    pub fn with_limit(mut self, resource: impl Into<String>, limit: u64) -> Self {
+        self.resource = Some(resource.into());
+        self.limit = Some(limit);
         self
     }
     pub fn with_suggestions(mut self, s: Vec<String>) -> Self {
@@ -170,6 +195,10 @@ impl ErrorCode {
             Unprocessable => "UnprocessableError",
             MessageRejected => "MessageRejectedError",
             RateLimitExceeded => "RateLimitError",
+            // Observed live in fixture 18. It had been falling through to the wildcard below,
+            // which is the hazard of a wildcard in a table derived from captures: a code with a
+            // real observed name silently gets the generic one, and nothing fails.
+            LimitExceeded => "LimitExceededError",
             InternalError | ServiceUnavailable => "InternalError",
             _ => "Error",
         }
@@ -249,6 +278,31 @@ mod tests {
         assert_eq!(parsed.code, ErrorCode::AlreadyExists);
         assert_eq!(parsed.status(), 403, "observed 403, not 409/422");
         assert_eq!(parsed.suggestions.len(), 3);
+    }
+
+    #[test]
+    fn limit_exceeded_carries_resource_and_limit_and_names_itself() {
+        // Verbatim from reference/fixtures/18-inbox-case-normalization.txt section 4, minus
+        // upgrade_url — which the live body carries and we deliberately do not model.
+        let live = r#"{"name":"LimitExceededError","code":"limit_exceeded",
+            "message":"Inbox limit exceeded","fix":"Your plan's inbox limit is 3. ...",
+            "resource":"inbox","limit":3,"upgrade_url":"<url>",
+            "docs":"https://docs.agentmail.to/errors#limit_exceeded"}"#;
+        let parsed: ErrorEnvelope = serde_json::from_str(live).unwrap();
+        assert_eq!(parsed.code, ErrorCode::LimitExceeded);
+        assert_eq!(parsed.status(), 403);
+        assert_eq!(parsed.resource.as_deref(), Some("inbox"));
+        assert_eq!(parsed.limit, Some(3));
+        // The name is the half that regressed: LimitExceeded fell through legacy_name's wildcard
+        // and emitted the generic "Error" while every other observed code got its real name.
+        assert_eq!(ErrorCode::LimitExceeded.legacy_name(), "LimitExceededError");
+        assert_eq!(parsed.name, ErrorCode::LimitExceeded.legacy_name());
+
+        // upgrade_url is dropped on the way in and never emitted on the way out: no billing
+        // surface. Asserted so the omission stays a decision rather than drifting back in.
+        let out = serde_json::to_string(&parsed).unwrap();
+        assert!(!out.contains("upgrade_url"), "no billing surface: {out}");
+        assert!(!out.contains("null"), "absent optionals are omitted: {out}");
     }
 
     #[test]
