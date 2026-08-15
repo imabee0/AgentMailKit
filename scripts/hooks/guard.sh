@@ -86,8 +86,14 @@ case "$FILE" in */.claude/worktrees/*) IN_WORKTREE=1 ;; esac
 #
 # CWD cannot actually identify a subagent: a subagent inherits the parent's working directory, so
 # an implementer whose shell sits in the primary checkout is indistinguishable from the
-# orchestrator. That was not theory — a dispatched implementer wrote scripts/check.sh, outside its
-# .amk-scope, and the scope rule never fired.
+# orchestrator. Measured: a dispatched implementer's write to <worktree>/scripts/check.sh was
+# allowed, and replaying that payload showed the allow only happens when CWD is NOT in a worktree —
+# so the payload carried the parent's cwd.
+#
+# (An earlier version of this comment cited that incident as proof of a pre-existing limitation.
+# It was not: rule 3 had just been re-keyed from the target to the writer, and the previous,
+# target-keyed version blocked that write at both cwds. The regression was self-inflicted. Rule 3
+# is now keyed on both sides; this rule stands on its own reasoning, not on that incident.)
 #
 # So this rule drops identity entirely and enforces the plan's rule 2 as literally written: while a
 # dispatch is in flight, the frozen paths are frozen for EVERYONE, orchestrator included. That is
@@ -140,40 +146,51 @@ esac
 # 3. Per-worktree scope. The orchestrator writes .amk-scope at dispatch listing the paths this
 #    agent may write.
 #
-#    Keyed on the WRITER (CWD), not on the target, because the question it answers is "may THIS
-#    AGENT write here?". Keying it on the target got both directions wrong: it never fired on an
-#    implementer writing an absolute path OUT of its worktree (nothing else catches that), and it
-#    fired on the orchestrator writing the dispatch contract IN, which is the one write that has to
-#    work for a fan-out to start at all.
+#    Keyed on EITHER side, because each alone leaves a hole and both were actually hit:
+#      * target-only -> never fires on an implementer writing an absolute path OUT of its worktree.
+#      * writer-only -> never fires AT ALL for a subagent, because a subagent inherits the PARENT's
+#        cwd. Measured, not assumed: a dispatched implementer wrote <worktree>/scripts/check.sh and
+#        this rule was silent. Replaying that payload against each version of this file showed the
+#        target-keyed version blocked it and the writer-keyed version did not.
 #
-#    Enforced only when .amk-scope is present, so an un-dispatched worktree is not bricked.
+#    So derive the worktree from CWD when the writer is inside one, else from the target path.
+#
+#    Dispatch ordering, which is what lets this stay strict: the orchestrator writes a worktree's
+#    contract files BEFORE creating .amk-scope. The scope file's existence is what arms this rule,
+#    so ordering solves the write-the-contract-in case with no exemption — and an exemption is
+#    exactly what an agent would use to rewrite its own contract.
+WT=""
 case "$CWD" in
   */.claude/worktrees/*)
-    WT="${CWD%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${CWD#*/.claude/worktrees/}" | cut -d/ -f1)"
-    if [ -f "$WT/.amk-scope" ]; then
-      case "$FILE" in
-        "$WT"/*) REL="${FILE#"$WT"/}" ;;
-        /*) deny "Write outside your worktree: $FILE
+    WT="${CWD%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${CWD#*/.claude/worktrees/}" | cut -d/ -f1)" ;;
+  *)
+    case "$FILE" in
+      */.claude/worktrees/*)
+        WT="${FILE%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${FILE#*/.claude/worktrees/}" | cut -d/ -f1)" ;;
+    esac ;;
+esac
+if [ -n "$WT" ] && [ -f "$WT/.amk-scope" ]; then
+  case "$FILE" in
+    "$WT"/*) REL="${FILE#"$WT"/}" ;;
+    /*) deny "Write outside your worktree: $FILE
 Your worktree is $WT. Everything you write goes inside it; the orchestrator merges.
 If the contract requires touching another path, STOP and report." ;;
-        # A relative path resolves against CWD, i.e. inside the worktree. Anything that climbs out
-        # of it fails the pattern match below and is denied — fail closed.
-        *) REL="$FILE" ;;
-      esac
-      ok=0
-      while IFS= read -r pat; do
-        [ -z "$pat" ] && continue
-        case "$pat" in \#*) continue ;; esac
-        # shellcheck disable=SC2254
-        case "$REL" in $pat) ok=1; break ;; esac
-      done < "$WT/.amk-scope"
-      [ "$ok" -eq 1 ] || deny "Path outside this agent's dispatched scope: $REL
+    # A relative path resolves against CWD, i.e. inside the worktree. Anything that climbs out of
+    # it fails the pattern match below and is denied — fail closed.
+    *) REL="$FILE" ;;
+  esac
+  ok=0
+  while IFS= read -r pat; do
+    [ -z "$pat" ] && continue
+    case "$pat" in \#*) continue ;; esac
+    # shellcheck disable=SC2254
+    case "$REL" in $pat) ok=1; break ;; esac
+  done < "$WT/.amk-scope"
+  [ "$ok" -eq 1 ] || deny "Path outside this agent's dispatched scope: $REL
 Allowed (from $WT/.amk-scope):
 $(sed 's/^/  /' "$WT/.amk-scope")
 Write only within your crate. If the contract requires touching another path, STOP and report."
-    fi
-    ;;
-esac
+fi
 
 # 4. Boundary types. mail_parser/mail_auth/mail_send/smtp_proto are ergonomic and right there,
 #    which makes them the likeliest accidental leak into the shapes that define our contract.

@@ -107,8 +107,23 @@ check 2 "implementer writes out of its worktree into the primary checkout" \
   "$(j Write "$ORCH/crates/amk-core/src/scope.rs" "$WT" "pub struct S;")"
 check 2 "implementer climbs out with a relative path" \
   "$(j Write "../../../etc/passwd" "$WT" "root::0:0")"
-check 0 "orchestrator writes the dispatch contract into a scoped worktree" \
+# The hole that keying rule 3 on the WRITER alone left open. A subagent inherits the parent's cwd,
+# so this is the normal case for a dispatched implementer, not an edge case — it was measured
+# against a real dispatch before being fixed.
+check 2 "subagent (cwd=primary) writes into a worktree OUT of scope" \
+  "$(j Write "$WT/scripts/check.sh" "$ORCH" "echo hi")"
+check 0 "subagent (cwd=primary) writes into a worktree IN scope" \
+  "$(j Write "$WT/crates/amk-core/src/scope.rs" "$ORCH" "pub struct S;")"
+# ...and the case that keying it on the TARGET alone left open, kept closed.
+check 2 "implementer escapes its worktree to the primary checkout" \
+  "$(j Write "$ORCH/crates/amk-core/src/labels.rs" "$WT" "pub struct S;")"
+# Ordering, not an exemption, is what lets the orchestrator write a dispatch contract: .amk-scope
+# arms the rule, so contract files are written BEFORE it exists. An exemption here is precisely
+# what an agent would use to rewrite its own contract.
+rm -f "$WT/.amk-scope"
+check 0 "orchestrator writes the dispatch contract before .amk-scope exists" \
   "$(j Write "$WT/CLAUDE.md" "$ORCH" "# amk-store contract")"
+printf 'crates/amk-core/*\ncrates/amk-core/src/*\n' > "$WT/.amk-scope"
 rm -f "$WT/.amk-scope"; rmdir "$WT" 2>/dev/null
 
 printf '\nguard tests: %d passed, %d failed\n' "$pass" "$fail"
