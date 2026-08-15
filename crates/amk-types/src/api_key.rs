@@ -10,6 +10,8 @@
 //! Field names and order are generated from `reference/openapi.json`
 //! (`type_api-keys:ApiKeyPermissions`), not transcribed.
 
+use crate::ids::{ApiKeyId, InboxId, PodId};
+use crate::{list_response, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Granular permissions for the API key.
@@ -268,6 +270,76 @@ pub fn label_read_flag(label: &str) -> Option<&'static str> {
         .map(|(f, _)| *f)
 }
 
+/// An API key as returned by the read endpoints.
+///
+/// **The secret is not in this type.** Only [`CreateApiKeyResponse`] carries an `api_key` field,
+/// and the reference API returns it exactly once, at creation. A key that could be re-read would
+/// make every later leak permanent, so the absence here is the security property — do not add it
+/// "for convenience".
+///
+/// `pod_id` and `inbox_id` say where the key is bound: both absent is an organization-scoped key.
+/// They are typed as ids rather than the bare `string` `openapi.json` declares, matching how
+/// [`crate::inbox::Inbox`] already types the same values.
+///
+/// Fields and optionality from `reference/openapi.json` (`type_api-keys:ApiKey`). **No live
+/// capture exists** — we never created a key against the reference account — so unlike the message
+/// and inbox types this one is `[SPEC:openapi]` only. In particular the `organization_id` that
+/// live responses add to other resources is **not** modelled here, because adding a field no
+/// artifact shows is exactly the invention this crate exists to prevent. If a capture ever shows
+/// it, add it then.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiKey {
+    pub api_key_id: ApiKeyId,
+    /// Leading identifying segment of the key, safe to display and to index for O(1) lookup.
+    pub prefix: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_id: Option<PodId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_id: Option<InboxId>,
+    /// Absent on a key that has never been used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_at: Option<Timestamp>,
+    /// Absent grants everything; see [`KeyGrants::from_wire`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<ApiKeyPermissions>,
+    pub created_at: Timestamp,
+}
+
+/// `openapi.json` marks both fields optional (`type_api-keys:CreateApiKeyRequest`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CreateApiKeyRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Omitted grants everything the parent holds; present-but-empty grants nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<ApiKeyPermissions>,
+}
+
+/// The one response that carries the secret.
+///
+/// Deliberately a separate type from [`ApiKey`] rather than an `Option<String>` on it: making the
+/// secret unrepresentable outside creation is stronger than remembering to leave it `None`. Note
+/// it also has **no `used_at`** — a key returned at creation has never been used.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateApiKeyResponse {
+    pub api_key_id: ApiKeyId,
+    /// The secret, returned exactly once. Never log it, never store it in plaintext — the store
+    /// keeps an argon2id hash and looks up by `prefix`.
+    pub api_key: String,
+    pub prefix: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod_id: Option<PodId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox_id: Option<InboxId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<ApiKeyPermissions>,
+    pub created_at: Timestamp,
+}
+
+list_response!(ListApiKeysResponse, api_keys, ApiKey);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +472,108 @@ mod tests {
             assert!(WIRE_NAMES.contains(&flag));
         }
         assert_eq!(label_read_flag(labels::RECEIVED), None, "unrestricted labels are not gated");
+    }
+
+    fn key_fields(json: &str) -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    #[test]
+    fn an_org_scoped_unused_key_omits_every_absent_optional() {
+        // Optionals are omitted, never null and never "" — the single likeliest source of a
+        // conformance diff against the reference API.
+        let key = ApiKey {
+            api_key_id: ApiKeyId::new("ak_1"),
+            prefix: "am_us_abcd".into(),
+            name: "probe".into(),
+            pod_id: None,
+            inbox_id: None,
+            used_at: None,
+            permissions: None,
+            created_at: Timestamp::now(),
+        };
+        let s = serde_json::to_string(&key).unwrap();
+        assert_eq!(key_fields(&s), ["api_key_id", "created_at", "name", "prefix"]);
+        assert!(!s.contains("null"), "absent optionals are omitted, not null: {s}");
+        assert_eq!(serde_json::from_str::<ApiKey>(&s).unwrap(), key);
+    }
+
+    #[test]
+    fn the_secret_exists_only_on_the_create_response() {
+        // The reference API returns the key material exactly once. Modelling it as a separate type
+        // rather than an Option on ApiKey makes "read a key back" unrepresentable instead of
+        // merely discouraged — so this asserts the field is absent from ApiKey's wire form, which
+        // is what a leak would look like.
+        let key = ApiKey {
+            api_key_id: ApiKeyId::new("ak_1"),
+            prefix: "am_us_abcd".into(),
+            name: "probe".into(),
+            pod_id: None,
+            inbox_id: None,
+            used_at: Some(Timestamp::now()),
+            permissions: None,
+            created_at: Timestamp::now(),
+        };
+        let fields = key_fields(&serde_json::to_string(&key).unwrap());
+        assert!(!fields.iter().any(|f| f == "api_key"), "ApiKey must never carry the secret");
+
+        let created = CreateApiKeyResponse {
+            api_key_id: ApiKeyId::new("ak_1"),
+            api_key: "am_us_secret".into(),
+            prefix: "am_us_abcd".into(),
+            name: "probe".into(),
+            pod_id: None,
+            inbox_id: None,
+            permissions: None,
+            created_at: Timestamp::now(),
+        };
+        let created_fields = key_fields(&serde_json::to_string(&created).unwrap());
+        assert!(created_fields.iter().any(|f| f == "api_key"));
+        assert!(
+            !created_fields.iter().any(|f| f == "used_at"),
+            "a key returned at creation has never been used; openapi omits the field"
+        );
+    }
+
+    #[test]
+    fn a_pod_bound_key_names_its_pod_and_an_inbox_bound_key_its_inbox() {
+        let key = ApiKey {
+            api_key_id: ApiKeyId::new("ak_2"),
+            prefix: "am_us_efgh".into(),
+            name: "pod key".into(),
+            pod_id: Some(PodId::new_random()),
+            inbox_id: Some(InboxId::new("amk-probe@agentmail.to")),
+            used_at: None,
+            permissions: Some(ApiKeyPermissions { message_read: Some(true), ..Default::default() }),
+            created_at: Timestamp::now(),
+        };
+        let s = serde_json::to_string(&key).unwrap();
+        assert_eq!(
+            key_fields(&s),
+            [
+                "api_key_id",
+                "created_at",
+                "inbox_id",
+                "name",
+                "permissions",
+                "pod_id",
+                "prefix"
+            ]
+        );
+        // A restricted permissions object grants only what it names — the empty-vs-absent
+        // distinction that KeyGrants exists to preserve.
+        let round: ApiKey = serde_json::from_str(&s).unwrap();
+        assert_eq!(round, key);
+        assert!(KeyGrants::from_wire(round.permissions).allows("message_read"));
+    }
+
+    #[test]
+    fn a_key_list_omits_the_token_on_the_last_page() {
+        let empty = ListApiKeysResponse::new(vec![], None, None);
+        let s = serde_json::to_string(&empty).unwrap();
+        assert_eq!(s, r#"{"count":0,"api_keys":[]}"#);
     }
 }
