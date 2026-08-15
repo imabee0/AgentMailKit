@@ -292,18 +292,29 @@ fn row_to_authenticated(row: &PgRow) -> Result<AuthenticatedKey, StoreError> {
 // The fix keeps the `Uuid` bind (for the index and the total NUL-safe parse) and adds one filter:
 // require the value's own canonical rendering to equal what was presented, so parsing is used only
 // to validate-and-normalize-for-comparison, never to accept an alternate rendering as equivalent.
-// `Uuid`'s `Display` is canonical lowercase-hyphenated, and [`create`] stores exactly that (via
-// `Uuid::to_string()`), so the id this crate issued always still resolves; every other rendering —
-// differently cased, unhyphenated, braced, `urn:`-prefixed — becomes `None` just as a NUL byte or
-// any other unparseable string does. `.filter(..)` keeps this total: there is still no branch, and
-// deleting it is caught by `tests/api_keys.rs`'s
-// `only_the_canonical_rendering_of_an_api_key_id_resolves_it`.
+// `Uuid`'s `Display` is canonical lowercase-hyphenated, and every `ApiKeyId` this crate ever hands
+// a caller is built from that same rendering — [`create`] binds the raw `Uuid` into the `uuid`
+// column natively (never as text), and only calls `Uuid::to_string()` once, separately, to build
+// the `api_key_id` field of the `CreateApiKeyResponse` it returns; [`row_to_api_key`] and
+// [`row_to_authenticated`] do the same on every later read. So the id this crate issued always
+// still resolves; every other rendering — differently cased, unhyphenated, braced,
+// `urn:`-prefixed — becomes `None` just as a NUL byte or any other unparseable string does.
+// `.filter(..)` keeps this total: there is still no branch, and deleting it at any one of the
+// three call sites (`get`, `delete`, `touch_used_at`) is independently caught by
+// `tests/api_keys.rs`'s `only_the_canonical_rendering_of_an_api_key_id_resolves_it_everywhere`.
 
 /// Parse `id` to a `Uuid` for binding into `api_key_id = $n`, but only when the value's own
 /// canonical (lowercase-hyphenated) rendering is byte-identical to what was presented — see the
 /// doc comment above this section for why. Covers every other case as one uniform `None`:
 /// unparseable text (including a NUL byte, which this way never reaches a query parameter at
 /// all), and parseable-but-differently-rendered text (uppercase, unhyphenated, braced, `urn:`).
+///
+/// Shared by all three call sites that resolve a caller-presented id — [`get`], [`delete`] and
+/// [`touch_used_at`] — precisely so the guarantee is one property in one function rather than
+/// three copies that could drift independently. Each call site's own filter must be verified
+/// independently anyway (a mutation at one site is invisible to a test that only exercises
+/// another), which is what `only_the_canonical_rendering_of_an_api_key_id_resolves_it_everywhere`
+/// does.
 fn exact_api_key_uuid(id: &ApiKeyId) -> Option<Uuid> {
     let s = id.as_str();
     Uuid::parse_str(s).ok().filter(|u| u.to_string() == s)

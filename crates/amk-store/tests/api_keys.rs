@@ -929,12 +929,21 @@ async fn a_non_uuid_id_never_resolves_the_seeded_nil_uuid_sentinel() {
 /// issued, so binding the parsed value alone (accepting all five as equivalent) would be an
 /// invented, wider equality rule than this crate has evidence for — the exact defect a prior
 /// review round found and rejected `lower()` case-folding for. Only the id's own canonical
-/// (lowercase-hyphenated) rendering — the one [`create`] actually stores and returns — may
-/// resolve it; every other rendering of the very same UUID value must resolve `None`, same as a
-/// different UUID or a NUL-bearing string does. `exact_api_key_uuid`'s `.filter(..)` is what this
-/// test kills if it is ever removed.
+/// (lowercase-hyphenated) rendering — the one [`create`] actually returns — may resolve it; every
+/// other rendering of the very same UUID value must resolve `None`, same as a different UUID or a
+/// NUL-bearing string does.
+///
+/// `exact_api_key_uuid` is one function shared by `get`, `delete` and `touch_used_at`, but a
+/// mutation of any *one* call site's `.filter(..)` is invisible to a test that only exercises a
+/// different call site — an uppercase rendering silently deleting another key's row, or setting
+/// its `used_at`, would have passed a `get`-only version of this test. Every rendering below is
+/// therefore driven through all three: `get` must miss it, `delete` must not remove the row (and
+/// the row must still be there afterward), and `touch_used_at` must not set `used_at` (and it
+/// must still be absent afterward). Only at the very end does the canonical rendering get used to
+/// actually touch and then delete the row, proving the two negatives above were not simply "this
+/// function always returns false/None regardless of input".
 #[tokio::test]
-async fn only_the_canonical_rendering_of_an_api_key_id_resolves_it() {
+async fn only_the_canonical_rendering_of_an_api_key_id_resolves_it_everywhere() {
     let Some(pool) = support::pool().await else {
         return;
     };
@@ -944,38 +953,143 @@ async fn only_the_canonical_rendering_of_an_api_key_id_resolves_it() {
         .unwrap();
     let real = Uuid::parse_str(created.api_key_id.as_str()).expect("create always mints a UUID");
 
-    // The canonical rendering — the id as create() actually returned it — must still resolve.
+    // The canonical rendering — the id as create() actually returned it — resolves via get().
     let canonical = api_keys::get(&pool, &org, &KeyScope::Organization, &created.api_key_id)
         .await
         .unwrap();
     assert_eq!(canonical.map(|k| k.api_key_id), Some(created.api_key_id.clone()));
 
-    // Every other rendering of the SAME UUID value must resolve nothing.
-    let alternate_renderings = [
+    // Every other rendering of the SAME UUID value, plus a genuinely different UUID, must be a
+    // no-op through all three functions.
+    let different = Uuid::new_v4().to_string();
+    let non_resolving_renderings = [
         real.hyphenated().to_string().to_uppercase(),
         real.simple().to_string(),
         format!("{{{real}}}"),
         format!("urn:uuid:{real}"),
+        different.clone(),
     ];
-    for rendering in alternate_renderings {
+    for rendering in non_resolving_renderings {
         let id = ApiKeyId::new(rendering.clone());
+
         let resolved = api_keys::get(&pool, &org, &KeyScope::Organization, &id)
             .await
             .unwrap();
+        assert!(resolved.is_none(), "get: rendering {rendering:?} must not resolve the key");
+
         assert!(
-            resolved.is_none(),
-            "rendering {rendering:?} names the same UUID value but must not resolve the key: \
-             ApiKeyId has no case-folding or format-normalizing equality rule"
+            !api_keys::delete(&pool, &org, &KeyScope::Organization, &id)
+                .await
+                .unwrap(),
+            "delete: rendering {rendering:?} must not report success"
+        );
+        let survived = api_keys::get(&pool, &org, &KeyScope::Organization, &created.api_key_id)
+            .await
+            .unwrap();
+        assert!(
+            survived.is_some(),
+            "delete: rendering {rendering:?} must not actually remove the row"
+        );
+
+        assert!(
+            !api_keys::touch_used_at(&pool, &id).await.unwrap(),
+            "touch_used_at: rendering {rendering:?} must not report success"
+        );
+        let untouched = api_keys::get(&pool, &org, &KeyScope::Organization, &created.api_key_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            untouched.used_at, None,
+            "touch_used_at: rendering {rendering:?} must not actually set used_at"
         );
     }
 
-    // A genuinely different, syntactically valid UUID resolves nothing either.
-    let different = ApiKeyId::new(Uuid::new_v4().to_string());
+    // The canonical rendering, and only the canonical rendering, actually reaches the row: touch
+    // it, observe the effect, then delete it, observe that too. This is what proves the negatives
+    // above were real refusals and not a function that never does anything.
+    assert!(api_keys::touch_used_at(&pool, &created.api_key_id)
+        .await
+        .unwrap());
+    let touched = api_keys::get(&pool, &org, &KeyScope::Organization, &created.api_key_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
-        api_keys::get(&pool, &org, &KeyScope::Organization, &different)
+        touched.used_at.is_some(),
+        "the canonical rendering must be able to touch the row"
+    );
+
+    assert!(api_keys::delete(&pool, &org, &KeyScope::Organization, &created.api_key_id)
+        .await
+        .unwrap());
+    assert!(
+        api_keys::get(&pool, &org, &KeyScope::Organization, &created.api_key_id)
             .await
             .unwrap()
             .is_none(),
-        "a different, syntactically valid UUID must resolve nothing"
+        "the canonical rendering must be able to delete the row"
     );
+}
+
+/// Table-driven regression for the "total, never `Err`, never panics" property `get`/`delete`/
+/// `touch_used_at` are supposed to have for *any* caller-supplied `api_key_id`, not merely the two
+/// specific cases (`an_api_key_id_with_an_embedded_nul_byte_returns_ok_not_a_database_error`,
+/// `a_non_uuid_id_never_resolves_the_seeded_nil_uuid_sentinel`) checked in separately. A review
+/// lens ran this exact battery by hand — empty string, bare NUL, embedded NUL, a ~1 MB string,
+/// CR/LF, raw control bytes, a whitespace-padded rendering of a real canonical UUID, emoji, and a
+/// SQL-fragment string — and every one returned `Ok`; until this test existed, that evidence lived
+/// only in a review transcript, not in the tree. The specific future regression this guards
+/// against: a length-bounded or charset fast-path added ahead of `Uuid::parse_str` (for
+/// performance, say) that panics or errors on one of these instead of falling through to `None`.
+#[tokio::test]
+async fn hostile_api_key_id_inputs_are_total_across_get_delete_and_touch_used_at() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let real = api_keys::create(&pool, org_key(&org, "hostile-battery"))
+        .await
+        .unwrap();
+
+    let control_bytes: String = (0u8..32).map(char::from).collect();
+    let hostile_inputs: Vec<String> = vec![
+        String::new(),                               // empty string
+        "\0".to_owned(),                             // bare NUL
+        "abc\0def".to_owned(),                       // embedded NUL
+        "a".repeat(1024 * 1024),                     // ~1 MB string
+        "abc\r\ndef".to_owned(),                     // CR/LF
+        control_bytes,                               // raw control bytes (incl. NUL)
+        format!("  {}  ", real.api_key_id.as_str()), // whitespace-padded canonical UUID
+        "🙂🙂🙂".to_owned(),                         // multi-byte / emoji
+        "'; DROP TABLE api_keys; --".to_owned(),     // SQL-fragment string
+    ];
+
+    for input in hostile_inputs {
+        let label = if input.len() > 64 {
+            format!("<{} bytes>", input.len())
+        } else {
+            format!("{input:?}")
+        };
+        let id = ApiKeyId::new(input);
+
+        let got = api_keys::get(&pool, &org, &KeyScope::Organization, &id).await;
+        assert!(got.is_ok(), "get must return Ok for hostile input {label}: {got:?}");
+
+        let deleted = api_keys::delete(&pool, &org, &KeyScope::Organization, &id).await;
+        assert!(deleted.is_ok(), "delete must return Ok for hostile input {label}: {deleted:?}");
+
+        let touched = api_keys::touch_used_at(&pool, &id).await;
+        assert!(
+            touched.is_ok(),
+            "touch_used_at must return Ok for hostile input {label}: {touched:?}"
+        );
+    }
+
+    // The real row must have survived the entire battery, untouched.
+    let survivor = api_keys::get(&pool, &org, &KeyScope::Organization, &real.api_key_id)
+        .await
+        .unwrap()
+        .expect("the real key must survive the entire hostile battery");
+    assert_eq!(survivor.used_at, None, "no hostile input should have touched the real key");
 }
