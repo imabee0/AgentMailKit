@@ -477,3 +477,104 @@ async fn inbox_delete_normalizes_a_mixed_case_inbox_id() {
     );
     assert!(inboxes::get(&pool, &org, &inbox).await.unwrap().is_none());
 }
+
+// ---- hostile bytes reaching SQL (`.claude/contracts/amk-store-id-safety.md`) --------------------
+//
+// `InboxId::new` is infallible, so a NUL-bearing id can reach these functions regardless of
+// caller discipline. Unguarded, it would fail at Postgres parameter encoding (SQLSTATE 22021) —
+// a `StoreError::Database`, not the uniform not-found every other unresolvable id produces. Each
+// of the five call paths the dispatch contract names gets its own direct test: the previous
+// dispatch's fifth review round found a regression test that guarded `get` while `delete`'s call
+// site was unprotected, and a mutant left the suite green while an uppercase id really deleted
+// the row. Testing through a shared helper would reproduce exactly that gap.
+
+/// `inboxes::get`, one of the five named call paths: a NUL-bearing `inbox_id` must return
+/// `Ok(None)`, never `Err(StoreError::Database(_))`.
+#[tokio::test]
+async fn inbox_get_with_a_nul_byte_in_inbox_id_is_not_found_not_a_database_error() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let hostile = InboxId::new("abc\0def@example.test");
+
+    let result = inboxes::get(&pool, &org, &hostile).await;
+    assert!(
+        matches!(result, Ok(None)),
+        "a NUL-bearing inbox_id must mask as not-found, not error: {result:?}"
+    );
+}
+
+/// `inboxes::delete`, the sibling of [`inbox_get_with_a_nul_byte_in_inbox_id_is_not_found_not_a_database_error`]
+/// — tested independently rather than assumed to inherit `get`'s guard.
+#[tokio::test]
+async fn inbox_delete_with_a_nul_byte_in_inbox_id_is_a_no_op_not_a_database_error() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let hostile = InboxId::new("abc\0def@example.test");
+
+    let result = inboxes::delete(&pool, &org, &hostile).await;
+    assert!(
+        matches!(result, Ok(false)),
+        "a NUL-bearing inbox_id must delete nothing, not error: {result:?}"
+    );
+}
+
+/// `inboxes::create` with a NUL-bearing `client_id`: unlike the lookups above, this fails at the
+/// `INSERT` bind rather than a masked lookup — an ungraceful `StoreError::Database`, not a
+/// denial-distinguishing side channel, since create has no not-found outcome to hide behind. The
+/// dispatch contract still asks for a decision: guarded the same way, returning
+/// [`StoreError::InvalidValue`], because the check is one already-public predicate call and the
+/// alternative is a caller-controlled 500 that a wire-body `client_id` can trivially trigger.
+#[tokio::test]
+async fn inboxes_create_rejects_a_nul_byte_in_client_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let username = format!("client-id-nul-{}@example.test", support::unique_suffix());
+
+    let result = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(username),
+            organization_id: org,
+            pod_id: pod,
+            client_id: Some("abc\0def".to_owned()),
+            display_name: None,
+            metadata: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("client_id"))),
+        "a NUL-bearing client_id must be a typed InvalidValue, not a raw database error: {result:?}"
+    );
+}
+
+/// `pods::create` sibling of [`inboxes_create_rejects_a_nul_byte_in_client_id`] — same reasoning,
+/// tested independently at its own call site.
+#[tokio::test]
+async fn pods_create_rejects_a_nul_byte_in_client_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+
+    let result = pods::create(
+        &pool,
+        NewPod {
+            organization_id: org,
+            pod_id: PodId::new_random(),
+            client_id: Some("abc\0def".to_owned()),
+            name: "hostile-client-id".into(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("client_id"))),
+        "a NUL-bearing client_id must be a typed InvalidValue, not a raw database error: {result:?}"
+    );
+}

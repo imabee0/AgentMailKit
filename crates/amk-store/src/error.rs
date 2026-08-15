@@ -21,6 +21,14 @@ pub enum StoreError {
     /// A page token failed validation before any query ran.
     #[error("invalid page token: {0}")]
     InvalidPageToken(#[from] PageTokenError),
+
+    /// A caller-supplied value cannot be persisted: it carries a byte Postgres cannot encode as
+    /// `text` — a NUL, `0x00` — which would otherwise reach an `INSERT`'s bound parameter and
+    /// fail at encoding (SQLSTATE `22021`) rather than as a clear, typed error. Returned in place
+    /// of that raw [`StoreError::Database`], the same way [`PageTokenError::ForbiddenByte`] is
+    /// returned in place of a database error on a lookup. The `&'static str` names the field.
+    #[error("invalid value for {0}: contains a forbidden byte")]
+    InvalidValue(&'static str),
 }
 
 /// Why a page token was rejected.

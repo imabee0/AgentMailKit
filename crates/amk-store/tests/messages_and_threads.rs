@@ -2825,3 +2825,147 @@ async fn list_at_the_pod_mount_agrees_with_order_by_when_both_tiebreak_columns_d
     assert_eq!(desc_p2.items[0].inbox_id, inbox_a);
     assert!(desc_p2.next.is_none());
 }
+
+// ---- hostile bytes reaching SQL (`.claude/contracts/amk-store-id-safety.md`) --------------------
+//
+// `InboxId::new`/`MessageId::new` are infallible, so a NUL-bearing id can reach these functions
+// regardless of caller discipline — via an explicit parameter, or via `ScopeFilter`'s own pin
+// (`filter.inbox_id()`), which every query below also binds. Unguarded, either would fail at
+// Postgres parameter encoding (SQLSTATE 22021): a `StoreError::Database`, not the uniform
+// not-found every other unresolvable id produces — exactly the side channel the masking rule
+// forbids. Each guarded value gets its own direct test, not one shared helper: the previous
+// dispatch's fifth review round found a regression test that guarded one call site while a
+// sibling with the identical shape stayed open, and a mutant left the suite green while an
+// uppercase id really deleted a row.
+
+/// `messages::get`, one of the five call paths the dispatch contract names: a NUL-bearing
+/// `inbox_id` *parameter* must return `Ok(None)`, never `Err(StoreError::Database(_))`.
+#[tokio::test]
+async fn message_get_with_a_nul_byte_in_the_inbox_id_parameter_is_not_found() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let filter = org_filter(&org);
+    let hostile_inbox = InboxId::new("abc\0def@x");
+
+    let result = messages::get(&pool, &filter, &hostile_inbox, &MessageId::new("<a@x>"), &[]).await;
+    assert!(
+        matches!(result, Ok(None)),
+        "a NUL-bearing inbox_id parameter must mask as not-found, not error: {result:?}"
+    );
+}
+
+/// Sibling of the above for `messages::get`'s other free-text parameter.
+#[tokio::test]
+async fn message_get_with_a_nul_byte_in_the_message_id_parameter_is_not_found() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let filter = inbox_filter(&org, pod, &inbox);
+    let hostile_message_id = MessageId::new("<a\0b@x>");
+
+    let result = messages::get(&pool, &filter, &inbox, &hostile_message_id, &[]).await;
+    assert!(
+        matches!(result, Ok(None)),
+        "a NUL-bearing message_id parameter must mask as not-found, not error: {result:?}"
+    );
+}
+
+/// Sibling of the two tests above for `messages::get`'s third bound value: the `ScopeFilter`'s
+/// own pin, which the parameter checks above do not exercise (they pair a clean pin with a
+/// hostile parameter; this pairs a clean parameter with a hostile pin).
+#[tokio::test]
+async fn message_get_with_a_nul_byte_in_the_scope_filters_inbox_id_pin_is_not_found() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let filter = inbox_filter(&org, pod, &InboxId::new("abc\0def@x"));
+
+    let result =
+        messages::get(&pool, &filter, &InboxId::new("clean@x"), &MessageId::new("<a@x>"), &[])
+            .await;
+    assert!(
+        matches!(result, Ok(None)),
+        "a NUL-bearing ScopeFilter inbox_id pin must mask as not-found, not error: {result:?}"
+    );
+}
+
+/// `messages::list` is not one of the five call paths the panel names, but it is structurally
+/// identical to `threads::list` below — the same `filter.inbox_id()` bind, the same risk — and
+/// leaving it unguarded would be exactly the sibling gap the previous dispatch's review round
+/// found, just one module over.
+#[tokio::test]
+async fn message_list_with_a_nul_byte_in_the_scope_filters_inbox_id_pin_returns_an_empty_page() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let filter = inbox_filter(&org, pod, &InboxId::new("abc\0def@x"));
+
+    let result = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery { limit: 10, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await;
+    match result {
+        Ok(page) => {
+            assert!(page.items.is_empty(), "a hostile pin must yield no rows");
+            assert!(page.next.is_none(), "a hostile pin must yield no page token either");
+        }
+        Err(e) => panic!("a NUL-bearing ScopeFilter inbox_id pin must not error: {e:?}"),
+    }
+}
+
+/// `threads::get_with_messages`, one of the five named call paths: `thread_id` is a UUID and
+/// cannot carry a NUL, so the only free-text value this function binds is the `ScopeFilter`'s own
+/// `inbox_id` pin.
+#[tokio::test]
+async fn thread_get_with_messages_with_a_nul_byte_in_the_scope_filters_inbox_id_pin_is_not_found() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let filter = inbox_filter(&org, pod, &InboxId::new("abc\0def@x"));
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::by_id(&grants);
+
+    let result = threads::get_with_messages(&pool, &filter, ThreadId::new_random(), &access).await;
+    assert!(
+        matches!(result, Ok(None)),
+        "a NUL-bearing ScopeFilter inbox_id pin must mask as not-found, not error: {result:?}"
+    );
+}
+
+/// `threads::list`, one of the five named call paths.
+#[tokio::test]
+async fn thread_list_with_a_nul_byte_in_the_scope_filters_inbox_id_pin_returns_an_empty_page() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let filter = inbox_filter(&org, pod, &InboxId::new("abc\0def@x"));
+
+    let result = threads::list(
+        &pool,
+        &filter,
+        &[],
+        ListThreadsQuery { limit: 10, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await;
+    match result {
+        Ok(page) => {
+            assert!(page.items.is_empty(), "a hostile pin must yield no rows");
+            assert!(page.next.is_none(), "a hostile pin must yield no page token either");
+        }
+        Err(e) => panic!("a NUL-bearing ScopeFilter inbox_id pin must not error: {e:?}"),
+    }
+}

@@ -3,7 +3,7 @@
 //! primary key, so two case-variant usernames collide at the database's own unique constraint,
 //! never at an application-level check-then-insert.
 
-use amk_types::ids::{InboxId, OrganizationId, PodId};
+use amk_types::ids::{has_forbidden_byte, InboxId, OrganizationId, PodId};
 use amk_types::inbox::{Inbox, Metadata};
 use amk_types::Timestamp;
 use chrono::{DateTime, Utc};
@@ -50,6 +50,15 @@ fn row_to_inbox(row: &PgRow) -> Result<Inbox, StoreError> {
 ///   edge case) → the primary key itself raises a unique violation, mapped here to
 ///   [`StoreError::InboxAlreadyExists`] rather than propagated as a raw database error.
 pub async fn create(pool: &PgPool, new: NewInbox) -> Result<Inbox, StoreError> {
+    // `client_id` is a free-form caller-supplied idempotency key, bound straight into the
+    // `INSERT` below (never through an `InboxId`, so `from_path_segment` never sees it). A NUL
+    // byte in it would otherwise fail at parameter encoding (SQLSTATE 22021) — an ungraceful
+    // `StoreError::Database`, not the masking defect this dispatch targets (this is an insert,
+    // not a lookup with a not-found to hide behind), but caller-controlled input that 500s
+    // unnecessarily is worth a clear, typed rejection now that the check is one line.
+    if new.client_id.as_deref().is_some_and(has_forbidden_byte) {
+        return Err(StoreError::InvalidValue("client_id"));
+    }
     let normalized = new.inbox_id.normalized();
 
     let attempt = sqlx::query(
@@ -102,6 +111,13 @@ pub async fn get(
     organization_id: &OrganizationId,
     inbox_id: &InboxId,
 ) -> Result<Option<Inbox>, StoreError> {
+    // A NUL-bearing `inbox_id` can never name a real row (Postgres `text` cannot hold one), so
+    // this is not-found by definition — never the `StoreError::Database` a bound `%00` would
+    // otherwise raise at parameter encoding (SQLSTATE 22021). Checked ahead of any query, per
+    // this crate's rule that denial and absence must be indistinguishable.
+    if has_forbidden_byte(inbox_id.as_str()) {
+        return Ok(None);
+    }
     let normalized = inbox_id.normalized();
     let row = sqlx::query(
         "SELECT inbox_id, organization_id, pod_id, client_id, display_name, metadata, created_at, updated_at \
@@ -138,6 +154,12 @@ pub async fn delete(
     organization_id: &OrganizationId,
     inbox_id: &InboxId,
 ) -> Result<bool, StoreError> {
+    // Sibling of the same check in `get`, written independently here rather than assumed to
+    // follow from it: the previous dispatch's fifth review round found exactly this asymmetry —
+    // `get` guarded, `delete` not — surviving a mutation with the suite green.
+    if has_forbidden_byte(inbox_id.as_str()) {
+        return Ok(false);
+    }
     let normalized = inbox_id.normalized();
     let result = sqlx::query("DELETE FROM inboxes WHERE organization_id = $1 AND inbox_id = $2")
         .bind(organization_id.as_str())

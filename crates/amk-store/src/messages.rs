@@ -8,7 +8,7 @@
 //! filtering a fetched row in Rust — see the crate root docs for why that leaks.
 
 use amk_core::scope::ScopeFilter;
-use amk_types::ids::{InboxId, MessageId, OrganizationId, PodId, ThreadId};
+use amk_types::ids::{has_forbidden_byte, InboxId, MessageId, OrganizationId, PodId, ThreadId};
 use amk_types::message::{Attachment, Message, MessageItem};
 use amk_types::Timestamp;
 use chrono::{DateTime, Utc};
@@ -171,6 +171,19 @@ pub async fn get(
     message_id: &MessageId,
     excluded_labels: &[&str],
 ) -> Result<Option<Message>, StoreError> {
+    // Neither a NUL-bearing `inbox_id`/`message_id` parameter nor a NUL-bearing
+    // `filter.inbox_id()` pin can ever name a real row (Postgres `text` cannot hold one), so this
+    // is not-found by definition — never the `StoreError::Database` a bound `%00` would otherwise
+    // raise at parameter encoding (SQLSTATE 22021). All three are checked independently: this
+    // function binds all three, and a guard on only one would leave the others open.
+    if has_forbidden_byte(inbox_id.as_str())
+        || has_forbidden_byte(message_id.as_str())
+        || filter
+            .inbox_id()
+            .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
+        return Ok(None);
+    }
     let normalized_inbox = inbox_id.normalized();
     let excluded: Vec<&str> = excluded_labels.to_vec();
     let row = sqlx::query(GET_SQL)
@@ -249,6 +262,18 @@ pub async fn list(
     // return it directly rather than let `fetch_limit` become 1 and `items.last()` become `None`
     // while `has_more` is still true (see `threads::list`'s identical guard).
     if query.limit == 0 {
+        return Ok(Page { items: Vec::new(), next: None });
+    }
+    // `filter.inbox_id()` is bound below as this query's own scope pin. `InboxId::new` is
+    // infallible, so nothing in this crate can assume every `ScopeFilter` a caller hands it was
+    // itself built from a validated `inbox_id` — a NUL-bearing pin can never match a real row
+    // (Postgres `text` cannot hold one), so an empty page is the correct answer, not the database
+    // error a bound `%00` would otherwise raise at parameter encoding (SQLSTATE 22021). Sibling of
+    // the identical guard in `threads::list`, on the same bound value.
+    if filter
+        .inbox_id()
+        .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
         return Ok(Page { items: Vec::new(), next: None });
     }
     let sql = match query.direction {

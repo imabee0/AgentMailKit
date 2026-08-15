@@ -1,6 +1,6 @@
 //! Pods: the mid-tier scope under an organization.
 
-use amk_types::ids::{OrganizationId, PodId};
+use amk_types::ids::{has_forbidden_byte, OrganizationId, PodId};
 use amk_types::pod::Pod;
 use amk_types::Timestamp;
 use chrono::{DateTime, Utc};
@@ -33,6 +33,13 @@ fn row_to_pod(row: &PgRow) -> Result<Pod, StoreError> {
 /// check-then-insert — so replaying the same pair returns the original row rather than a
 /// duplicate, even under concurrent replay.
 pub async fn create(pool: &PgPool, new: NewPod) -> Result<Pod, StoreError> {
+    // Sibling of the identical guard in `inboxes::create`: `client_id` is a free-form
+    // caller-supplied idempotency key bound straight into the `INSERT`, and a NUL byte in it
+    // would otherwise fail at parameter encoding (SQLSTATE 22021) as a raw `StoreError::Database`
+    // rather than this clear, typed rejection.
+    if new.client_id.as_deref().is_some_and(has_forbidden_byte) {
+        return Err(StoreError::InvalidValue("client_id"));
+    }
     let row = sqlx::query(
         "INSERT INTO pods (pod_id, organization_id, client_id, name) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (organization_id, client_id) WHERE client_id IS NOT NULL DO NOTHING \

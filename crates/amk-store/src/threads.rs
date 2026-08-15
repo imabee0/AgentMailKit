@@ -17,7 +17,7 @@
 
 use amk_core::labels::{redact_thread, LabelAccess, ThreadRedaction};
 use amk_core::scope::ScopeFilter;
-use amk_types::ids::{InboxId, MessageId, OrganizationId, PodId, ThreadId};
+use amk_types::ids::{has_forbidden_byte, InboxId, MessageId, OrganizationId, PodId, ThreadId};
 use amk_types::thread::{Thread, ThreadItem};
 use amk_types::Timestamp;
 use chrono::{DateTime, Utc};
@@ -140,6 +140,17 @@ pub async fn get_with_messages(
     thread_id: ThreadId,
     access: &LabelAccess<'_>,
 ) -> Result<Option<Thread>, StoreError> {
+    // `thread_id` is a UUID and cannot carry a NUL. `filter.inbox_id()` is this function's only
+    // free-text bound value (both queries below bind it), and `InboxId::new` is infallible, so a
+    // NUL-bearing pin can reach here regardless of caller discipline. It can never match a real
+    // row, so not-found is the correct answer, not the `StoreError::Database` a bound `%00` would
+    // otherwise raise at parameter encoding (SQLSTATE 22021).
+    if filter
+        .inbox_id()
+        .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
+        return Ok(None);
+    }
     let Some(item_row) = sqlx::query(GET_ITEM_SQL)
         .bind(filter.organization_id().as_str())
         .bind(filter.pod_id().map(|p| p.0))
@@ -215,6 +226,16 @@ pub async fn list(
     // on, so return it directly rather than let `items.last()` become `None` while `has_more` is
     // still true.
     if query.limit == 0 {
+        return Ok(Page { items: Vec::new(), next: None });
+    }
+    // See the identical guard in `messages::list`, on the same bound value: `filter.inbox_id()`
+    // is this query's scope pin, `InboxId::new` is infallible, and a NUL-bearing pin can never
+    // match a real row, so an empty page is correct — not the database error a bound `%00` would
+    // otherwise raise at parameter encoding (SQLSTATE 22021).
+    if filter
+        .inbox_id()
+        .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
         return Ok(Page { items: Vec::new(), next: None });
     }
     let sql = match query.direction {
