@@ -10,7 +10,10 @@ description = "Persistence: Postgres via sqlx, migrations, blob store, full-text
 [dependencies]
 amk-types = { path = "../amk-types" }
 amk-core = { path = "../amk-core" }
-sqlx.workspace = true
+# `macros` adds only the `sqlx::migrate!` compile-time embed used by src/pool.rs — this crate
+# uses runtime `sqlx::query()` everywhere else (never `query!`/`query_as!`), specifically so the
+# crate keeps building with no database present and no .sqlx offline cache to commit.
+sqlx = { workspace = true, features = ["macros"] }
 thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
