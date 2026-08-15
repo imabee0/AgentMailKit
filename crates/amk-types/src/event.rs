@@ -40,6 +40,46 @@ pub enum EventType {
 }
 
 impl EventType {
+    /// Every event type, exhaustively.
+    ///
+    /// Exists so downstream crates iterate *this* rather than a hand-copied array of their own.
+    /// `amk-core` kept one, and its "totality" test iterated the copy — so when a reviewer added a
+    /// variant in a sandbox, the test passed while the new event fell through a `_ => None` arm and
+    /// became subscribable by a credential holding no label permission. A tripwire that iterates
+    /// the thing it is meant to catch drifting cannot fire.
+    ///
+    /// [`EventType::ordinal`] is wildcard-free, so adding a variant fails to COMPILE until it is
+    /// listed here too. A runtime length check could not manage that: the array and the enum would
+    /// both have to be edited for it to notice, which is the edit it is guarding.
+    pub const ALL: [EventType; 10] = [
+        EventType::MessageReceived,
+        EventType::MessageReceivedSpam,
+        EventType::MessageReceivedBlocked,
+        EventType::MessageReceivedUnauthenticated,
+        EventType::MessageSent,
+        EventType::MessageDelivered,
+        EventType::MessageBounced,
+        EventType::MessageComplained,
+        EventType::MessageRejected,
+        EventType::DomainVerified,
+    ];
+
+    /// This variant's index in [`EventType::ALL`]. Wildcard-free on purpose — see `ALL`.
+    pub const fn ordinal(self) -> usize {
+        match self {
+            EventType::MessageReceived => 0,
+            EventType::MessageReceivedSpam => 1,
+            EventType::MessageReceivedBlocked => 2,
+            EventType::MessageReceivedUnauthenticated => 3,
+            EventType::MessageSent => 4,
+            EventType::MessageDelivered => 5,
+            EventType::MessageBounced => 6,
+            EventType::MessageComplained => 7,
+            EventType::MessageRejected => 8,
+            EventType::DomainVerified => 9,
+        }
+    }
+
     /// The restricted receive variants require the matching label-read permission and replace
     /// `message.received` rather than duplicating it.
     pub fn is_restricted_receive(self) -> bool {
@@ -199,6 +239,18 @@ impl Event {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn all_names_every_variant_exactly_once() {
+        use super::EventType;
+        // ordinal() is the compile-time half: a new variant breaks the build until it is listed.
+        // This is the runtime half — that ALL's ORDER matches those ordinals, so a duplicated entry
+        // cannot mask an omission while keeping the length at 10 and defeating a length check.
+        for (i, ev) in EventType::ALL.into_iter().enumerate() {
+            assert_eq!(ev.ordinal(), i, "ALL[{i}] is out of order or duplicated");
+        }
+        assert_eq!(EventType::ALL.len(), 10);
+    }
+
     use super::*;
 
     /// Verbatim `message.complained` capture (fixture 17) — the Outlook JMRP complaint.

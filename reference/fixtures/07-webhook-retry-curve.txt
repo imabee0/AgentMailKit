@@ -3,16 +3,17 @@
 # Question: does AgentMail OVERRIDE the Svix default retry schedule?
 # Svix OSS default gaps between consecutive attempts: 5s, 5m, 30m, 2h, 5h, 10h, 10h (immediate first attempt).
 # Each svix-id below is ONE event's own retry chain; deltas are gaps between CONSECUTIVE attempts of THAT chain.
-# total attempts across all chains: 20 ; distinct events (svix-ids): 4
+# total attempts across all chains: 22 ; distinct events (svix-ids): 4
 #   [IN-FLIGHT — full curve needs ~T+20h to capture the two 10h retries]
 
-## event msg_3HwIMgrDhRnHtUDw6GAIE2nWCtj  (5 attempts)
+## event msg_3HwIMgrDhRnHtUDw6GAIE2nWCtj  (6 attempts)
 #  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
 #   1 | 2026-08-15 05:44:18 | (first attempt) | immediate       | -
 #   2 | 2026-08-15 05:44:23 | 0h00m05s      | 0h00m05s        | ~OK
 #   3 | 2026-08-15 05:50:07 | 0h05m44s      | 0h05m00s        | ~OK
 #   4 | 2026-08-15 06:14:51 | 0h24m44s      | 0h30m00s        | DIFF
 #   5 | 2026-08-15 08:28:35 | 2h13m44s      | 2h00m00s        | ~OK
+#   6 | 2026-08-15 12:49:07 | 4h20m32s      | 5h00m00s        | ~OK
 
 ## event msg_3HwJHmr7xPiDlYaSqjNOQwFEUBT  (5 attempts)
 #  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
@@ -30,13 +31,14 @@
 #   4 | 2026-08-15 06:41:01 | 0h29m15s      | 0h30m00s        | ~OK
 #   5 | 2026-08-15 08:59:52 | 2h18m51s      | 2h00m00s        | DIFF
 
-## event msg_3HwLQPnrB4N72YNkXNeS7A454ox  (5 attempts)
+## event msg_3HwLQPnrB4N72YNkXNeS7A454ox  (6 attempts)
 #  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
 #   1 | 2026-08-15 06:09:28 | (first attempt) | immediate       | -
 #   2 | 2026-08-15 06:09:33 | 0h00m05s      | 0h00m05s        | ~OK
 #   3 | 2026-08-15 06:15:26 | 0h05m53s      | 0h05m00s        | DIFF
 #   4 | 2026-08-15 06:41:32 | 0h26m06s      | 0h30m00s        | ~OK
 #   5 | 2026-08-15 08:42:35 | 2h01m03s      | 2h00m00s        | ~OK
+#   6 | 2026-08-15 12:58:00 | 4h15m25s      | 5h00m00s        | ~OK
 
 # VERDICT (partial until full curve): consecutive gaps compared to the Svix default per event above.
 # If every gap reads ~OK, AgentMail uses the stock Svix schedule (no override).
