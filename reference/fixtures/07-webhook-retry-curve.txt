@@ -1,42 +1,81 @@
-# Fixture 07 — webhook retry curve (A2). Live: AgentMail (Svix) -> webhook.site sink returning HTTP 500.
+# Fixture 07 - webhook retry curve (A2). Live: AgentMail (Svix) -> webhook.site sink returning HTTP 500.
 # Throwaway inbox amk-probe@agentmail.to, webhook ep_3HwIKMKzmbCirmu4p74HOjg3PZq [message.sent -> 500 sink].
 # Question: does AgentMail OVERRIDE the Svix default retry schedule?
-# Svix OSS default gaps between consecutive attempts: 5s, 5m, 30m, 2h, 5h, 10h, 10h (immediate first attempt).
-# Each svix-id below is ONE event's own retry chain; deltas are gaps between CONSECUTIVE attempts of THAT chain.
+# Svix OSS default gaps between consecutive attempts: 5s, 5m, 30m, 2h, 5h, 10h, 10h (immediate first).
+#   [SPEC:svix] svix-server config.default.toml retry_schedule = [5,300,1800,7200,18000,36000,36000]
+# Each svix-id below is ONE event's own retry chain; gaps are between CONSECUTIVE attempts of THAT chain.
 # total attempts across all chains: 20 ; distinct events (svix-ids): 4
-#   [IN-FLIGHT — full curve needs ~T+20h to capture the two 10h retries]
+# rendered at: 2026-08-15 12:17:35 UTC
+#
+# MATCH has no TUNED tolerance. Each gap is assigned to whichever stock Svix slot it is
+# nearest in log space; MATCH means that slot is the one for this attempt's position. An
+# earlier revision used a +/-25% band chosen after seeing the data -- a free parameter that
+# let the analyst pick the answer. That is gone, and the ratio range below is descriptive
+# only. But nearest-slot is not literally parameter-free either, and saying so would be its
+# own overclaim: slot spacing sets an implicit acceptance window (around the 1800s slot it
+# runs -59%/+100%, wider than the band it replaced). What carries the verdict is that the
+# assignment is not close and does not depend on the metric -- an independent audit
+# recomputed all 16 gaps under log distance, linear distance and relative error, and all
+# three agree unanimously, smallest margin 1.9x over the runner-up slot.
 
 ## event msg_3HwIMgrDhRnHtUDw6GAIE2nWCtj  (5 attempts)
-#  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
-#   1 | 2026-08-15 05:44:18 | (first attempt) | immediate       | -
-#   2 | 2026-08-15 05:44:23 | 0h00m05s      | 0h00m05s        | ~OK
-#   3 | 2026-08-15 05:50:07 | 0h05m44s      | 0h05m00s        | ~OK
-#   4 | 2026-08-15 06:14:51 | 0h24m44s      | 0h30m00s        | DIFF
-#   5 | 2026-08-15 08:28:35 | 2h13m44s      | 2h00m00s        | ~OK
+#  n | created_at (UTC)     | gap_from_prev | expected(svix) | ratio | nearest | margin | match
+#   1 | 2026-08-15 05:44:18 | (first attempt) | immediate      |   -   |    -    |    -   | -
+#   2 | 2026-08-15 05:44:23 | 0h00m05s      | 0h00m05s       |  1.00 | 0h00m05s |  60.0x | OK
+#   3 | 2026-08-15 05:50:07 | 0h05m44s      | 0h05m00s       |  1.15 | 0h05m00s |   4.6x | OK
+#   4 | 2026-08-15 06:14:51 | 0h24m44s      | 0h30m00s       |  0.82 | 0h30m00s |   4.0x | OK
+#   5 | 2026-08-15 08:28:35 | 2h13m44s      | 2h00m00s       |  1.11 | 2h00m00s |   2.0x | OK
 
 ## event msg_3HwJHmr7xPiDlYaSqjNOQwFEUBT  (5 attempts)
-#  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
-#   1 | 2026-08-15 05:51:52 | (first attempt) | immediate       | -
-#   2 | 2026-08-15 05:51:58 | 0h00m06s      | 0h00m05s        | ~OK
-#   3 | 2026-08-15 05:57:51 | 0h05m53s      | 0h05m00s        | DIFF
-#   4 | 2026-08-15 06:31:47 | 0h33m56s      | 0h30m00s        | ~OK
-#   5 | 2026-08-15 08:18:40 | 1h46m53s      | 2h00m00s        | ~OK
+#  n | created_at (UTC)     | gap_from_prev | expected(svix) | ratio | nearest | margin | match
+#   1 | 2026-08-15 05:51:52 | (first attempt) | immediate      |   -   |    -    |    -   | -
+#   2 | 2026-08-15 05:51:58 | 0h00m06s      | 0h00m05s       |  1.20 | 0h00m05s |  41.7x | OK
+#   3 | 2026-08-15 05:57:51 | 0h05m53s      | 0h05m00s       |  1.18 | 0h05m00s |   4.3x | OK
+#   4 | 2026-08-15 06:31:47 | 0h33m56s      | 0h30m00s       |  1.13 | 0h30m00s |   3.1x | OK
+#   5 | 2026-08-15 08:18:40 | 1h46m53s      | 2h00m00s       |  0.89 | 2h00m00s |   2.5x | OK
 
 ## event msg_3HwLBWOzmBXya8xa9bPW83gu3d1  (5 attempts)
-#  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
-#   1 | 2026-08-15 06:07:29 | (first attempt) | immediate       | -
-#   2 | 2026-08-15 06:07:34 | 0h00m05s      | 0h00m05s        | ~OK
-#   3 | 2026-08-15 06:11:46 | 0h04m12s      | 0h05m00s        | DIFF
-#   4 | 2026-08-15 06:41:01 | 0h29m15s      | 0h30m00s        | ~OK
-#   5 | 2026-08-15 08:59:52 | 2h18m51s      | 2h00m00s        | DIFF
+#  n | created_at (UTC)     | gap_from_prev | expected(svix) | ratio | nearest | margin | match
+#   1 | 2026-08-15 06:07:29 | (first attempt) | immediate      |   -   |    -    |    -   | -
+#   2 | 2026-08-15 06:07:34 | 0h00m05s      | 0h00m05s       |  1.00 | 0h00m05s |  60.0x | OK
+#   3 | 2026-08-15 06:11:46 | 0h04m12s      | 0h05m00s       |  0.84 | 0h05m00s |   6.0x | OK
+#   4 | 2026-08-15 06:41:01 | 0h29m15s      | 0h30m00s       |  0.97 | 0h30m00s |   4.0x | OK
+#   5 | 2026-08-15 08:59:52 | 2h18m51s      | 2h00m00s       |  1.16 | 2h00m00s |   1.9x | OK
 
 ## event msg_3HwLQPnrB4N72YNkXNeS7A454ox  (5 attempts)
-#  n | created_at (UTC)     | gap_from_prev | expected(svix) | match
-#   1 | 2026-08-15 06:09:28 | (first attempt) | immediate       | -
-#   2 | 2026-08-15 06:09:33 | 0h00m05s      | 0h00m05s        | ~OK
-#   3 | 2026-08-15 06:15:26 | 0h05m53s      | 0h05m00s        | DIFF
-#   4 | 2026-08-15 06:41:32 | 0h26m06s      | 0h30m00s        | ~OK
-#   5 | 2026-08-15 08:42:35 | 2h01m03s      | 2h00m00s        | ~OK
+#  n | created_at (UTC)     | gap_from_prev | expected(svix) | ratio | nearest | margin | match
+#   1 | 2026-08-15 06:09:28 | (first attempt) | immediate      |   -   |    -    |    -   | -
+#   2 | 2026-08-15 06:09:33 | 0h00m05s      | 0h00m05s       |  1.00 | 0h00m05s |  60.0x | OK
+#   3 | 2026-08-15 06:15:26 | 0h05m53s      | 0h05m00s       |  1.18 | 0h05m00s |   4.3x | OK
+#   4 | 2026-08-15 06:41:32 | 0h26m06s      | 0h30m00s       |  0.87 | 0h30m00s |   4.0x | OK
+#   5 | 2026-08-15 08:42:35 | 2h01m03s      | 2h00m00s       |  1.01 | 2h00m00s |   2.5x | OK
 
-# VERDICT (partial until full curve): consecutive gaps compared to the Svix default per event above.
-# If every gap reads ~OK, AgentMail uses the stock Svix schedule (no override).
+# ============================================================================
+# Gaps assigned to their expected slot: 16/16  (mismatches: 0)
+# Smallest margin over the runner-up slot: 1.9x — no assignment is close.
+# Descriptive only: ratio range 0.82x - 1.20x (worst deviation 20%). Deviations fall on BOTH sides of 1.0 with
+# no directional bias, which is what scatter around a fixed target looks like rather than
+# drift toward a different schedule. (Nothing in reference/ documents Svix's jitter
+# magnitude, so 'this is jitter' is an inference from the spread, not a sourced fact.)
+#
+# VERDICT (attempts 1-5): AgentMail uses the STOCK Svix retry schedule for the
+# observed prefix -- immediate, 5s, 5m, 30m, 2h. NO OVERRIDE of the early curve.
+# Independent audit fit the data against alternative schedules an implementer might
+# plausibly configure (AWS-style 5/30/180/1080, naive doubling 5/10/20/40): stock scores
+# 0.254 by log-squared error, those score 57.9 and 236.8 -- two to three orders of
+# magnitude worse. Per-position means sit within 5-9% of stock.
+#
+# ASSUMPTION MADE EXPLICIT: [SPEC:svix] is svix-server's OSS config.default.toml.
+# AgentMail most likely runs Svix Cloud, and nothing in reference/ establishes that
+# Cloud's default schedule equals the OSS one. What is observed is 'matches the
+# documented OSS default'; 'AgentMail set no override' is one step beyond that.
+# The first attempt being immediate is not shown by the table above (it has no prior
+# gap); it was verified separately against each event's own send.timestamp -- 0.5-1.3s
+# from send to first delivery across all four chains.
+#
+# STILL OPEN (this is a real question, not confirmation): whether AgentMail TRUNCATES the
+# schedule. Stock Svix continues 5h, 10h, 10h for 8 attempts total, then marks the message
+# Failed and fires message.attempt.exhausted. If AgentMail stops at 5 attempts instead, our
+# engine doing 8 would diverge on exhausted-event timing and on the 5-day auto-disable rule.
+# Settles when a 6th attempt appears (~5h after attempt 5) or provably does not.
+# Chains reach attempt 5 at: 08:28, 08:18, 08:59, 08:42 UTC -> 6th attempt due ~13:18-13:59 UTC.

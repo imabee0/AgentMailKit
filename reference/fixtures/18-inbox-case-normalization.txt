@@ -1,0 +1,60 @@
+# Fixture 18 — inbox_id case handling. Live api.agentmail.to, 2026-08-15 12:15Z.
+# Throwaway pod 9047724b-2879-416b-8424-82ef81ab9397.
+#
+# WHY: amk-core's scope matching compared inbox ids EXACTLY, with a test named
+# `inbox_matching_is_exact_and_does_not_invent_normalization` asserting that as contract.
+# The plan's Testing section had left the question open ("is Foo@x.com the same inbox as
+# foo@x.com? decide, then test"). It was escalated rather than guessed. This probe answers it,
+# and the answer is the opposite of what the code assumed.
+
+## 1. CREATE with a mixed-case username
+POST /v0/pods/{pod}/inboxes  {"username":"AmkCase"}
+-> 200
+{"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"9047724b-2879-416b-8424-82ef81ab9397","inbox_id":"amkcase@agentmail.to","email":"amkcase@agentmail.to","display_name":"AgentMail","updated_at":"2026-08-15T12:15:48.646Z","created_at":"2026-08-15T12:15:48.646Z"}
+
+=> THE USERNAME IS LOWERCASED ON CREATE. "AmkCase" was requested; "amkcase@agentmail.to" was
+   stored and returned, in BOTH inbox_id and email. A stored inbox_id is therefore always
+   lowercase, and echoing back the caller's casing would be a conformance divergence.
+
+## 2/3. LOOKUP is case-insensitive
+GET /v0/inboxes/amkcase%40agentmail.to  -> 200
+GET /v0/inboxes/AMKCASE%40agentmail.to  -> 200
+GET /v0/inboxes/AmKcAsE%40agentmail.to  -> 200
+
+=> All three resolve to the same inbox. Case folding happens on the way in, not only at create.
+
+## CONSEQUENCE FOR amk-core (supersedes the exact-match assumption)
+- Normalise an inbound inbox_id to lowercase BEFORE scope matching, storage lookup, or ACL
+  comparison. Exact comparison is a real defect, not a conservative choice: a path parameter
+  `Victim@agentmail.to` would miss an exact-match rule that upstream would have matched, so the
+  two implementations diverge on precisely the input an attacker controls.
+- The existing test `inbox_matching_is_exact_and_does_not_invent_normalization` asserts the
+  opposite of observed behaviour and must be inverted, not deleted.
+- Not established here: whether the LOCAL PART is folded for inbound SMTP delivery (RFC 5321
+  says the local part is case-sensitive and only the domain is not). This probe covers the API
+  surface only. Ingest routing is a separate question for P2.
+
+## 4. INCIDENTAL FINDING — limit_exceeded shape, and the limit is ORG-wide
+POST /v0/pods/{pod}/inboxes  {"username":"amkcase"}
+-> 403
+{"name":"LimitExceededError","code":"limit_exceeded","message":"Inbox limit exceeded",
+ "fix":"Your plan's inbox limit is 3. Delete an existing inbox, or upgrade at <url> ...",
+ "resource":"inbox","limit":3,"upgrade_url":"<url>",
+ "docs":"https://docs.agentmail.to/errors#limit_exceeded"}
+
+=> `limit_exceeded` carries per-code extras `resource`, `limit`, `upgrade_url` — a third
+   per-code extra alongside already_exists' `suggestions[]` and validation_error's `errors[]`,
+   confirming the envelope's extras are per-code rather than a fixed set. Status 403 matches
+   our ErrorCode table.
+=> The pod held only 2 inboxes when this fired, while amk-probe2 lives in a DIFFERENT pod, so
+   the quota is counted ORGANIZATION-wide, not per pod.
+=> AgentMailKit emits NO billing surface: `upgrade_url` is not reproduced, and the `fix` string
+   does not name a plan or a price. `resource` and `limit` are structural and are kept, since a
+   self-hosted deployment can still impose a configured cap. Recorded here so the omission is a
+   decision on record rather than an oversight.
+=> Because step 4 was refused by quota, whether two case-variant usernames COLLIDE was not
+   directly observed — but step 1 makes it moot: both normalise to the same id, so a collision
+   is entailed.
+
+## Teardown
+Inbox amkcase@agentmail.to was created by this probe and is listed in 00-probe-teardown.txt.

@@ -165,6 +165,31 @@ uuid_id! {
     AttachmentId
 }
 
+impl InboxId {
+    /// The form used for every comparison: ASCII-lowercased.
+    ///
+    /// Observed (`reference/fixtures/18-inbox-case-normalization.txt`): AgentMail lowercases the
+    /// username at creation — `{"username":"AmkCase"}` is stored and returned as
+    /// `amkcase@agentmail.to` — and resolves lookups case-insensitively, with `AMKCASE@…` and
+    /// `AmKcAsE@…` both returning 200.
+    ///
+    /// So exact comparison is a defect, not a conservative default: a path parameter
+    /// `Victim@agentmail.to` would miss an exact-match scope rule that upstream would have
+    /// matched, and the divergence lands on exactly the input a caller controls.
+    ///
+    /// ASCII-only folding on purpose. Unicode `to_lowercase` would fold characters an address
+    /// never contains (domains are punycode by the time they reach us) and can equate distinct
+    /// strings under some locales' rules — a source of false equality in a security comparison.
+    pub fn normalized(&self) -> Self {
+        Self(self.0.to_ascii_lowercase())
+    }
+
+    /// Case-insensitive equality, matching how the live API resolves an inbox.
+    pub fn eq_normalized(&self, other: &Self) -> bool {
+        self.0.eq_ignore_ascii_case(&other.0)
+    }
+}
+
 impl MessageId {
     /// True when the value is wrapped in angle brackets, as every observed id is.
     pub fn is_bracketed(&self) -> bool {
@@ -223,6 +248,36 @@ mod tests {
         assert_eq!(MessageId::bracketed(bare).as_str(), "<abc@example.com>");
         assert_eq!(MessageId::bracketed("<abc@example.com>").as_str(), "<abc@example.com>");
         assert_eq!(MessageId::new(OBSERVED).unbracketed(), &OBSERVED[1..OBSERVED.len() - 1]);
+    }
+
+    #[test]
+    fn inbox_ids_compare_case_insensitively_per_fixture_18() {
+        // Live: {"username":"AmkCase"} was stored and returned as "amkcase@agentmail.to", and
+        // GET resolved AMKCASE@… and AmKcAsE@… with 200. Exact comparison would miss exactly the
+        // input a caller controls, so the scope layer compares normalized forms.
+        let stored = InboxId::new("amkcase@agentmail.to");
+        for variant in [
+            "amkcase@agentmail.to",
+            "AMKCASE@agentmail.to",
+            "AmKcAsE@agentmail.to",
+        ] {
+            let incoming = InboxId::new(variant);
+            assert!(stored.eq_normalized(&incoming), "{variant} must resolve to the same inbox");
+            assert_eq!(incoming.normalized(), stored, "{variant} must normalize to the stored id");
+        }
+        // Different inboxes stay different — folding case must not merge distinct addresses.
+        assert!(!stored.eq_normalized(&InboxId::new("amkcase2@agentmail.to")));
+        assert!(!stored.eq_normalized(&InboxId::new("amkcase@other.to")));
+    }
+
+    #[test]
+    fn normalization_is_ascii_only() {
+        // Unicode folding can equate strings that are distinct addresses under some locales'
+        // rules; a false equality here is a cross-inbox read. Turkish dotted capital I is the
+        // classic case: Unicode lowercases it to "i̇" (i + combining dot), ASCII leaves it alone.
+        let turkish = InboxId::new("İ@example.com");
+        assert_eq!(turkish.normalized().as_str(), "İ@example.com");
+        assert!(!turkish.eq_normalized(&InboxId::new("i@example.com")));
     }
 
     #[test]

@@ -232,6 +232,43 @@ fn validation_issue_code_is_a_separate_vocabulary_fixture_05() {
     );
 }
 
+/// Fixture 18 settled a question the plan had left open ("is `Foo@x.com` the same inbox as
+/// `foo@x.com`? decide, then test") — and the answer contradicted what the first implementation
+/// assumed. This reads the capture so the decision stays tied to the observation.
+#[test]
+fn inbox_case_normalization_matches_fixture_18() {
+    let text = fixture("18-inbox-case-normalization.txt");
+
+    // The create response is verbatim: a mixed-case username came back lowercased.
+    let created = verbatim_json_lines(&text)
+        .into_iter()
+        .find(|v| v.get("inbox_id").is_some() && v.get("email").is_some())
+        .expect("18 no longer contains the verbatim create response");
+    let stored = created["inbox_id"].as_str().unwrap();
+    assert_eq!(stored, stored.to_ascii_lowercase(), "the stored id must be lowercase");
+    assert_eq!(created["email"].as_str().unwrap(), stored, "email and inbox_id agree");
+    assert!(
+        text.contains("\"username\":\"AmkCase\""),
+        "18 must still show that the REQUESTED username was mixed-case"
+    );
+
+    // Our type must resolve every case variant the fixture records as 200 to that stored id.
+    let stored_id = amk_types::InboxId::new(stored);
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("GET /v0/inboxes/") {
+            if !rest.contains("-> 200") {
+                continue;
+            }
+            let seg = rest.split_whitespace().next().unwrap();
+            let decoded = amk_types::InboxId::from_path_segment(seg).expect("decodes");
+            assert!(
+                stored_id.eq_normalized(&decoded),
+                "fixture records {seg} returning 200, so it must resolve to {stored}"
+            );
+        }
+    }
+}
+
 #[test]
 fn cursor_matches_fixture_04_keyset() {
     let text = fixture("04-pagination.http");
@@ -288,6 +325,7 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         "03-id-formats.http",
         "04-pagination.http",
         "05-error-catalog.http",
+        "18-inbox-case-normalization.txt",
     ];
     // Deferred WITH a reason and the phase that closes it. Not a parking lot: each entry names the
     // crate that will assert it, and this list may only shrink.
