@@ -18,6 +18,7 @@
 //! * Optional members are omitted entirely when absent, never `null` or `""`.
 //! * Timestamps are RFC 3339 with **exactly three** fractional digits and a `Z` suffix.
 
+pub mod api_key;
 pub mod error;
 pub mod event;
 pub mod ids;
@@ -27,6 +28,7 @@ pub mod page;
 pub mod pod;
 pub mod thread;
 
+pub use api_key::{ApiKeyPermissions, KeyGrants};
 pub use error::{ErrorCode, ErrorEnvelope, GatewayError, ValidationIssue};
 pub use event::{Delivery, Event, EventType, Send};
 pub use ids::{

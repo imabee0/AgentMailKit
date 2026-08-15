@@ -34,6 +34,10 @@ pub mod labels {
     pub const SENT: &str = "sent";
     pub const UNREAD: &str = "unread";
     pub const SCHEDULED: &str = "scheduled";
+    /// A delivery failure recorded by the pipeline. Named as a system label by the spec sentence
+    /// quoted on [`KNOWN_SYSTEM`]; it was missing here until a reviewer caught that a client could
+    /// therefore forge or erase a bounce verdict through a label PATCH.
+    pub const BOUNCED: &str = "bounced";
     // Restricted:
     pub const SPAM: &str = "spam";
     pub const BLOCKED: &str = "blocked";
@@ -41,6 +45,15 @@ pub mod labels {
     pub const TRASH: &str = "trash";
 
     pub const RESTRICTED: [&str; 4] = [SPAM, BLOCKED, UNAUTHENTICATED, TRASH];
+
+    /// System labels we can name from the spec — **known-incomplete by construction**.
+    ///
+    /// `openapi.json` says: *"Cannot add or remove system labels (sent, received, bounced,
+    /// etc.)."* That `etc.` means no hand-rolled list can be exhaustive, so this is a floor, not
+    /// the rule. Policy — which endpoints reject which labels — belongs to amk-core; this constant
+    /// only records what the spec actually names, and an enumeration presented as complete would
+    /// be a claim the evidence does not support.
+    pub const KNOWN_SYSTEM: [&str; 3] = [SENT, RECEIVED, BOUNCED];
 
     pub fn is_restricted(label: &str) -> bool {
         RESTRICTED.contains(&label)
