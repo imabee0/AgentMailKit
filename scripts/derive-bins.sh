@@ -5,8 +5,12 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 echo "== 1. what amk-http exposes for a server to mount =="
-grep -n "^pub fn\|^pub async fn\|^pub struct\|^pub enum" crates/amk-http/src/lib.rs \
-  | sed 's/^/  lib.rs:/'
+# `^pub fn` alone misses constructors: an inherent `impl` indents its methods, so `AppState::new`
+# — which `amk-cli` calls — was invisible to this section, and a review lens had to go read
+# amk-http itself to confirm it was not an invented shape. Same blind spot section 2 had for
+# `migration_status`, one section over and found later. Match indented `pub fn` too.
+grep -n "^pub fn\|^pub async fn\|^pub struct\|^pub enum\|^    pub fn\|^    pub async fn" \
+  crates/amk-http/src/lib.rs | sed 's/^/  lib.rs:/'
 echo "  --- AppState fields ---"
 awk '/pub struct AppState/,/^}/' crates/amk-http/src/lib.rs | sed 's/^/  /'
 echo "  --- config surface ---"
@@ -38,10 +42,13 @@ done
 
 echo
 echo "== 4. binaries that exist today =="
-if find crates -name main.rs -print -quit | grep -q .; then
-  find crates -name main.rs | sed 's/^/  /'
+# Looked for `main.rs` only, which was right when the answer was "none" and wrong the moment one
+# existed: cargo's `src/bin/<name>.rs` convention needs no `main.rs`, so the two binaries this
+# section exists to track would have kept reporting as absent. Match both layouts.
+if find crates \( -name main.rs -o -path '*/src/bin/*.rs' \) -print -quit | grep -q .; then
+  find crates \( -name main.rs -o -path '*/src/bin/*.rs' \) | sort | sed 's/^/  /'
 else
-  echo "  (none — no main.rs anywhere)"
+  echo "  (none — no main.rs and no src/bin/*.rs anywhere)"
 fi
 grep -c '\[\[bin\]\]' crates/*/Cargo.toml 2>/dev/null | sed 's/^/  /' || true
 

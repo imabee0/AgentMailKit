@@ -34,6 +34,7 @@ dispatch, not a report of it.
 ```
 == 1. what amk-http exposes for a server to mount ==
   lib.rs:37:pub struct AppState {
+  lib.rs:43:    pub fn new(pool: PgPool, config: AppConfig) -> Self {
   lib.rs:52:pub fn router(state: AppState) -> Router {
   --- AppState fields ---
   pub struct AppState {
@@ -112,7 +113,9 @@ dispatch, not a report of it.
   api_keys.rs: }
 
 == 4. binaries that exist today ==
-  (none — no main.rs anywhere)
+  crates/amk-cli/src/bin/amkd.rs
+  crates/amk-cli/src/bin/amk.rs
+  crates/amk-cli/Cargo.toml:2
   crates/amk-core/Cargo.toml:0
   crates/amk-http/Cargo.toml:0
   crates/amk-store/Cargo.toml:0
@@ -307,6 +310,19 @@ nothing is a server that looks like it is running and is not.
 - No `mail_parser::`/`mail_auth::`/`mail_send::`/`mail_builder::`/`smtp_proto::` type. No JMAP,
   Sieve, RocksDB, or mailbox-role concept.
 - **No SQL in this crate.** All persistence goes through `amk-store`'s public interface.
+  **One carve-out, added after the dispatch rather than before it, which is the defect:** the
+  integration suite's own `CREATE DATABASE` / `DROP DATABASE` in `tests/support/mod.rs`. The rule's
+  purpose is that domain persistence never routes around the crate that owns it; those two
+  statements provision the *container a schema lives in*, before any schema exists for
+  `amk-store`'s interface to act on — neither `connect` nor the migrator can create or drop a
+  database, so no public function could ever have covered it. The need is real: `organizations::exists`
+  asks "is there any organization row at all", so `amk init`'s fresh-database test cannot share the
+  dev database every other suite writes to. The carve-out reaches **DDL provisioning for tests and
+  nothing else** — not the `_sqlx_migrations` ledger, not a row, not a schema object.
+  The implementer resolved this silently instead of escalating, and a review lens caught it. Both
+  halves are worth recording: the resolution was right, and reaching it inside the dispatch was
+  still drift, because a prohibition written without exceptions is one the next reader will apply
+  without them.
 - No new dependency — no `clap`, no `tracing-subscriber` beyond what a workspace pin already
   provides, nothing. If you believe you need one, **STOP and report**.
 - Do not edit `amk-types`, `amk-core`, `amk-store`, `amk-http`, the plan, any contract file, or

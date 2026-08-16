@@ -43,14 +43,25 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0**, 493 tests green on `main`. `amk-types`, `amk-core`, `amk-store` and
-`amk-http` merged and mutation-verified; Register C3 applied to `amk-core::threading`.
+Current phase: **P0**, 546 tests green on `main`. `amk-types`, `amk-core`, `amk-store`, `amk-http`
+and `amk-cli` merged and mutation-verified; Register C3 applied to `amk-core::threading`.
 
-**Next: `.claude/contracts/amk-bins.md`** — `amk` (`init|migrate|doctor`) and `amkd` (`--role api`).
-No binary exists anywhere yet; the plan named them only in prose, which is why P0's SDK gate has
-read PENDING since P0 began. `amk init` is also what makes the org mount work: it mints one UUID
+**P0's SDK gate is MET** — `reference/fixtures/24-p0-gate-sdk-authme.txt` captures the unmodified
+official `agentmail==0.5.9` Python SDK calling `auth.me()` against `amkd --role api` on localhost
+and getting an `Identity` back. It had read PENDING since P0 began, because nothing served HTTP:
+`amk-http` shipped a `router()` and no binary bound it. `amk` (`init|migrate|doctor`) and `amkd`
+(`--role api`) close that. `amk init` is also what makes the org mount work — it mints one UUID
 that is **both** the `organization_id` and the default pod's `pod_id`, the equality `amk-http`
 resolves `POST /v0/inboxes` by (fixture 22).
+
+**Next: the P1 control-plane gate** — Python+Node SDK smoke across the three mounts, plus the first
+dual-target conformance diff (`p1-gate-conformance`, PENDING). Nothing new is written for it; it
+exercises what is already merged.
+
+**Delete your mutation scratch copy when the pass ends.** Seven abandoned workspace copies filled
+the 32G `/tmp` tmpfs and every Bash call in the session started returning exit 1 with no output —
+the tool appends `pwd > /tmp/claude-<pid>-cwd`, so one ENOSPC makes every command look like a
+broken harness. A session restart does not fix it. `df -h /tmp` first when tooling fails absurdly.
 
 **A mutating reviewer works on a private copy, never the dispatch worktree, and never concurrently
 with a reading one.** A test lens mutating in place while two lenses read the same tree produced a
