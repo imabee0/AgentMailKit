@@ -17,7 +17,7 @@ use sqlx::types::Json;
 use sqlx::{PgPool, Row};
 use std::collections::BTreeMap;
 
-use crate::error::StoreError;
+use crate::error::{PageTokenError, StoreError};
 use crate::pagination::{MessageCursor, Page, SortDirection};
 
 /// Every settable field of [`Message`]/[`MessageItem`], for seeding a row. This is a storage
@@ -308,6 +308,32 @@ pub async fn list(
         .is_some_and(|i| has_forbidden_byte(i.as_str()))
     {
         return Ok(Page { items: Vec::new(), next: None });
+    }
+    // The cursor's own `inbox_id`/`message_id` are a second free-text value this function binds
+    // (`cursor_inbox`/`cursor_id` below) with no guarantee they were ever validated:
+    // `MessageCursor::decode` rejects a NUL at that boundary, but `MessageCursor`'s fields are
+    // `pub`, `::new()` is infallible by decision, and `From<(&MessageId, &InboxId, Timestamp)>`
+    // builds one directly — nothing at the type level stops a `MessageCursor` reaching this
+    // function without ever having gone through `decode`.
+    //
+    // Deliberately a *different* answer from the pin guard three lines above, not an
+    // inconsistency: the pin comes from the credential's scope, where a denial must be
+    // indistinguishable from an absent resource, so an empty page is the masking answer scope
+    // denial requires. A page token is not a resource — there is nothing to mask on its behalf —
+    // and a malformed token already has a dedicated error the wire layer knows how to render.
+    // Returning an empty page here instead would silently truncate pagination, which is strictly
+    // worse than a clear rejection.
+    if let Some(c) = &query.cursor {
+        if has_forbidden_byte(c.inbox_id.as_str()) {
+            return Err(StoreError::InvalidPageToken(PageTokenError::ForbiddenByte(
+                "cursor.inbox_id",
+            )));
+        }
+        if has_forbidden_byte(c.message_id.as_str()) {
+            return Err(StoreError::InvalidPageToken(PageTokenError::ForbiddenByte(
+                "cursor.message_id",
+            )));
+        }
     }
     let sql = match query.direction {
         SortDirection::Ascending => LIST_ASC_SQL,

@@ -2923,6 +2923,73 @@ async fn message_list_with_a_nul_byte_in_the_scope_filters_inbox_id_pin_returns_
     }
 }
 
+/// `messages::list`'s cursor: a hand-built `MessageCursor` bypasses `MessageCursor::decode`
+/// entirely — its fields are `pub` and `::new()` is infallible by decision, so nothing at the
+/// type level guarantees every cursor `list` receives went through `decode`. Deliberately a
+/// *different* answer from the pin guard above (see that guard's own comment): a page token is
+/// not a resource, so there is nothing to mask, and a hostile token gets the typed
+/// `PageTokenError` the wire layer already knows how to render rather than an empty page that
+/// would silently truncate pagination. Covers both free-text fields the cursor carries.
+#[tokio::test]
+async fn list_rejects_a_nul_byte_in_a_hand_built_cursor() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let filter = inbox_filter(&org, pod, &inbox);
+    let ts = Utc::now();
+
+    let hostile_inbox = MessageCursor {
+        message_id: MessageId::new("<clean@x>"),
+        inbox_id: InboxId::new("abc\0def@x"),
+        timestamp: ts,
+    };
+    let result = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery {
+            limit: 10,
+            direction: SortDirection::Ascending,
+            cursor: Some(hostile_inbox),
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::InvalidPageToken(PageTokenError::ForbiddenByte("cursor.inbox_id")))
+        ),
+        "a hand-built cursor with a NUL-bearing inbox_id must be a typed error, not an empty page \
+         or a raw database error: {result:?}"
+    );
+
+    let hostile_message_id = MessageCursor {
+        message_id: MessageId::new("<z\0z@x>"),
+        inbox_id: inbox.clone(),
+        timestamp: ts,
+    };
+    let result = messages::list(
+        &pool,
+        &filter,
+        &[],
+        ListMessagesQuery {
+            limit: 10,
+            direction: SortDirection::Ascending,
+            cursor: Some(hostile_message_id),
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::InvalidPageToken(PageTokenError::ForbiddenByte("cursor.message_id")))
+        ),
+        "a hand-built cursor with a NUL-bearing message_id must be a typed error, not an empty \
+         page or a raw database error: {result:?}"
+    );
+}
+
 /// `threads::get_with_messages`, one of the five named call paths: `thread_id` is a UUID and
 /// cannot carry a NUL, so the only free-text value this function binds is the `ScopeFilter`'s own
 /// `inbox_id` pin.
@@ -3093,6 +3160,112 @@ async fn message_insert_rejects_a_nul_byte_in_a_non_first_references_element() {
         matches!(result, Err(StoreError::InvalidValue("references"))),
         "a NUL-bearing references element must be a typed InvalidValue, not a raw database error: \
          {result:?}"
+    );
+}
+
+/// Positive-path counterpart to `message_insert_rejects_a_nul_byte_in_in_reply_to`: a *clean*
+/// `in_reply_to` must not be rejected, and the stored value must round-trip through
+/// `messages::get` byte-for-byte unchanged. This is the coverage an over-broad guard needs to be
+/// caught by: every other test touching this field passes a *hostile* value and expects `Err`, so
+/// widening `.is_some_and(pred)` to `.is_some()` — rejecting every reply, clean ones included —
+/// would have left the whole suite green without this test.
+#[tokio::test]
+async fn message_insert_with_a_clean_in_reply_to_succeeds_and_round_trips() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let mut new = new_message(
+        &inbox,
+        &org,
+        pod,
+        thread_id,
+        "<reply@x>",
+        &["sent"],
+        "2026-08-15T05:00:01.000Z",
+    );
+    new.in_reply_to = Some(MessageId::new("<parent@x>"));
+
+    messages::insert(&pool, new)
+        .await
+        .expect("a clean in_reply_to must not be rejected");
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let fetched = messages::get(&pool, &filter, &inbox, &MessageId::new("<reply@x>"), &[])
+        .await
+        .unwrap()
+        .expect("must round trip");
+    assert_eq!(
+        fetched.item.in_reply_to,
+        Some(MessageId::new("<parent@x>")),
+        "the clean in_reply_to must be stored and read back unchanged, not stripped or nulled"
+    );
+}
+
+/// Positive-path counterpart to `message_insert_rejects_a_nul_byte_in_a_non_first_references_element`
+/// — same reasoning as the `in_reply_to` test above, for the sibling field.
+#[tokio::test]
+async fn message_insert_with_clean_references_succeeds_and_round_trips() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let mut new = new_message(
+        &inbox,
+        &org,
+        pod,
+        thread_id,
+        "<reply2@x>",
+        &["sent"],
+        "2026-08-15T05:00:01.000Z",
+    );
+    new.references = Some(vec![MessageId::new("<a@x>"), MessageId::new("<b@x>")]);
+
+    messages::insert(&pool, new)
+        .await
+        .expect("clean references must not be rejected");
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    let fetched = messages::get(&pool, &filter, &inbox, &MessageId::new("<reply2@x>"), &[])
+        .await
+        .unwrap()
+        .expect("must round trip");
+    assert_eq!(
+        fetched.item.references,
+        Some(vec![MessageId::new("<a@x>"), MessageId::new("<b@x>")]),
+        "the clean references list must be stored and read back unchanged, not stripped or nulled"
     );
 }
 
