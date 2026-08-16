@@ -791,6 +791,30 @@ mod tests {
         );
     }
 
+    /// Sibling of the pod-vs-pod test above, at the inbox mount instead: both `Inbox(a)` and
+    /// `Inbox(b)` reduce to the same `pod_id: None` half of the mount pair, so a `check_key_scope`
+    /// that compared only the pod half (dropping the inbox-equality narrowing) would let this
+    /// resolve — found by mutation testing the http-prereqs dispatch's own `check_key_scope`,
+    /// widened to drop that comparison: every existing test here used either the organization
+    /// mount or the pod mount for its cross-scope case, so none of them exercised two *different*
+    /// non-organization, non-pod (i.e. inbox) mounts against each other.
+    #[test]
+    fn api_key_cursor_rejects_an_inbox_token_replayed_against_a_different_inbox() {
+        let inbox_a = InboxId::new("a@example.test");
+        let inbox_b = InboxId::new("b@example.test");
+        let c = ApiKeyCursor {
+            created_at: ts(),
+            api_key_id: valid_api_key_id(),
+            pod_id: None,
+            inbox_id: Some(inbox_a),
+        };
+        let token = c.encode();
+        assert_eq!(
+            ApiKeyCursor::decode(&token, &KeyScope::Inbox(inbox_b)),
+            Err(PageTokenError::WrongScope)
+        );
+    }
+
     #[test]
     fn api_key_cursor_rejects_a_nul_byte_in_inbox_id() {
         let token = Cursor::new()
