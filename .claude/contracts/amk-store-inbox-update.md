@@ -1,7 +1,7 @@
 # amk-store — `inboxes::update`, and free-form control-plane text — dispatch contract
 
 Scope-derivation: `awk` over `.bind(` in `crates/amk-store/src/{inboxes,pods,api_keys,organizations}.rs`,
-excluding id-typed and numeric binds — five free-form caller-supplied fields across four functions,
+excluding id-typed and numeric binds — **six** free-form caller-supplied fields across five functions,
 listed in full below. Plus one missing function found by the pre-dispatch review of
 `.claude/contracts/amk-http.md` against `amk-store`'s actual public surface.
 
@@ -47,9 +47,32 @@ enum (`Unchanged` / `Clear` / `Merge`), not `Option<Option<…>>`. **Use it. Do 
 ### `inboxes::update` — signature and semantics
 
 `update(pool, organization_id, pod_id: Option<PodId>, inbox_id, req: UpdateInboxRequest) ->
-Result<Option<Inbox>, StoreError>`. `Ok(None)` when the inbox does not resolve in that scope —
-the same masking `get` already does, for the same reason. Match `get`'s existing scope-pinning
-exactly; a missing pod pin is a cross-pod write.
+Result<Option<Inbox>, StoreError>`. `Ok(None)` when the inbox does not resolve in that scope.
+
+**Do not "match `get`" — `get` is the thing that is wrong.** An earlier draft of this contract said
+to copy `inboxes::get`'s scope pinning. The pre-dispatch review checked, and `get` and `delete` pin
+**`organization_id` only**:
+
+```
+inboxes.rs:129   FROM inboxes WHERE organization_id = $1 AND inbox_id = $2
+inboxes.rs:169   DELETE FROM inboxes WHERE organization_id = $1 AND inbox_id = $2
+inboxes.rs:147   WHERE organization_id = $1 AND ($2::uuid IS NULL OR pod_id = $2)   <- list, correct
+```
+
+So a pod-scoped credential reaching a **sibling pod's** inbox in the same organization resolves it,
+and can delete it. That is a cross-pod read and a cross-pod delete, and the plan requires scope
+denial to mask as `not_found` **in the query**, never by post-filtering what came back.
+
+**So this dispatch also fixes `get` and `delete`.** All three take `pod_id: Option<PodId>` and pin it
+the way `list` already does — `($n::uuid IS NULL OR pod_id = $n)`, where `None` means the org mount
+legitimately spans pods. `PodId` is UUID-typed, so the NUL-widening hazard that made a `None` bind
+catastrophic for `inbox_id` does not apply here; this is the one place the `IS NULL OR` idiom is
+correct, and `api_keys::{get,list,delete}` are the pattern to copy. Existing callers are tests only
+— `amk-http` does not exist yet — so the signature change is contained.
+
+Write the cross-pod test **before** the pin: seed two pods in one organization, then assert that
+`get`, `delete` and `update` at pod A all return not-found for pod B's inbox **and that B's row is
+unchanged afterwards**. A denial that still writes is the defect.
 
 The three `MetadataUpdate` states map to three different SQL effects:
 
@@ -73,8 +96,37 @@ value *removes* that key. So `Merge` is two operations, not one: concatenate the
 then remove each null-valued key. Reaching for `||` alone silently stores nulls where a caller asked
 for deletion, and no round-trip test that only checks the non-null keys would notice.
 
-Whether you express that as `(COALESCE(metadata,'{}') || $merge) - $deleted_keys::text[]` in one
-statement or build it in Rust is yours; the observable behaviour is not.
+**And the obvious expression of that is also wrong, in a way that only shows on a NULL column.**
+The first draft of this contract offered `(COALESCE(metadata,'{}') || $adds) - $dels::text[]`. The
+review ran it: starting from `metadata = NULL`, a merge that nets to nothing yields `{}`, not NULL —
+so a call this contract's own edge cases define as a **no-op** silently changes the column, and it
+is wire-visible, because `Inbox.metadata` is `Option<Metadata>` with `skip_serializing_if =
+"Option::is_none"`: `None` is omitted, `Some({})` serialises as `"metadata":{}`. A row that omitted
+the field starts emitting an empty object after a request that asked for nothing.
+
+Split the merge map into `adds` (entries with a value) and `dels` (keys mapped to null), and guard:
+
+```sql
+CASE WHEN metadata IS NULL AND $adds = '{}'::jsonb THEN NULL
+     ELSE (COALESCE(metadata,'{}') || $adds) - $dels::text[] END
+```
+
+Verified against the dev database, all five cases:
+
+```
+NULL            + {}       - {}     =>  NULL          (no-op stays NULL)
+NULL            + {}       - {x}    =>  NULL          (deleting from nothing is nothing)
+NULL            + {"a":1}  - {}     =>  {"a": 1}
+{"a":1}         + {}       - {}     =>  {"a": 1}      (untouched)
+{"a":1,"b":2}   + {"c":3}  - {a}    =>  {"b": 2, "c": 3}
+```
+
+**It must be one atomic `UPDATE` statement.** Do not read the current metadata, merge it in Rust,
+and write it back: two concurrent `Merge` requests touching different keys would lose one, and none
+of the assigned tests is concurrent, so nothing here would catch it. This crate already designs
+against exactly that class — `inboxes::create` uses a real `ON CONFLICT` rather than
+check-then-insert for the same reason. If you believe the merge cannot be expressed in one
+statement, **STOP and report** rather than reaching for read-modify-write.
 
 ### Wire validation is **not** yours
 
@@ -90,6 +142,11 @@ store rejects it too" is the tempting wrong answer and it would double-own the r
 Bump it when anything changed. A no-op update must **not** bump it — `updated_at` is on the wire
 (`Inbox.updated_at`, required) and a client polling it would see phantom changes.
 
+**"Changed" means a field was present, not that its value differs.** A caller resending
+`display_name` byte-identical to the stored value bumps `updated_at`; an absent field and a
+`Merge` that nets to nothing do not. Presence, not value-equality — settled here because nothing in
+`amk_types` settles it and the two readings are equally defensible.
+
 ### Free-form text guards — the five fields
 
 The id-safety dispatch guarded every id-typed value and deliberately excluded content fields,
@@ -98,6 +155,7 @@ mail content — they are control-plane fields with no P2 owner, so the decision
 
 | Function | Field | Column |
 |---|---|---|
+| `inboxes::update` | `inbox_id` (the lookup) | `TEXT` — returns `Ok(None)`, not `InvalidValue` |
 | `inboxes::create` | `display_name` | `TEXT` |
 | `inboxes::create` | `metadata` | `JSONB` |
 | `inboxes::update` | `display_name` | `TEXT` |
@@ -106,7 +164,11 @@ mail content — they are control-plane fields with no P2 owner, so the decision
 | `api_keys::create` | `name` | `TEXT` |
 
 Each rejects a forbidden byte with `StoreError::InvalidValue(<field>)`, one distinct label per
-field, using `amk_types::ids::has_forbidden_byte`. These are creates and updates: there is no
+field, using `amk_types::ids::has_forbidden_byte` — **except the first row**: `update`'s own
+`inbox_id` is a lookup, so it returns `Ok(None)` exactly as `get` and `delete` already do. It is in
+this table because the id-safety contract's table named only the functions that existed then, and
+inheriting the rule "by matching `get`" is precisely how that project already shipped a guarded
+`get` beside an unguarded `delete` that survived a mutation with the suite green. These are creates and updates: there is no
 not-found to mask into, and silently stripping a byte changes what the caller stored.
 
 **Metadata is exposed through both its keys and its values,** which is easy to half-fix. Measured:
