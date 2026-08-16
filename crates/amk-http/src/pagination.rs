@@ -32,9 +32,13 @@ pub struct ListQueryNoDirection {
 /// A parsed query, resolved to a concrete limit and sort direction.
 pub struct Resolved {
     pub limit: u64,
-    /// `Some` only when the caller supplied `limit` — echoed in the envelope only then. Every
-    /// fixture observation passed `limit` explicitly; what the server emits for an omitted one is
-    /// unobserved, so this crate never claims an observation it does not have.
+    /// `Some` only when the caller supplied `limit` — echoed in the envelope only then, and
+    /// always the **applied** (clamped) value, never the caller's raw one: the envelope's `limit`
+    /// describes the page the caller actually got, so a `limit=999999999` request that receives
+    /// 100 items must echo `100`, not `999999999` — echoing the raw value would be
+    /// self-contradictory beside the page it sits next to. Every fixture observation passed
+    /// `limit` explicitly under the maximum, so which value an over-limit request echoes is
+    /// itself unobserved — this is a considered choice, not a claimed observation.
     pub echo_limit: Option<u64>,
     pub direction: SortDirection,
     pub page_token: Option<String>,
@@ -58,7 +62,8 @@ fn resolve(limit: Option<u64>, page_token: Option<String>, ascending: Option<boo
     let clamped = limit.map(|l| l.min(MAX_LIMIT)).unwrap_or(DEFAULT_LIMIT);
     Resolved {
         limit: clamped,
-        echo_limit: limit,
+        // The applied value, not the caller's raw one — see the field's own doc.
+        echo_limit: limit.map(|_| clamped),
         direction: direction_for(ascending),
         page_token,
     }
@@ -98,7 +103,12 @@ mod tests {
     fn a_limit_above_the_maximum_is_clamped_not_rejected() {
         let r = ListQuery { limit: Some(9_999_999), ..Default::default() }.resolve();
         assert_eq!(r.limit, 100, "clamped to the maximum, never rejected as invalid");
-        assert_eq!(r.echo_limit, Some(9_999_999), "echo is the caller's own value, not the clamp");
+        assert_eq!(
+            r.echo_limit,
+            Some(100),
+            "echo is the APPLIED (clamped) value, not the caller's raw one — the envelope's \
+             limit describes the page actually returned"
+        );
     }
 
     #[test]

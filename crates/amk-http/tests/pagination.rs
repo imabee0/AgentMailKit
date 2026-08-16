@@ -91,7 +91,12 @@ async fn a_limit_above_the_maximum_is_clamped_not_rejected() {
 
     let resp = support::get(&router, "/v0/pods?limit=999999999", Some(&key)).await;
     assert_eq!(resp.status, 200, "clamped, never a validation_error: {}", resp.body);
-    assert_eq!(resp.json.unwrap()["limit"], 999_999_999, "the echo is the caller's own value");
+    assert_eq!(
+        resp.json.unwrap()["limit"],
+        100,
+        "the echo is the APPLIED value — echoing the caller's raw 999999999 beside 1 item would \
+         be self-contradictory"
+    );
 }
 
 // ---- malformed / hostile page tokens -----------------------------------------------------------
