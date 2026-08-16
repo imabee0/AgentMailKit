@@ -14,6 +14,7 @@
 //! Every wire type comes from `amk-types`; every persistence call goes through `amk-store`'s
 //! public interface — no SQL in this crate. Nothing here may model a Stalwart or JMAP concept.
 
+pub mod auth;
 pub mod config;
 pub mod error;
 
