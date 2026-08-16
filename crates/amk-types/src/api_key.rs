@@ -134,6 +134,15 @@ pub struct ApiKeyPermissions {
     /// Delete pods.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pod_delete: Option<bool>,
+    /// Read the key owner's email address. **Live-only** — emitted by the reference API and absent
+    /// from `openapi.json`'s 36-property schema, found by the P1 conformance gate
+    /// (`reference/fixtures/25-p1-gate-conformance.txt`). Third time the live capture has beaten
+    /// the spec, after fixture 19's system labels and the DELETE statuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_email: Option<bool>,
+    /// Read the key owner's profile. Live-only, same provenance as [`Self::owner_email`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_profile: Option<bool>,
 }
 
 /// Whether a credential is restricted at all, and if so by which flags.
@@ -208,13 +217,15 @@ impl ApiKeyPermissions {
             "pod_read" => self.pod_read,
             "pod_create" => self.pod_create,
             "pod_delete" => self.pod_delete,
+            "owner_email" => self.owner_email,
+            "owner_profile" => self.owner_profile,
             _ => return None,
         };
         Some(v.unwrap_or(false))
     }
 }
 
-pub const WIRE_NAMES: [&str; 36] = [
+pub const WIRE_NAMES: [&str; 38] = [
     "inbox_read",
     "inbox_create",
     "inbox_update",
@@ -251,6 +262,8 @@ pub const WIRE_NAMES: [&str; 36] = [
     "pod_read",
     "pod_create",
     "pod_delete",
+    "owner_email",
+    "owner_profile",
 ];
 
 /// The four flags that gate restricted labels, paired with the label each one unlocks.
@@ -428,8 +441,11 @@ mod tests {
 
     #[test]
     fn catalog_matches_the_spec_exactly() {
-        // 36, not 34 — the plan carried a stale count until two reviewers counted the schema.
-        assert_eq!(WIRE_NAMES.len(), 36);
+        // 38, not 36, and not the 34 the plan carried before two reviewers counted the schema.
+        // 36 is what `openapi.json` documents; the LIVE api emits two more (`owner_email`,
+        // `owner_profile`), observed by the P1 conformance gate. The live capture wins — this is
+        // the same rule fixture 19 and the DELETE statuses already established.
+        assert_eq!(WIRE_NAMES.len(), 38);
         // Every name resolves through get(); a typo in either list breaks this.
         let p = ApiKeyPermissions::default();
         for name in WIRE_NAMES {
@@ -488,6 +504,8 @@ mod tests {
             pod_read: Some(true),
             pod_create: Some(true),
             pod_delete: Some(true),
+            owner_email: Some(true),
+            owner_profile: Some(true),
         };
         let json = serde_json::to_value(&all_true).unwrap();
         let mut on_wire: Vec<String> = json.as_object().unwrap().keys().cloned().collect();

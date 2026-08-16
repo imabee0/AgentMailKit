@@ -129,9 +129,10 @@ Each was observed live; the fixture is the authority.
   omit; emit them or the conformance diff fails.
 - `inbox_id` **folds case**: `{"username":"AmkCase"}` stores `amkcase@…`, and lookups resolve any
   casing. Compare with `InboxId::eq_normalized`, never `==` on raw ids.
-- Permissions: **36** flags (not 34), owned by `amk-types::api_key`. An **absent** permissions
-  object grants everything; a present-but-empty one grants nothing. Never define a second
-  representation of these flags — two modules doing that is what caused the collision above.
+- Permissions: **38** flags, owned by `amk-types::api_key`. `openapi.json` documents 36; the live
+  API emits two more (`owner_email`, `owner_profile`), found by the P1 gate. An **absent**
+  permissions object grants everything; a present-but-empty one grants nothing. Never define a
+  second representation of these flags — two modules doing that is what caused the collision above.
 - Restricted-label admission must be a **storage-layer predicate**. Post-filtering a fetched page
   leaves a gap: `?limit=1` walked across the cursor returns `count:0` with a `next_page_token` on
   exactly the hidden rows, which discloses how many there are.
