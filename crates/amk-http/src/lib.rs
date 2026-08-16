@@ -17,8 +17,10 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod handlers;
 pub mod scope_ext;
 
+use axum::routing::get;
 use axum::Router;
 use sqlx::PgPool;
 
@@ -40,10 +42,12 @@ impl AppState {
     }
 }
 
-/// Build the router. Grows as the crate's modules land — this stage wires no operation routes
-/// yet, only the fallback every route eventually shares.
+/// Build the router. Grows as the crate's modules land.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        // ---- identity + organization (2) ----
+        .route("/v0/auth/me", get(handlers::identity::auth_me))
+        .route("/v0/organizations", get(handlers::identity::get_organization))
         // Unknown path -> 404 envelope.
         .fallback(not_found_fallback)
         // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
