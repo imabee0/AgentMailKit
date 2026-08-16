@@ -1,0 +1,43 @@
+[package]
+name = "amk-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The axum HTTP surface: auth layer, scope resolution, error envelope, P0/P1 handlers."
+
+[dependencies]
+amk-types = { path = "../amk-types" }
+amk-core = { path = "../amk-core" }
+amk-store = { path = "../amk-store" }
+axum.workspace = true
+tower.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+percent-encoding.workspace = true
+# NOT in the dispatch contract's dependency list, and flagged as such in the dispatch report
+# rather than silently added: `AppState` has to hold the connection pool it hands to every
+# `amk-store` call (`amk_store::pods::get(pool: &PgPool, ...)` etc. all take `&sqlx::PgPool`
+# directly, and amk-store re-exports no pool type alias), and a struct field's type cannot be
+# inferred — it has to be *named*. There is no design that gets amk-http a `Router` wired to a
+# real database without naming the pool type somewhere. Reusing the workspace's own existing
+# `sqlx` pin (already vetted, already the exact version/feature set `amk-store` builds against)
+# is the smallest possible resolution — no SQL is written in this crate, only the type.
+sqlx.workspace = true
+
+# Deliberately absent, per the dispatch contract:
+#   tower-http / governor / hyper (direct) — not sanctioned; rate limiting is a later dispatch.
+#   mail-parser / mail-auth / mail-send / mail-builder / smtp-proto — stalwart-labs crates belong
+#     to amk-ingest and amk-outbound, converted at that boundary. A shape-provenance check fails
+#     the build if one appears here.
+#   rand — this crate's one need for randomness (the generated inbox username, and inbox-collision
+#     suggestions) is met by `uuid::Uuid::new_v4()`, already a workspace dependency, rather than
+#     adding a second RNG source for one call site.
+
+[dev-dependencies]
