@@ -18,7 +18,13 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-PROTECTED=(amk-types amk-core amk-store)
+# amk-http joined on 2026-08-16, at its merge. The plan's boundary-type rule names the three
+# shape-DEFINING crates, deliberately — but amk-http has no legitimate use for a stalwart-labs
+# type either (those belong in amk-ingest/amk-outbound, P2), so extending the set closes a path
+# rather than asserting a new rule. Added AFTER the merge, never mid-dispatch: changing the gate
+# while a worktree is live gives two different verdicts for the same tree, which is the same
+# hazard as editing a contract in place.
+PROTECTED=(amk-types amk-core amk-store amk-http)
 fail=0
 note() { printf '  %s\n' "$*"; }
 bad() { printf 'FAIL %s\n' "$*"; fail=1; }

@@ -55,6 +55,11 @@ plus the workspace members and pins that already exist: `amk-types`, `amk-core`,
 - **`uuid` needs its `serde` feature for `Path<Uuid>`** or the handler fails with an opaque
   Handler-trait error that names neither `uuid` nor `serde` (spike F2). It is already enabled in
   the workspace pin; do not remove it.
+- **`sqlx` too** — `sqlx.workspace = true`, reusing the pin `amk-store` already carries. `AppState`
+  structurally cannot name a `PgPool` field without it. Added to this list after the dispatch
+  flagged it rather than silently adding it, which was the right call: "no dependency beyond the
+  two pinned" meant **no new third-party crate**, and a workspace-internal pin the store already
+  depends on is not that. This crate still writes no SQL.
 - **No other dependency.** Not `tower-http`, not `governor`, not `hyper` directly. Rate limiting is
   a later dispatch and `governor` arrives with it. If you believe you need a crate that is not
   listed, **STOP and report** — adding one is a decision, and it is not yours.
@@ -140,7 +145,13 @@ Two shapes, and the branch is on **who rejected the request**, not on status cod
   logic per mount.
 - **Path ids are percent-encoded and must round-trip.** `inbox_id` is an email address;
   `message_id` is an RFC 5322 angle-bracket value containing `<`, `>`, `@`. Decode with
-  `amk_types`' `from_path_segment`; never hand-roll it. `inbox_id` compares **ASCII-case-folded**
+  a NUL check on axum's already-decoded value — **not** `amk_types`' `from_path_segment`. Corrected
+  after the dispatch returned: `from_path_segment` percent-decodes (`ids.rs:93`) and axum 0.8's
+  `Path<String>` percent-decodes too, so calling both **double-decodes** — `%2520` becomes a space
+  and a literal `%2F` inside an inbox id becomes a path separator, which is the exact round-trip
+  this contract's own edge-case list requires to survive. Reuse `amk_types::ids::has_forbidden_byte`
+  for the NUL half rather than writing a second copy of that check. `inbox_id` compares
+  **ASCII-case-folded**
   (`reference/fixtures/18-inbox-case-normalization.txt`) — `AMKCASE@…` resolves the same inbox as
   `amkcase@…`.
 
