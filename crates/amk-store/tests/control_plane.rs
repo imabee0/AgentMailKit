@@ -1598,6 +1598,14 @@ async fn pods_list_with_u64_max_limit_returns_every_row_without_panicking() {
 /// `limit` large enough to return both in one query never exercises a cursor comparison at all,
 /// so a dropped `ORDER BY` tiebreak would go uncaught — the walk must actually cross a page
 /// boundary between the two tied rows for this test to test anything.
+///
+/// The row with the *larger* `pod_id` is inserted first, the smaller one second — deliberately
+/// reversed from insertion order. A bare `Uuid::new_v4()` pair inserted in generation order
+/// leaves the dropped-tiebreak defect a coin flip: Postgres returns tied rows in scan
+/// (insertion) order in practice, so the bug only surfaces when the physically-first row also
+/// sorts second. Confirmed by hand-mutating the `ORDER BY` during the http-prereqs dispatch: the
+/// unordered version of this test passed 5/5 reruns against a genuinely broken `inboxes::list`
+/// tiebreak, because `Uuid::new_v4()` order happened to agree with insertion order every time.
 #[tokio::test]
 async fn pods_list_breaks_a_created_at_tie_by_pod_id() {
     let Some(pool) = support::pool().await else {
@@ -1607,9 +1615,12 @@ async fn pods_list_breaks_a_created_at_tie_by_pod_id() {
     let same_instant = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:00.000Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
+    let (mut larger, mut smaller) = (Uuid::new_v4(), Uuid::new_v4());
+    if larger < smaller {
+        std::mem::swap(&mut larger, &mut smaller);
+    }
     let mut ids = Vec::new();
-    for _ in 0..2 {
-        let pod_id = Uuid::new_v4();
+    for pod_id in [larger, smaller] {
         sqlx::query(
             "INSERT INTO pods (pod_id, organization_id, name, created_at) VALUES ($1, $2, 'tie', $3)",
         )
@@ -1774,7 +1785,11 @@ async fn inboxes_list_with_u64_max_limit_returns_every_row_without_panicking() {
 
 /// Sibling of [`pods_list_breaks_a_created_at_tie_by_pod_id`]: two inboxes sharing one `created_at`
 /// millisecond, seeded via raw SQL for the same reason (`inboxes::create` cannot pin `created_at`).
-/// `limit: 1`, deliberately — see that test's own comment on why.
+/// `limit: 1`, deliberately — see that test's own comment on why. Also sibling in the fix that
+/// test needed: the larger (lexicographically later) `inbox_id` is inserted *first* — reversed
+/// from a naive `for i in 0..2` insertion order, which would insert the smaller id first and
+/// leave a dropped `ORDER BY` tiebreak uncaught (Postgres returns ties in scan/insertion order in
+/// practice, so insertion order agreeing with sort order hides the defect).
 #[tokio::test]
 async fn inboxes_list_breaks_a_created_at_tie_by_inbox_id() {
     let Some(pool) = support::pool().await else {
@@ -1785,9 +1800,15 @@ async fn inboxes_list_breaks_a_created_at_tie_by_inbox_id() {
     let same_instant = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:00.000Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
+    let suffix = support::unique_suffix();
+    let mut candidates = [
+        format!("tie-0-{suffix}@example.test"),
+        format!("tie-1-{suffix}@example.test"),
+    ];
+    candidates.sort();
+    candidates.reverse(); // insert the lexicographically larger id first
     let mut ids = Vec::new();
-    for i in 0..2 {
-        let inbox_id = format!("tie-{i}-{}@example.test", support::unique_suffix());
+    for inbox_id in candidates {
         sqlx::query(
             "INSERT INTO inboxes (inbox_id, organization_id, pod_id, created_at) \
              VALUES ($1, $2, $3, $4)",

@@ -1425,7 +1425,9 @@ async fn api_keys_list_with_u64_max_limit_returns_every_row_without_panicking() 
 /// it is always `DEFAULT now()`) must both be seen exactly once across the walk. `limit: 1`,
 /// deliberately: `control_plane.rs`'s `pods_list_breaks_a_created_at_tie_by_pod_id` explains why a
 /// larger limit that returns both tied rows from one query never exercises a cursor comparison at
-/// all.
+/// all. That same test's own comment also explains the ordering below: the larger `api_key_id` is
+/// inserted first, deliberately reversed from generation order — inserting two `Uuid::new_v4()`
+/// values in generation order leaves a dropped tiebreak a coin flip.
 #[tokio::test]
 async fn api_keys_list_breaks_a_created_at_tie_by_api_key_id() {
     let Some(pool) = support::pool().await else {
@@ -1439,9 +1441,12 @@ async fn api_keys_list_breaks_a_created_at_tie_by_api_key_id() {
     // rolled back between runs (`tests/support/mod.rs`'s own doc), so a fixed literal prefix
     // collides with a leftover row from a previous run of this very test — mint each prefix from
     // this run's own unique suffix instead, exactly as every other seed helper in this crate does.
+    let (mut larger, mut smaller) = (Uuid::new_v4(), Uuid::new_v4());
+    if larger < smaller {
+        std::mem::swap(&mut larger, &mut smaller);
+    }
     let mut ids = Vec::new();
-    for _ in 0..2 {
-        let api_key_id = Uuid::new_v4();
+    for api_key_id in [larger, smaller] {
         let suffix = support::unique_suffix();
         sqlx::query(
             "INSERT INTO api_keys (api_key_id, organization_id, name, prefix, hash, created_at) \
