@@ -363,6 +363,12 @@ pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyRespons
     {
         return Err(StoreError::InvalidValue("inbox_id"));
     }
+    // `name` is free-form control-plane text with no P2 owner, bound straight into this
+    // `INSERT` — a NUL byte would otherwise fail at parameter encoding (SQLSTATE 22021) rather
+    // than reject cleanly. Sibling of the identical guard in `inboxes::create`/`pods::create`.
+    if has_forbidden_byte(&new.name) {
+        return Err(StoreError::InvalidValue("name"));
+    }
 
     let api_key_id = Uuid::new_v4();
     let (secret, prefix) = mint();

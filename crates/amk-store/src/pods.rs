@@ -40,6 +40,12 @@ pub async fn create(pool: &PgPool, new: NewPod) -> Result<Pod, StoreError> {
     if new.client_id.as_deref().is_some_and(has_forbidden_byte) {
         return Err(StoreError::InvalidValue("client_id"));
     }
+    // `name` is free-form control-plane text with no P2 owner (the id-safety dispatch guarded
+    // only id-typed fields), bound straight into this `INSERT` — a NUL byte would otherwise fail
+    // at parameter encoding (SQLSTATE 22021) rather than reject cleanly.
+    if has_forbidden_byte(&new.name) {
+        return Err(StoreError::InvalidValue("name"));
+    }
     let row = sqlx::query(
         "INSERT INTO pods (pod_id, organization_id, client_id, name) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (organization_id, client_id) WHERE client_id IS NOT NULL DO NOTHING \

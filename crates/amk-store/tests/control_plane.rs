@@ -6,10 +6,30 @@
 
 mod support;
 
+use amk_store::api_keys::{self, NewApiKey};
 use amk_store::inboxes::{self, NewInbox};
 use amk_store::pods::{self, NewPod};
 use amk_store::{organizations, StoreError};
 use amk_types::ids::{InboxId, PodId};
+use amk_types::inbox::{Metadata, MetadataUpdate, MetadataValue, UpdateInboxRequest};
+
+/// Build a [`Metadata`] map from literal pairs — used only by `inboxes::update`'s tests below.
+fn md(pairs: &[(&str, MetadataValue)]) -> Metadata {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
+}
+
+/// Build a `MetadataUpdate::Merge` map from literal pairs, `None` meaning "delete this key".
+fn merge(pairs: &[(&str, Option<MetadataValue>)]) -> MetadataUpdate {
+    MetadataUpdate::Merge(
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect(),
+    )
+}
 
 #[tokio::test]
 async fn organization_create_get_list_delete_round_trips() {
@@ -384,7 +404,7 @@ async fn case_variant_inbox_id_resolves_to_one_row() {
     );
 
     for variant in [mixed.clone(), mixed.to_uppercase(), mixed.to_lowercase()] {
-        let found = inboxes::get(&pool, &org, &InboxId::new(variant.clone()))
+        let found = inboxes::get(&pool, &org, None, &InboxId::new(variant.clone()))
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("{variant} must resolve to the same inbox"));
@@ -402,17 +422,21 @@ async fn inbox_delete_is_scoped_to_its_organization() {
     let org_b = support::seed_org(&pool).await;
 
     // org_b must not be able to delete org_a's inbox by naming it.
-    assert!(!inboxes::delete(&pool, &org_b, &inbox_a).await.unwrap());
+    assert!(!inboxes::delete(&pool, &org_b, None, &inbox_a)
+        .await
+        .unwrap());
     assert!(
-        inboxes::get(&pool, &org_a, &inbox_a)
+        inboxes::get(&pool, &org_a, None, &inbox_a)
             .await
             .unwrap()
             .is_some(),
         "must survive"
     );
 
-    assert!(inboxes::delete(&pool, &org_a, &inbox_a).await.unwrap());
-    assert!(inboxes::get(&pool, &org_a, &inbox_a)
+    assert!(inboxes::delete(&pool, &org_a, None, &inbox_a)
+        .await
+        .unwrap());
+    assert!(inboxes::get(&pool, &org_a, None, &inbox_a)
         .await
         .unwrap()
         .is_none());
@@ -430,7 +454,7 @@ async fn inbox_get_is_scoped_to_its_organization() {
     let (org_a, _pod_a, inbox_a) = support::seed_org_pod_inbox(&pool).await;
     let org_b = support::seed_org(&pool).await;
 
-    let leaked = inboxes::get(&pool, &org_b, &inbox_a).await.unwrap();
+    let leaked = inboxes::get(&pool, &org_b, None, &inbox_a).await.unwrap();
     assert!(
         leaked.is_none(),
         "org_b must not read org_a's inbox by naming its address directly"
@@ -472,10 +496,13 @@ async fn inbox_delete_normalizes_a_mixed_case_inbox_id() {
     let mixed = InboxId::new(inbox.as_str().to_uppercase());
 
     assert!(
-        inboxes::delete(&pool, &org, &mixed).await.unwrap(),
+        inboxes::delete(&pool, &org, None, &mixed).await.unwrap(),
         "delete must normalize a mixed-case inbox_id parameter to match the stored lowercase row"
     );
-    assert!(inboxes::get(&pool, &org, &inbox).await.unwrap().is_none());
+    assert!(inboxes::get(&pool, &org, None, &inbox)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 // ---- hostile bytes reaching SQL (`.claude/contracts/amk-store-id-safety.md`) --------------------
@@ -498,7 +525,7 @@ async fn inbox_get_with_a_nul_byte_in_inbox_id_is_not_found_not_a_database_error
     let org = support::seed_org(&pool).await;
     let hostile = InboxId::new("abc\0def@example.test");
 
-    let result = inboxes::get(&pool, &org, &hostile).await;
+    let result = inboxes::get(&pool, &org, None, &hostile).await;
     assert!(
         matches!(result, Ok(None)),
         "a NUL-bearing inbox_id must mask as not-found, not error: {result:?}"
@@ -515,7 +542,7 @@ async fn inbox_delete_with_a_nul_byte_in_inbox_id_is_a_no_op_not_a_database_erro
     let org = support::seed_org(&pool).await;
     let hostile = InboxId::new("abc\0def@example.test");
 
-    let result = inboxes::delete(&pool, &org, &hostile).await;
+    let result = inboxes::delete(&pool, &org, None, &hostile).await;
     assert!(
         matches!(result, Ok(false)),
         "a NUL-bearing inbox_id must delete nothing, not error: {result:?}"
@@ -605,4 +632,799 @@ async fn inboxes_create_rejects_a_nul_byte_in_inbox_id() {
         matches!(result, Err(StoreError::InvalidValue("inbox_id"))),
         "a NUL-bearing inbox_id must be a typed InvalidValue, not a raw database error: {result:?}"
     );
+}
+
+// ---- pod pin (`.claude/contracts/amk-store-inbox-update.md`) -----------------------------------
+//
+// `get` and `delete` used to pin `organization_id` only, unlike `list` — a pod-scoped credential
+// could resolve, and delete, a sibling pod's inbox in the same organization. Each call path gets
+// its own direct test, exactly like the id-safety guards above: testing through a shared helper
+// would reproduce the same gap that let `get` be fixed while `delete` stayed open.
+
+/// `inboxes::get` must not resolve an inbox in a sibling pod, even though both pods share the same
+/// organization. `inbox_id` is the public email address, so naming it directly carries no secrecy.
+#[tokio::test]
+async fn inbox_get_is_scoped_to_its_pod_not_just_the_organization() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod_a = support::seed_pod(&pool, &org).await;
+    let pod_b = support::seed_pod(&pool, &org).await;
+    let inbox_a = support::seed_inbox(&pool, &org, pod_a, "pod-a-inbox").await;
+
+    let leaked = inboxes::get(&pool, &org, Some(pod_b), &inbox_a)
+        .await
+        .unwrap();
+    assert!(
+        leaked.is_none(),
+        "a pod_b-scoped credential must not read pod_a's inbox in the same organization"
+    );
+
+    // Sanity: the same lookup still resolves at pod_a's own scope, and unscoped (organization
+    // mount) — this is a pin, not a break.
+    assert!(inboxes::get(&pool, &org, Some(pod_a), &inbox_a)
+        .await
+        .unwrap()
+        .is_some());
+    assert!(inboxes::get(&pool, &org, None, &inbox_a)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+/// `inboxes::delete`, tested independently rather than assumed to inherit `get`'s pin. A denial
+/// that still writes is the defect, so the row is asserted unmodified afterwards, not just the
+/// return value.
+#[tokio::test]
+async fn inbox_delete_is_scoped_to_its_pod_not_just_the_organization() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod_a = support::seed_pod(&pool, &org).await;
+    let pod_b = support::seed_pod(&pool, &org).await;
+    let inbox_a = support::seed_inbox(&pool, &org, pod_a, "pod-a-inbox").await;
+
+    assert!(
+        !inboxes::delete(&pool, &org, Some(pod_b), &inbox_a)
+            .await
+            .unwrap(),
+        "a pod_b-scoped credential must not delete pod_a's inbox in the same organization"
+    );
+    assert!(
+        inboxes::get(&pool, &org, None, &inbox_a)
+            .await
+            .unwrap()
+            .is_some(),
+        "the row must be unmodified after the cross-pod delete attempt"
+    );
+
+    assert!(inboxes::delete(&pool, &org, Some(pod_a), &inbox_a)
+        .await
+        .unwrap());
+    assert!(inboxes::get(&pool, &org, None, &inbox_a)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+// ---- inboxes::update (`.claude/contracts/amk-store-inbox-update.md`) ---------------------------
+
+async fn seed_inbox_with(
+    pool: &sqlx::PgPool,
+    org: &amk_types::ids::OrganizationId,
+    pod: PodId,
+    display_name: Option<&str>,
+    metadata: Option<Metadata>,
+) -> amk_types::Inbox {
+    let inbox_id = InboxId::new(format!("update-{}@example.test", support::unique_suffix()));
+    inboxes::create(
+        pool,
+        NewInbox {
+            inbox_id,
+            organization_id: org.clone(),
+            pod_id: pod,
+            client_id: None,
+            display_name: display_name.map(str::to_owned),
+            metadata,
+        },
+    )
+    .await
+    .expect("seed inbox")
+}
+
+fn no_change() -> UpdateInboxRequest {
+    UpdateInboxRequest { display_name: None, metadata: MetadataUpdate::Unchanged }
+}
+
+/// A fully-empty request (`display_name` absent, `metadata` absent) is a no-op: no error, the
+/// current row is returned unchanged, and `updated_at` does not bump — "sending an empty object
+/// is rejected" and "at least one field required" are `amk-http`'s wire-validation rules, not
+/// this crate's.
+#[tokio::test]
+async fn inbox_update_with_a_fully_empty_request_is_a_no_op_and_does_not_bump_updated_at() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(
+        &pool,
+        &org,
+        pod,
+        Some("Original"),
+        Some(md(&[("a", MetadataValue::Number(1.0))])),
+    )
+    .await;
+
+    let updated = inboxes::update(&pool, &org, None, &created.inbox_id, no_change())
+        .await
+        .unwrap()
+        .expect("the inbox still resolves");
+
+    assert_eq!(updated, created, "a fully-empty request must not change anything");
+}
+
+/// `Merge` with an empty map is a no-op on metadata specifically — checked independently of
+/// [`inbox_update_with_a_fully_empty_request_is_a_no_op_and_does_not_bump_updated_at`] because
+/// `display_name` is also present here, so `updated_at` DOES bump: the merge's own no-op-ness
+/// must not suppress the bump `display_name`'s presence causes.
+#[tokio::test]
+async fn inbox_update_merge_empty_is_a_no_op_on_metadata_even_when_display_name_changes() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(
+        &pool,
+        &org,
+        pod,
+        Some("Original"),
+        Some(md(&[("a", MetadataValue::Number(1.0))])),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest { display_name: Some("New Name".into()), metadata: merge(&[]) },
+    )
+    .await
+    .unwrap()
+    .expect("the inbox still resolves");
+
+    assert_eq!(updated.metadata, created.metadata, "Merge(empty) must not change metadata");
+    assert_eq!(updated.display_name.as_deref(), Some("New Name"));
+    assert!(
+        updated.updated_at.0 > created.updated_at.0,
+        "display_name's presence must still bump updated_at"
+    );
+}
+
+/// `Merge(empty)` combined with an absent `display_name` — the literal "nets to nothing" case:
+/// no error, no metadata change, and `updated_at` unchanged, exactly like the fully-empty request.
+#[tokio::test]
+async fn inbox_update_merge_empty_and_absent_display_name_does_not_bump_updated_at() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created =
+        seed_inbox_with(&pool, &org, pod, None, Some(md(&[("a", MetadataValue::Number(1.0))])))
+            .await;
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest { display_name: None, metadata: merge(&[]) },
+    )
+    .await
+    .unwrap()
+    .expect("the inbox still resolves");
+
+    assert_eq!(updated, created, "Merge(empty) with no other field must be a total no-op");
+}
+
+/// `Clear` sets the column to SQL `NULL`, never `{}` — the trap the contract measured against the
+/// dev database (`||` and the naive guarded form both fail this).
+#[tokio::test]
+async fn inbox_update_clear_sets_metadata_to_sql_null_not_empty_object() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created =
+        seed_inbox_with(&pool, &org, pod, None, Some(md(&[("a", MetadataValue::Number(1.0))])))
+            .await;
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest { display_name: None, metadata: MetadataUpdate::Clear },
+    )
+    .await
+    .unwrap()
+    .expect("the inbox still resolves");
+
+    assert!(
+        updated.metadata.is_none(),
+        "Clear must leave the column SQL NULL — Inbox.metadata is None only for a NULL column, \
+         never for a stored {{}}: {:?}",
+        updated.metadata
+    );
+    assert!(
+        updated.updated_at.0 > created.updated_at.0,
+        "an explicit Clear must bump updated_at"
+    );
+}
+
+/// `Clear` starting from an already-NULL column: still a legitimate explicit action (present on
+/// the wire), so it bumps `updated_at` even though the column's value does not change — the same
+/// "presence, not value-equality" rule `display_name` gets.
+#[tokio::test]
+async fn inbox_update_clear_on_already_null_metadata_still_bumps_updated_at() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, None, None).await;
+    assert!(created.metadata.is_none(), "seed must start with no metadata");
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest { display_name: None, metadata: MetadataUpdate::Clear },
+    )
+    .await
+    .unwrap()
+    .expect("the inbox still resolves");
+
+    assert!(updated.metadata.is_none());
+    assert!(
+        updated.updated_at.0 > created.updated_at.0,
+        "Clear is an explicit action and must bump updated_at even from NULL"
+    );
+}
+
+/// `Merge` adds a new key, overwrites an existing one, and deletes a key mapped to `null` — all
+/// three in one call, matching the contract's own verified case:
+/// `{"a":1,"b":2} + {"c":3} - {a} => {"b":2,"c":3}`, plus an overwrite of `b`.
+#[tokio::test]
+async fn inbox_update_merge_adds_overwrites_and_deletes_on_null_value() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(
+        &pool,
+        &org,
+        pod,
+        None,
+        Some(md(&[
+            ("a", MetadataValue::Number(1.0)),
+            ("b", MetadataValue::Number(2.0)),
+        ])),
+    )
+    .await;
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest {
+            display_name: None,
+            metadata: merge(&[
+                ("a", None),                                      // delete
+                ("b", Some(MetadataValue::Number(99.0))),         // overwrite
+                ("c", Some(MetadataValue::String("new".into()))), // add
+            ]),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the inbox still resolves");
+
+    assert_eq!(
+        updated.metadata,
+        Some(md(&[
+            ("b", MetadataValue::Number(99.0)),
+            ("c", MetadataValue::String("new".into()))
+        ])),
+        "a must be deleted, b overwritten, c added"
+    );
+}
+
+/// A `Merge` that deletes a key which was never present is a no-op, not an error — the "netting
+/// to nothing" behaviour has to hold even when the merge map itself is non-empty.
+#[tokio::test]
+async fn inbox_update_merge_with_null_for_a_key_that_does_not_exist_is_a_no_op_not_an_error() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, None, None).await;
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest { display_name: None, metadata: merge(&[("missing", None)]) },
+    )
+    .await
+    .unwrap()
+    .expect("must not error");
+
+    assert!(
+        updated.metadata.is_none(),
+        "deleting a nonexistent key from NULL metadata stays NULL"
+    );
+}
+
+/// `display_name`'s bump rule is presence, not value-equality: resending the byte-identical value
+/// still bumps `updated_at`.
+#[tokio::test]
+async fn inbox_update_resending_the_same_display_name_still_bumps_updated_at() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, Some("Same Name"), None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest {
+            display_name: Some("Same Name".into()),
+            metadata: MetadataUpdate::Unchanged,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("the inbox still resolves");
+
+    assert_eq!(updated.display_name.as_deref(), Some("Same Name"));
+    assert!(
+        updated.updated_at.0 > created.updated_at.0,
+        "presence, not value equality, must bump updated_at"
+    );
+}
+
+/// `update` on an inbox that exists, but in a *different* pod of the same organization, must
+/// return `Ok(None)` — and the row must be unmodified afterwards. A scope miss that still writes
+/// is the defect, so this asserts the target row, not just the return value.
+#[tokio::test]
+async fn inbox_update_is_scoped_to_its_pod_not_just_the_organization() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod_a = support::seed_pod(&pool, &org).await;
+    let pod_b = support::seed_pod(&pool, &org).await;
+    let created = seed_inbox_with(&pool, &org, pod_a, Some("Original"), None).await;
+
+    let result = inboxes::update(
+        &pool,
+        &org,
+        Some(pod_b),
+        &created.inbox_id,
+        UpdateInboxRequest {
+            display_name: Some("Hijacked".into()),
+            metadata: MetadataUpdate::Clear,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(result.is_none(), "a pod_b-scoped credential must not update pod_a's inbox");
+
+    let after = inboxes::get(&pool, &org, None, &created.inbox_id)
+        .await
+        .unwrap()
+        .expect("the inbox still exists");
+    assert_eq!(after, created, "the row must be unmodified after the cross-pod update attempt");
+}
+
+/// Fixture 18: `update` resolves its target exactly as `get` does, case-insensitively.
+#[tokio::test]
+async fn inbox_update_resolves_a_mixed_case_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, None, None).await;
+    let mixed = InboxId::new(created.inbox_id.as_str().to_uppercase());
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &mixed,
+        UpdateInboxRequest {
+            display_name: Some("Cased".into()),
+            metadata: MetadataUpdate::Unchanged,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("a mixed-case inbox_id must still resolve the same row");
+    assert_eq!(updated.inbox_id, created.inbox_id);
+}
+
+/// `update`'s own `inbox_id` (the lookup) is a NUL-bearing id: masks as `Ok(None)`, exactly like
+/// `get`/`delete`, never a raw database error and never distinguishable from a genuine miss.
+#[tokio::test]
+async fn inbox_update_with_a_nul_byte_in_inbox_id_is_not_found_not_a_database_error() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let hostile = InboxId::new("abc\0def@example.test");
+
+    let result = inboxes::update(&pool, &org, None, &hostile, no_change()).await;
+    assert!(
+        matches!(result, Ok(None)),
+        "a NUL-bearing inbox_id must mask as not-found, not error: {result:?}"
+    );
+}
+
+// ---- the five-field text guard table (`.claude/contracts/amk-store-inbox-update.md`) -----------
+//
+// Each row gets its own hostile test (calling that function directly, never through a shared
+// helper) AND a clean-path test for the same field, so a guard widened to reject legitimate input
+// (e.g. `is_some()` instead of `is_some_and(has_forbidden_byte)`) fails too.
+
+#[tokio::test]
+async fn inboxes_create_rejects_a_nul_byte_in_display_name() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let username = format!("dn-nul-{}@example.test", support::unique_suffix());
+
+    let result = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(username),
+            organization_id: org,
+            pod_id: pod,
+            client_id: None,
+            display_name: Some("abc\0def".to_owned()),
+            metadata: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("display_name"))),
+        "a NUL-bearing display_name must be a typed InvalidValue: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn inboxes_create_with_a_clean_display_name_succeeds() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let username = format!("dn-clean-{}@example.test", support::unique_suffix());
+
+    let created = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(username),
+            organization_id: org,
+            pod_id: pod,
+            client_id: None,
+            display_name: Some("A Perfectly Normal Name".to_owned()),
+            metadata: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.display_name.as_deref(), Some("A Perfectly Normal Name"));
+}
+
+#[tokio::test]
+async fn inboxes_create_rejects_a_nul_byte_in_a_metadata_key() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let username = format!("md-key-nul-{}@example.test", support::unique_suffix());
+
+    let result = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(username),
+            organization_id: org,
+            pod_id: pod,
+            client_id: None,
+            display_name: None,
+            metadata: Some(md(&[("bad\0key", MetadataValue::Bool(true))])),
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("metadata"))),
+        "a NUL-bearing metadata key must be a typed InvalidValue, not a raw database error \
+         (a check that only inspects values would miss this): {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn inboxes_create_rejects_a_nul_byte_in_a_metadata_value() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let username = format!("md-val-nul-{}@example.test", support::unique_suffix());
+
+    let result = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(username),
+            organization_id: org,
+            pod_id: pod,
+            client_id: None,
+            display_name: None,
+            metadata: Some(md(&[("k", MetadataValue::String("bad\0value".into()))])),
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("metadata"))),
+        "a NUL-bearing metadata value must be a typed InvalidValue, not a raw database error \
+         (a check that only inspects keys would miss this): {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn inboxes_create_with_clean_metadata_succeeds() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let username = format!("md-clean-{}@example.test", support::unique_suffix());
+
+    let created = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(username),
+            organization_id: org,
+            pod_id: pod,
+            client_id: None,
+            display_name: None,
+            metadata: Some(md(&[("k", MetadataValue::String("v".into()))])),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.metadata, Some(md(&[("k", MetadataValue::String("v".into()))])));
+}
+
+#[tokio::test]
+async fn inboxes_update_rejects_a_nul_byte_in_display_name() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, None, None).await;
+
+    let result = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest {
+            display_name: Some("abc\0def".into()),
+            metadata: MetadataUpdate::Unchanged,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("display_name"))),
+        "a NUL-bearing display_name must be a typed InvalidValue: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn inboxes_update_with_a_clean_display_name_succeeds() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, None, None).await;
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest {
+            display_name: Some("Clean Name".into()),
+            metadata: MetadataUpdate::Unchanged,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("must resolve");
+    assert_eq!(updated.display_name.as_deref(), Some("Clean Name"));
+}
+
+#[tokio::test]
+async fn inboxes_update_rejects_a_nul_byte_in_a_metadata_key() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, None, None).await;
+
+    let result = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest {
+            display_name: None,
+            metadata: merge(&[("bad\0key", Some(MetadataValue::Bool(true)))]),
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("metadata"))),
+        "a NUL-bearing merge key must be a typed InvalidValue \
+         (a check that only inspects values would miss this): {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn inboxes_update_rejects_a_nul_byte_in_a_metadata_value() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, None, None).await;
+
+    let result = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest {
+            display_name: None,
+            metadata: merge(&[("k", Some(MetadataValue::String("bad\0value".into())))]),
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("metadata"))),
+        "a NUL-bearing merge value must be a typed InvalidValue \
+         (a check that only inspects keys would miss this): {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn inboxes_update_with_clean_metadata_merge_succeeds() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let created = seed_inbox_with(&pool, &org, pod, None, None).await;
+
+    let updated = inboxes::update(
+        &pool,
+        &org,
+        None,
+        &created.inbox_id,
+        UpdateInboxRequest {
+            display_name: None,
+            metadata: merge(&[("k", Some(MetadataValue::String("v".into())))]),
+        },
+    )
+    .await
+    .unwrap()
+    .expect("must resolve");
+    assert_eq!(updated.metadata, Some(md(&[("k", MetadataValue::String("v".into()))])));
+}
+
+#[tokio::test]
+async fn pods_create_rejects_a_nul_byte_in_name() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+
+    let result = pods::create(
+        &pool,
+        NewPod {
+            organization_id: org,
+            pod_id: PodId::new_random(),
+            client_id: None,
+            name: "bad\0name".into(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("name"))),
+        "a NUL-bearing pod name must be a typed InvalidValue: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn pods_create_with_a_clean_name_succeeds() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+
+    let created = pods::create(
+        &pool,
+        NewPod {
+            organization_id: org,
+            pod_id: PodId::new_random(),
+            client_id: None,
+            name: "A Clean Pod Name".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.name, "A Clean Pod Name");
+}
+
+#[tokio::test]
+async fn api_keys_create_rejects_a_nul_byte_in_name() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+
+    let result = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org,
+            pod_id: None,
+            inbox_id: None,
+            name: "bad\0name".into(),
+            permissions: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("name"))),
+        "a NUL-bearing api key name must be a typed InvalidValue: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn api_keys_create_with_a_clean_name_succeeds() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+
+    let created = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org,
+            pod_id: None,
+            inbox_id: None,
+            name: "A Clean Key Name".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.name, "A Clean Key Name");
 }

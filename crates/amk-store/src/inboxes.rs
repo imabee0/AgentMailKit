@@ -4,14 +4,39 @@
 //! never at an application-level check-then-insert.
 
 use amk_types::ids::{has_forbidden_byte, InboxId, OrganizationId, PodId};
-use amk_types::inbox::{Inbox, Metadata};
+use amk_types::inbox::{Inbox, Metadata, MetadataUpdate, MetadataValue, UpdateInboxRequest};
 use amk_types::Timestamp;
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::types::Json;
 use sqlx::{PgPool, Row};
+use std::collections::BTreeMap;
 
 use crate::error::StoreError;
+
+/// Metadata is exposed through both its keys and its values — measured against the dev database,
+/// `'{"a\0b":"v"}'::jsonb` and `'{"k":"a\0b"}'::jsonb` both raise `54000 null character not
+/// permitted`, unguarded, as a raw `StoreError::Database` rather than a typed rejection. Checking
+/// only the value (or only the key) leaves the other half of this reachable.
+fn metadata_value_has_forbidden_byte(v: &MetadataValue) -> bool {
+    matches!(v, MetadataValue::String(s) if has_forbidden_byte(s))
+}
+
+/// [`Metadata`] — the state carried by [`NewInbox::metadata`] and `Inbox.metadata` itself: every
+/// value present, no per-key deletion. Checks both key and value, at the only nesting level
+/// [`MetadataValue`] permits (it is a flat scalar enum — no arrays or nested objects).
+fn metadata_has_forbidden_byte(m: &Metadata) -> bool {
+    m.iter()
+        .any(|(k, v)| has_forbidden_byte(k) || metadata_value_has_forbidden_byte(v))
+}
+
+/// The `MetadataUpdate::Merge` map: each value is `Option<MetadataValue>` (`None` deletes that
+/// key), so this checks the key always and the value only when present.
+fn merge_map_has_forbidden_byte(m: &BTreeMap<String, Option<MetadataValue>>) -> bool {
+    m.iter().any(|(k, v)| {
+        has_forbidden_byte(k) || v.as_ref().is_some_and(metadata_value_has_forbidden_byte)
+    })
+}
 
 /// The settable subset of [`Inbox`] at creation.
 pub struct NewInbox {
@@ -64,6 +89,20 @@ pub async fn create(pool: &PgPool, new: NewInbox) -> Result<Inbox, StoreError> {
     if new.client_id.as_deref().is_some_and(has_forbidden_byte) {
         return Err(StoreError::InvalidValue("client_id"));
     }
+    // `display_name` and `metadata` are the same kind of free-form control-plane text, with no P2
+    // owner (that's mail *content*, guarded — or not — inside amk-ingest): a caller-body field
+    // bound straight into this `INSERT`, so an unguarded NUL byte in either would 500 rather than
+    // reject cleanly.
+    if new.display_name.as_deref().is_some_and(has_forbidden_byte) {
+        return Err(StoreError::InvalidValue("display_name"));
+    }
+    if new
+        .metadata
+        .as_ref()
+        .is_some_and(metadata_has_forbidden_byte)
+    {
+        return Err(StoreError::InvalidValue("metadata"));
+    }
     let normalized = new.inbox_id.normalized();
 
     let attempt = sqlx::query(
@@ -111,9 +150,13 @@ fn is_inbox_pkey_violation(db_err: &dyn sqlx::error::DatabaseError) -> bool {
     db_err.is_unique_violation() && db_err.constraint() == Some("inboxes_pkey")
 }
 
+/// `pod_id: None` means the caller is mounted at the organization (spans every pod in it, like
+/// [`list`]); `Some(p)` pins to that one pod — see the module-level note on why `get`/`delete`
+/// used to pin `organization_id` only.
 pub async fn get(
     pool: &PgPool,
     organization_id: &OrganizationId,
+    pod_id: Option<PodId>,
     inbox_id: &InboxId,
 ) -> Result<Option<Inbox>, StoreError> {
     // A NUL-bearing `inbox_id` can never name a real row (Postgres `text` cannot hold one), so
@@ -126,10 +169,11 @@ pub async fn get(
     let normalized = inbox_id.normalized();
     let row = sqlx::query(
         "SELECT inbox_id, organization_id, pod_id, client_id, display_name, metadata, created_at, updated_at \
-         FROM inboxes WHERE organization_id = $1 AND inbox_id = $2",
+         FROM inboxes WHERE organization_id = $1 AND inbox_id = $2 AND ($3::uuid IS NULL OR pod_id = $3)",
     )
     .bind(organization_id.as_str())
     .bind(normalized.as_str())
+    .bind(pod_id.map(|p| p.0))
     .fetch_optional(pool)
     .await?;
     row.as_ref().map(row_to_inbox).transpose()
@@ -154,9 +198,11 @@ pub async fn list(
     rows.iter().map(row_to_inbox).collect()
 }
 
+/// See [`get`]'s doc for `pod_id`'s meaning.
 pub async fn delete(
     pool: &PgPool,
     organization_id: &OrganizationId,
+    pod_id: Option<PodId>,
     inbox_id: &InboxId,
 ) -> Result<bool, StoreError> {
     // Sibling of the same check in `get`, written independently here rather than assumed to
@@ -166,10 +212,121 @@ pub async fn delete(
         return Ok(false);
     }
     let normalized = inbox_id.normalized();
-    let result = sqlx::query("DELETE FROM inboxes WHERE organization_id = $1 AND inbox_id = $2")
+    let result = sqlx::query(
+        "DELETE FROM inboxes WHERE organization_id = $1 AND inbox_id = $2 \
+         AND ($3::uuid IS NULL OR pod_id = $3)",
+    )
+    .bind(organization_id.as_str())
+    .bind(normalized.as_str())
+    .bind(pod_id.map(|p| p.0))
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+// One atomic `UPDATE` — see `.claude/contracts/amk-store-inbox-update.md`'s "merge trap" section
+// for why `||` alone, and the naive `(COALESCE(metadata,'{}') || $adds) - $dels::text[]` form,
+// are both wrong. The two nested `CASE`s below are the guarded expression from that contract,
+// verified against the dev database:
+//   NULL          + {}       - {}     => NULL     (no-op stays NULL, never {})
+//   NULL          + {}       - {x}    => NULL     (deleting from nothing is nothing)
+//   NULL          + {"a":1}  - {}     => {"a": 1}
+//   {"a":1}       + {}       - {}     => {"a": 1}  (untouched)
+//   {"a":1,"b":2} + {"c":3}  - {a}    => {"b": 2, "c": 3}
+const UPDATE_SQL: &str = "UPDATE inboxes SET \
+    display_name = CASE WHEN $4 THEN $5 ELSE display_name END, \
+    metadata = CASE \
+        WHEN $6 THEN NULL \
+        WHEN $7 THEN \
+            CASE WHEN metadata IS NULL AND $8 = '{}'::jsonb THEN NULL \
+                 ELSE (COALESCE(metadata, '{}'::jsonb) || $8) - $9::text[] \
+            END \
+        ELSE metadata \
+    END, \
+    updated_at = CASE WHEN $10 THEN now() ELSE updated_at END \
+    WHERE organization_id = $1 AND inbox_id = $2 AND ($3::uuid IS NULL OR pod_id = $3) \
+    RETURNING inbox_id, organization_id, pod_id, client_id, display_name, metadata, created_at, updated_at";
+
+/// Merge [`UpdateInboxRequest::metadata`] into the stored value. `[SPEC:openapi]
+/// type_inboxes:UpdateInboxRequest`, verbatim: keys included are added or overwritten, keys
+/// omitted are left unchanged, a key mapped to `null` is removed, and `metadata: null` clears
+/// everything.
+///
+/// This is a **lookup**, exactly like [`get`]/[`delete`]: a NUL-bearing `inbox_id` and a scope
+/// miss (wrong organization or wrong pod) both mask as `Ok(None)`, never an error. `display_name`
+/// and `metadata` are different — this is an update, not a lookup, so there is no not-found to
+/// mask into, and a NUL byte in either is rejected with a typed [`StoreError::InvalidValue`]
+/// rather than silently stripped or left to fail at parameter encoding.
+///
+/// Whether "sending an empty object is rejected" or "at least one of `display_name`/`metadata`
+/// must be present" holds is **not this function's job** — those are wire-validation rules that
+/// produce `amk-http`'s `validation_error` envelope, and this crate has no business constructing
+/// one. Here, `Merge(empty)` is a no-op on metadata, and a fully-empty request is a no-op that
+/// still returns the current row.
+pub async fn update(
+    pool: &PgPool,
+    organization_id: &OrganizationId,
+    pod_id: Option<PodId>,
+    inbox_id: &InboxId,
+    req: UpdateInboxRequest,
+) -> Result<Option<Inbox>, StoreError> {
+    // See `get`: a NUL-bearing lookup id can never name a real row, so this masks as not-found —
+    // never `StoreError::Database`, and never a side channel between "malformed" and "absent".
+    if has_forbidden_byte(inbox_id.as_str()) {
+        return Ok(None);
+    }
+    if req.display_name.as_deref().is_some_and(has_forbidden_byte) {
+        return Err(StoreError::InvalidValue("display_name"));
+    }
+
+    // Split `Merge`'s map into `adds` (keys with a value: concatenated in) and `dels` (keys
+    // mapped to null: removed) — the wire's per-key `null` means delete, which plain `||` does
+    // not implement (it would store a JSON null instead of removing the key).
+    let (is_clear, is_merge, adds, dels): (bool, bool, Metadata, Vec<String>) = match &req.metadata
+    {
+        MetadataUpdate::Unchanged => (false, false, Metadata::new(), Vec::new()),
+        MetadataUpdate::Clear => (true, false, Metadata::new(), Vec::new()),
+        MetadataUpdate::Merge(m) => {
+            if merge_map_has_forbidden_byte(m) {
+                return Err(StoreError::InvalidValue("metadata"));
+            }
+            let mut adds = Metadata::new();
+            let mut dels = Vec::new();
+            for (k, v) in m {
+                match v {
+                    Some(value) => {
+                        adds.insert(k.clone(), value.clone());
+                    }
+                    None => dels.push(k.clone()),
+                }
+            }
+            (false, true, adds, dels)
+        }
+    };
+
+    // "Changed" means a field was *present*, not that its value differs from what is stored — a
+    // resent, byte-identical `display_name` still bumps `updated_at`. The one exception is a
+    // `Merge` whose map is entirely empty (no adds, no dels): that nets to nothing, and a no-op
+    // update must not bump `updated_at` — it is on the wire and a client polling it would see a
+    // phantom change. A `Clear` always bumps: it is an explicit action, present on the wire,
+    // exactly like `display_name`.
+    let has_display_name = req.display_name.is_some();
+    let merge_nets_to_nothing = is_merge && adds.is_empty() && dels.is_empty();
+    let bump = has_display_name || is_clear || (is_merge && !merge_nets_to_nothing);
+
+    let normalized = inbox_id.normalized();
+    let row = sqlx::query(UPDATE_SQL)
         .bind(organization_id.as_str())
         .bind(normalized.as_str())
-        .execute(pool)
+        .bind(pod_id.map(|p| p.0))
+        .bind(has_display_name)
+        .bind(&req.display_name)
+        .bind(is_clear)
+        .bind(is_merge)
+        .bind(Json(&adds))
+        .bind(&dels)
+        .bind(bump)
+        .fetch_optional(pool)
         .await?;
-    Ok(result.rows_affected() > 0)
+    row.as_ref().map(row_to_inbox).transpose()
 }
