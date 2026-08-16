@@ -405,6 +405,243 @@ async fn an_inbox_scoped_key_created_with_mixed_case_authenticates_and_resolves_
     assert!(via_normalized.is_some());
 }
 
+// ---- divergence 4 (fixture 25): an inbox-scoped key's response also carries pod_id --------
+//
+// Observed live: one key returns `organization_id`, `pod_id` AND `inbox_id` together. `inbox_id`
+// stays the *scope* (the CHECK below is untouched); `pod_id` is the containing pod, denormalised
+// provenance read at read time through the inbox itself — never a stored column, never relaxing
+// the CHECK.
+
+/// The core of the divergence: `create` for an inbox-scoped key returns `pod_id` — the inbox's
+/// own containing pod — not `None`. Asserted against a SECOND, sibling pod's id too (not merely
+/// `is_some()`), so a mutant that hardcoded some constant, or echoed the wrong pod, cannot pass.
+#[tokio::test]
+async fn create_for_an_inbox_scoped_key_returns_the_inboxes_containing_pod() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    // Two sibling pods in the SAME organization: `sibling_pod` owns no inbox at all, so if the
+    // implementation ever answered a constant or "the first/last pod in the org" instead of the
+    // inbox's OWN pod, this is what would catch it — a single-pod fixture cannot distinguish
+    // "the right pod" from "the only pod".
+    let sibling_pod = support::seed_pod(&pool, &org).await;
+    let real_pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, real_pod, "inbox").await;
+    assert_ne!(real_pod, sibling_pod, "test invariant: the two pods must actually differ");
+
+    let created = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox.clone()),
+            name: "inbox-key-with-pod-provenance".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(created.inbox_id.as_ref(), Some(&inbox));
+    assert_eq!(
+        created.pod_id,
+        Some(real_pod),
+        "an inbox-scoped key's response must carry the pod that actually contains its inbox"
+    );
+    assert_ne!(
+        created.pod_id,
+        Some(sibling_pod),
+        "must be the REAL containing pod, not merely some pod id"
+    );
+}
+
+/// `get` round-trips the same provenance `create` returned — a separate code path
+/// (`row_to_api_key` + the read-time inbox lookup), not merely `create`'s own response echoed
+/// back.
+#[tokio::test]
+async fn get_for_an_inbox_scoped_key_also_returns_the_containing_pod() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let created = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox.clone()),
+            name: "inbox-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let fetched = api_keys::get(&pool, &org, &KeyScope::Inbox(inbox), &created.api_key_id)
+        .await
+        .unwrap()
+        .expect("just created");
+    assert_eq!(fetched.pod_id, Some(pod));
+}
+
+/// `list` at BOTH the org mount and the inbox mount also backfills `pod_id` — and, critically,
+/// still paginates correctly afterwards: the keyset cursor's own `pod_id`/`inbox_id` pair records
+/// which MOUNT a page was walked at (always `(None, Some(inbox))` for an inbox-mount page), which
+/// is a DIFFERENT concept from the response's own display `pod_id` this divergence adds. A naive
+/// fix that backfilled the response's `pod_id` before building the cursor would corrupt that
+/// invariant and break every second page of an inbox-scoped listing — this seeds a second
+/// inbox-scoped key so `limit: 1` actually forces a second page, and asserts the second page is
+/// reachable at all before checking its own `pod_id`.
+#[tokio::test]
+async fn list_for_inbox_scoped_keys_backfills_pod_id_without_breaking_pagination() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let first = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox.clone()),
+            name: "inbox-key-1".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+    let second = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox.clone()),
+            name: "inbox-key-2".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Org-mount listing, one page at a time.
+    let page1 = api_keys::list(&pool, &org, &KeyScope::Organization, no_cursor(1))
+        .await
+        .unwrap();
+    assert_eq!(page1.items.len(), 1);
+    assert_eq!(page1.items[0].pod_id, Some(pod), "org-mount listing must backfill pod_id too");
+    let token = page1
+        .next
+        .expect("a second key exists, so a next_page_token must be present");
+    let cursor = ApiKeyCursor::decode(&token, &KeyScope::Organization).unwrap();
+    let page2 = api_keys::list(
+        &pool,
+        &org,
+        &KeyScope::Organization,
+        ListApiKeysQuery { limit: 1, direction: SortDirection::Ascending, cursor: Some(cursor) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page2.items.len(), 1, "the cursor must still resolve the second page");
+    assert_eq!(page2.items[0].pod_id, Some(pod));
+    let seen: std::collections::BTreeSet<_> =
+        [&page1.items[0].api_key_id, &page2.items[0].api_key_id]
+            .into_iter()
+            .cloned()
+            .collect();
+    assert!(seen.contains(&first.api_key_id) && seen.contains(&second.api_key_id));
+
+    // Inbox-mount listing — the mount whose own cursor `pod_id`/`inbox_id` pair
+    // (`(None, Some(inbox))`) is the one a naive backfill-before-cursor implementation would
+    // corrupt.
+    let inbox_page1 = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox.clone()), no_cursor(1))
+        .await
+        .unwrap();
+    assert_eq!(inbox_page1.items.len(), 1);
+    assert_eq!(inbox_page1.items[0].pod_id, Some(pod));
+    let inbox_token = inbox_page1
+        .next
+        .expect("a second inbox-scoped key exists, so a next_page_token must be present");
+    let inbox_cursor = ApiKeyCursor::decode(&inbox_token, &KeyScope::Inbox(inbox.clone())).unwrap();
+    let inbox_page2 = api_keys::list(
+        &pool,
+        &org,
+        &KeyScope::Inbox(inbox.clone()),
+        ListApiKeysQuery {
+            limit: 1,
+            direction: SortDirection::Ascending,
+            cursor: Some(inbox_cursor),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        inbox_page2.items.len(),
+        1,
+        "the inbox-mount cursor must still resolve its second page after the pod_id backfill"
+    );
+    assert_eq!(inbox_page2.items[0].pod_id, Some(pod));
+}
+
+/// A pod-scoped key still carries `pod_id` and no `inbox_id` — the scope columns are unchanged;
+/// only the inbox-scoped response shape gains a field.
+#[tokio::test]
+async fn a_pod_scoped_key_still_carries_pod_id_and_no_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+
+    let created = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: Some(pod),
+            inbox_id: None,
+            name: "pod-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.pod_id, Some(pod));
+    assert_eq!(created.inbox_id, None);
+
+    let fetched = api_keys::get(&pool, &org, &KeyScope::Pod(pod), &created.api_key_id)
+        .await
+        .unwrap()
+        .expect("just created");
+    assert_eq!(fetched.pod_id, Some(pod));
+    assert_eq!(fetched.inbox_id, None);
+}
+
+/// An organization-scoped key carries neither `pod_id` nor `inbox_id` — unaffected by this
+/// divergence, asserted so a future change to the inbox-scoped backfill cannot silently widen to
+/// also touch this scope.
+#[tokio::test]
+async fn an_org_scoped_key_carries_neither_pod_id_nor_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+
+    let created = api_keys::create(&pool, org_key(&org, "org-scoped-neither"))
+        .await
+        .unwrap();
+    assert_eq!(created.pod_id, None);
+    assert_eq!(created.inbox_id, None);
+
+    let fetched = api_keys::get(&pool, &org, &KeyScope::Organization, &created.api_key_id)
+        .await
+        .unwrap()
+        .expect("just created");
+    assert_eq!(fetched.pod_id, None);
+    assert_eq!(fetched.inbox_id, None);
+}
+
 // ---- the CHECK: pod_id and inbox_id are mutually exclusive --------------------------------
 
 #[tokio::test]

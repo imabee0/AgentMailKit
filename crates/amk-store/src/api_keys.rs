@@ -265,6 +265,45 @@ fn row_to_authenticated(row: &PgRow) -> Result<AuthenticatedKey, StoreError> {
     })
 }
 
+/// Divergence 4 (`reference/fixtures/25-p1-gate-conformance.txt`): one live key returned
+/// `organization_id`, `pod_id` AND `inbox_id` together. `inbox_id` stays the *scope* — the
+/// migration's own `CHECK` (an inbox-scoped row's `pod_id` column is always `NULL`, by design,
+/// not stored redundantly — see `0007_api_keys.sql`'s own comment) is untouched — `pod_id` here is
+/// the containing pod, the same denormalised provenance `organization_id` already is on every
+/// object. Not a column: a read-time lookup through the inbox itself, the same shape
+/// `amk_http::auth`'s `AuthContext` already resolves for building `Identity`/`Scope`. `None` on a
+/// genuine miss (the key's own inbox was deleted in the same instant this runs — `inboxes::delete`
+/// cascades to inbox-scoped keys, migration 0008, so this is a narrow concurrent-delete race, not
+/// a reachable steady state) rather than an error: a response missing one denormalised field is
+/// strictly better than failing the whole request over it.
+async fn pod_of_inbox(
+    pool: &PgPool,
+    organization_id: &OrganizationId,
+    inbox_id: &InboxId,
+) -> Result<Option<PodId>, StoreError> {
+    Ok(crate::inboxes::get(pool, organization_id, None, inbox_id)
+        .await?
+        .map(|inbox| inbox.pod_id))
+}
+
+/// [`row_to_api_key`] plus the [`pod_of_inbox`] backfill for an inbox-scoped row — every caller
+/// that hands a row to a client goes through this, never `row_to_api_key` directly, so the
+/// backfill cannot be forgotten at a new call site. `row_to_api_key` itself stays row-only
+/// (`&PgRow`, no pool, no `async`) because [`list`]'s own keyset cursor is built from the SAME
+/// raw, un-backfilled `pod_id`/`inbox_id` pair — see its own doc for why backfilling before that
+/// cursor is built would corrupt pagination at the inbox mount.
+async fn hydrate_api_key(
+    pool: &PgPool,
+    organization_id: &OrganizationId,
+    row: &PgRow,
+) -> Result<ApiKey, StoreError> {
+    let mut key = row_to_api_key(row)?;
+    if let Some(inbox_id) = key.inbox_id.clone() {
+        key.pod_id = pod_of_inbox(pool, organization_id, &inbox_id).await?;
+    }
+    Ok(key)
+}
+
 // ---- repository ------------------------------------------------------------------------------
 //
 // `api_key_id` is stored as a `uuid` column (the migration's own decision) while [`ApiKeyId`] is
@@ -440,6 +479,19 @@ pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyRespons
             Err(e) => return Err(e.into()),
         };
 
+        let row_pod_id: Option<Uuid> = row.try_get("pod_id")?;
+        let row_inbox_id: Option<String> = row.try_get::<Option<String>, _>("inbox_id")?;
+        // Divergence 4: an inbox-scoped row's own `pod_id` column is always `NULL` (by design,
+        // the migration's own comment), so this row-level value is backfilled from the inbox the
+        // key was just created against — same lookup [`hydrate_api_key`] does for `get`/`list`.
+        let response_pod_id = match (row_pod_id, &row_inbox_id) {
+            (Some(p), _) => Some(PodId::from(p)),
+            (None, Some(i)) => {
+                pod_of_inbox(pool, &new.organization_id, &InboxId::new(i.as_str())).await?
+            }
+            (None, None) => None,
+        };
+
         return Ok(CreateApiKeyResponse {
             organization_id: Some(OrganizationId::new(
                 row.try_get::<String, _>("organization_id")?,
@@ -448,10 +500,8 @@ pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyRespons
             api_key: secret,
             prefix: row.try_get("prefix")?,
             name: row.try_get("name")?,
-            pod_id: row.try_get::<Option<Uuid>, _>("pod_id")?.map(PodId::from),
-            inbox_id: row
-                .try_get::<Option<String>, _>("inbox_id")?
-                .map(InboxId::new),
+            pod_id: response_pod_id,
+            inbox_id: row_inbox_id.map(InboxId::new),
             permissions: row_permissions(&row)?,
             created_at: Timestamp::from(row.try_get::<DateTime<Utc>, _>("created_at")?),
         });
@@ -494,7 +544,10 @@ pub async fn get(
         .bind(inbox_param)
         .fetch_optional(pool)
         .await?;
-    row.as_ref().map(row_to_api_key).transpose()
+    match row {
+        Some(row) => Ok(Some(hydrate_api_key(pool, organization_id, &row).await?)),
+        None => Ok(None),
+    }
 }
 
 /// One list request, already resolved to a concrete direction and a decoded (and scope-validated)
@@ -565,7 +618,15 @@ pub async fn list(
         .await?;
 
     let has_more = rows.len() as u64 > query.limit;
-    let items: Vec<ApiKey> = rows
+    // Deliberately `row_to_api_key`, NOT `hydrate_api_key`, here: the cursor built two statements
+    // below reads `pod_id`/`inbox_id` off `items.last()`, and those two fields on THIS struct
+    // record which MOUNT the page was walked at (`ApiKeyCursor`'s own doc) — a different concept
+    // from the response's own display `pod_id` divergence 4 adds. Backfilling before the cursor
+    // is built would make an inbox-mount page's cursor carry `pod_id: Some(_)`, which
+    // `ApiKeyCursor::decode`'s `check_key_scope` then compares against `KeyScope::Inbox`'s own
+    // `(None, Some(inbox))` pin and rejects — corrupting every second page of an inbox-scoped
+    // listing. The backfill runs afterwards, below, once the cursor no longer needs these values.
+    let mut items: Vec<ApiKey> = rows
         .iter()
         .take(query.limit as usize)
         .map(row_to_api_key)
@@ -575,18 +636,43 @@ pub async fn list(
         let last = items
             .last()
             .expect("has_more implies at least one item when limit > 0");
+        // The cursor's `pod_id`/`inbox_id` record which MOUNT this page was walked at
+        // (`ApiKeyCursor`'s own doc), not the last row's own scope columns — those agree for the
+        // pod and inbox mounts (every row a pod/inbox-scoped query returns is itself pinned to
+        // that same pod/inbox), but NOT for the organization mount, whose own listing returns
+        // rows "at every scope level" (`org_mount_listing_returns_every_scope_level_within_the_
+        // organization`'s own words): `last.pod_id`/`last.inbox_id` there is whatever the LAST
+        // ROW happens to be scoped to, which `ApiKeyCursor::decode`'s `check_key_scope` then
+        // rejects as `WrongScope` against `KeyScope::Organization`'s own `(None, None)` pin the
+        // moment a page boundary lands on a pod- or inbox-scoped key — silently breaking
+        // pagination on the one mount fixture 25's own seed script exercises (keys "at all three
+        // scopes"). Derived from `scope` itself, the same source `check_key_scope` validates
+        // against, rather than from the row, so the two can never drift apart again.
+        let (mount_pod, mount_inbox): (Option<PodId>, Option<InboxId>) = match scope {
+            KeyScope::Organization => (None, None),
+            KeyScope::Pod(p) => (Some(*p), None),
+            KeyScope::Inbox(i) => (None, Some(i.clone())),
+        };
         Some(
             ApiKeyCursor {
                 created_at: last.created_at.into_inner(),
                 api_key_id: last.api_key_id.clone(),
-                pod_id: last.pod_id,
-                inbox_id: last.inbox_id.clone(),
+                pod_id: mount_pod,
+                inbox_id: mount_inbox,
             }
             .encode(),
         )
     } else {
         None
     };
+
+    // Divergence 4's backfill, now that the cursor is built from the raw values: an inbox-scoped
+    // item's `pod_id` becomes the inbox's own containing pod.
+    for item in items.iter_mut() {
+        if let Some(inbox_id) = item.inbox_id.clone() {
+            item.pod_id = pod_of_inbox(pool, organization_id, &inbox_id).await?;
+        }
+    }
 
     Ok(Page { items, next })
 }

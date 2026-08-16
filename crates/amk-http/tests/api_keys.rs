@@ -62,7 +62,15 @@ async fn create_at_pod_mount_is_pod_scoped_and_at_inbox_mount_is_inbox_scoped() 
     assert_eq!(inbox_resp.status, 200, "body: {}", inbox_resp.body);
     let v = inbox_resp.json.unwrap();
     assert_eq!(v["inbox_id"], inbox.as_str());
-    assert!(v.get("pod_id").is_none(), "an inbox-scoped key's own pod_id column is NULL");
+    // Divergence 4 (fixture 25): the STORED row's own `pod_id` column is still NULL for an
+    // inbox-scoped key — `inbox_id` alone is the scope, the CHECK is untouched — but the RESPONSE
+    // now also carries `pod_id`, the containing pod, as denormalised provenance. `pod` here is
+    // that same containing pod (the inbox was created in it above), not merely `is_some()`.
+    assert_eq!(
+        v["pod_id"],
+        pod.to_string(),
+        "an inbox-scoped key's response must carry the pod that actually contains its inbox"
+    );
 }
 
 #[tokio::test]
