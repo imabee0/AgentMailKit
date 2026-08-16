@@ -1941,3 +1941,87 @@ async fn inboxes_list_rejects_a_nul_byte_in_a_hand_built_cursor() {
          or a raw database error: {result:?}"
     );
 }
+
+// ---- organizations::exists — the one bit `amk init` needs -------------------------------------
+
+/// `amk init` must refuse to run twice, and it cannot ask [`organizations::get`] because a second
+/// invocation holds no id — it mints a fresh UUID, so nothing it has could collide with the first
+/// run's row and `create`'s plain INSERT would SUCCEED, silently minting a second organization,
+/// pod and root key. This is the query that makes the refusal possible. Asserted in both
+/// directions on the same database, because a predicate that always returns `true` (or always
+/// `false`) would pass a one-directional test and break `init` in opposite ways.
+#[tokio::test]
+async fn organizations_exists_reports_both_directions() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    // The suite shares one database, so "empty" is not observable here; what IS observable is that
+    // exists() is true once a row is present, and that it is driven by the rows rather than
+    // hardcoded — the delete half below is what pins the second direction.
+    let org = support::seed_org(&pool).await;
+    assert!(
+        organizations::exists(&pool).await.unwrap(),
+        "a seeded organization must make exists() true"
+    );
+    assert!(
+        organizations::get(&pool, &org).await.unwrap().is_some(),
+        "control: the row this test seeded is really there"
+    );
+}
+
+/// The second direction, on an isolated schema: a database with no organizations reports `false`.
+/// Run against a dedicated connection with the table emptied inside a transaction that is rolled
+/// back, so the shared suite database is untouched.
+#[tokio::test]
+async fn organizations_exists_is_false_when_there_are_none() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let mut tx = pool.begin().await.unwrap();
+    // Everything referencing organizations goes first; migration 0008 cascades inboxes' children
+    // but pods/organizations are RESTRICT by design (see pods::delete's PodNotEmpty path).
+    for stmt in [
+        "DELETE FROM messages",
+        "DELETE FROM threads",
+        "DELETE FROM api_keys",
+        "DELETE FROM inboxes",
+        "DELETE FROM pods",
+        "DELETE FROM organizations",
+    ] {
+        sqlx::query(stmt).execute(&mut *tx).await.unwrap();
+    }
+    let seen: (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM organizations)")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert!(!seen.0, "with every organization deleted, the predicate must be false");
+    tx.rollback().await.unwrap();
+
+    // And the rollback really restored the world — otherwise this test would have silently
+    // destroyed every other test's fixtures.
+    assert!(
+        organizations::exists(&pool).await.unwrap(),
+        "the transaction must have rolled back; the suite's own rows are still here"
+    );
+}
+
+/// `migration_status` is what `amk doctor` and `amk migrate` report from. Against the dev database
+/// — which `support::pool()` has already migrated — applied must equal embedded, and `embedded`
+/// must be the real count rather than zero (a zero-vs-zero comparison would make `is_current()`
+/// vacuously true on a database with no schema at all).
+#[tokio::test]
+async fn migration_status_reports_a_current_schema_with_a_nonzero_count() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let status = amk_store::migration_status(&pool).await.unwrap();
+    assert!(
+        status.embedded > 0,
+        "the crate embeds migrations; a zero count is a broken macro"
+    );
+    assert_eq!(
+        status.applied, status.embedded,
+        "support::pool() migrates before returning, so the schema must be current: {status:?}"
+    );
+    assert!(status.is_current());
+}

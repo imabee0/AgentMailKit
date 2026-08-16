@@ -265,7 +265,23 @@ check security-timing-guard-live yes \
 # stdlib-only, so nothing today would fail if the client were missing. Version pinned in
 # `conformance/requirements-gate.txt` — an acceptance test whose point is that the UNMODIFIED
 # official client works is not that test if it runs against an arbitrary version.
-pend p0-gate-sdk-authme      "P0 gate: official Python SDK auth.me() vs localhost (needs amk-http; SDK pinned in conformance/requirements-gate.txt, install to .venv-gate)"
+# Was a bare `pend` — statically wired to PENDING, never routed through `check()`, so no amount of
+# implementation could ever have flipped it. Caught by the pre-dispatch review of
+# `.claude/contracts/amk-bins.md`, which noticed the contract claimed the binaries dispatch would
+# make this line stop reading PENDING when nothing in that dispatch's writable paths could.
+#
+# A ledger line that cannot change state is not a check, it is a comment that looks like one — the
+# same defect shape as `harness-permissions-per-role` grepping for a literal `deny:` that an inert
+# key satisfied. Now it asserts the EVIDENCE, in this project's own idiom: the gate is run by hand
+# against a live server (too heavy for every `check.sh`), and its verbatim transcript is captured
+# as a fixture. The fixture must exist and must contain a real Identity response, not a placeholder.
+check p0-gate-sdk-authme no "P0 gate: official Python SDK auth.me() vs localhost, transcript captured" \
+  bash -c '
+    f=reference/fixtures/24-p0-gate-sdk-authme.txt
+    [ -f "$f" ] || exit 1
+    grep -q "organization_id" "$f" &&
+    grep -qi "agentmail" "$f" &&
+    ! grep -qi "placeholder\|TODO\|not yet run" "$f"
 pend p1-gate-conformance     "P1 gate: dual-target conformance diff clean for P1 endpoints"
 pend p6-restore-drill        "P6: restore drill passes from backups alone, before any cutover step"
 

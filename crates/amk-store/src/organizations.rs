@@ -94,6 +94,26 @@ pub async fn get(
     }
 }
 
+/// Whether this deployment has been initialised at all — a bare boolean, no ids, no rows.
+///
+/// Exists for exactly one caller: `amk init`, which must refuse to run twice. It cannot use
+/// [`get`], because a second `amk init` invocation has no id in hand — it mints a fresh UUID, so
+/// nothing it holds could collide with the first run's row, and `create`'s plain `INSERT` would
+/// **succeed**, silently minting a second organization, a second default pod and a second root
+/// key. An untracked credential with every permission is the worst possible outcome of a typo'd
+/// re-run, and "it happens to fail on a unique violation" was never true here.
+///
+/// Deliberately not a resurrection of `list`, which was deleted for taking no credential and
+/// returning every organization in the deployment: this discloses one bit — *some* organization
+/// exists — and no identifier, no count, no row. That is the whole difference, and it is why this
+/// is safe to expose where `list` was not.
+pub async fn exists(pool: &PgPool) -> Result<bool, StoreError> {
+    let row: (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM organizations)")
+        .fetch_one(pool)
+        .await?;
+    Ok(row.0)
+}
+
 pub async fn delete(pool: &PgPool, organization_id: &OrganizationId) -> Result<bool, StoreError> {
     let result = sqlx::query("DELETE FROM organizations WHERE organization_id = $1")
         .bind(organization_id.as_str())

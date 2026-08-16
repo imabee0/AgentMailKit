@@ -52,4 +52,4 @@ pub use error::{PageTokenError, StoreError};
 pub use pagination::{
     ApiKeyCursor, InboxCursor, MessageCursor, Page, PodCursor, SortDirection, ThreadCursor,
 };
-pub use pool::{connect, connect_unmigrated};
+pub use pool::{connect, connect_unmigrated, migration_status, MigrationStatus};
