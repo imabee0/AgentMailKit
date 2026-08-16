@@ -1,0 +1,111 @@
+Fixture 25 — P1 control-plane gate: the first dual-target conformance diff against a live
+candidate. api.agentmail.to vs a throwaway localhost deployment, 2026-08-16.
+
+WHAT THIS IS: the plan's P1 gate is "dual-target conformance diff clean for all endpoints
+implemented in this phase". This is its first real execution. It is NOT clean — it found four
+divergences in `amk-http`'s 25 mounted operations, each recorded below with the observation that
+establishes it. The plan's own framing applies: naming lints catch structural leakage, only this
+diff catches semantic divergence.
+
+METHOD. `conformance/dual_target.py conformance/manifest.json`, candidate = `amkd --role api` on
+127.0.0.1:8111 against a throwaway Postgres database (`amk_gate`/`amk_p1gate`, dropped after the
+run), seeded through the candidate's own public API. Reference = the live account, read-only for
+every request in the manifest. Keys injected via `sdxd run`; neither key appears here.
+
+TWO HARNESS DEFECTS FOUND FIRST, BOTH OF WHICH WERE MANUFACTURING FAKE DIFFS
+================================================================================
+The harness could not run dual-target at all until these were fixed, and its first two runs
+reported 14 and 10 diffs that were mostly its own.
+
+1. **Ids were hardcoded to the reference account.** `manifest.json` carried
+   `9047724b-…` and `amk-probe@agentmail.to`; those do not exist on a candidate, and the README
+   said to "swap them by hand when running against localhost" — which is not a gate anyone can
+   re-run. Ids are now `{placeholders}` resolved per target by listing that target.
+
+2. **Placeholders resolved independently, so they were incoherent.** `{pod_id}` took the first pod
+   and `{inbox_id}` the first inbox — not necessarily an inbox *in* that pod. On the candidate they
+   were different, so `GET /v0/pods/{pod_id}/inboxes/{inbox_id}` returned 404 on one side and 200
+   on the other, and the harness reported it as an eight-field shape difference. Resolution is now
+   ordered and dependent: `{inbox_id}` resolves from `/v0/pods/{pod_id}/inboxes`.
+
+A third class was not a harness bug but a property of the contract worth stating: **optionals are
+omitted when absent, so a shape diff is only as good as the STATE parity of the two accounts.** A
+candidate whose inboxes never set `client_id` reports it "missing" against a reference whose
+inboxes do; a candidate with one pod can never emit `next_page_token`. The seed step now mirrors
+the reference's *mix* — inboxes with and without `client_id`, keys at all three scopes, enough rows
+to paginate. Four of the original 14 "diffs" were this and nothing else.
+
+An unresolvable placeholder is now a `[SKIP]` that FAILS the run. Silently dropping a request
+would let the gate shrink while still printing a pass, which is the failure shape this project
+keeps finding in its own checks.
+
+================================================================================
+DIVERGENCE 1 — GET /v0/organizations emits 5 of the reference's 17 fields
+================================================================================
+
+  REF  authentication_id, authentication_type, billing_plan_id, clerk_organization_id, created_at,
+       daily_send_limit, domain_count, domain_limit, first_day_recipient_limit,
+       first_week_recipient_limit, five_minute_send_limit, inbox_count, inbox_limit, name,
+       organization_id, tracking_allowed, updated_at
+  CAND created_at, domain_count, inbox_count, organization_id, updated_at
+
+Twelve missing. Two of them — `billing_plan_id` and `clerk_organization_id` — are billing and
+auth-vendor surface that this project excludes by decision, so they are an intentional divergence
+and must be recorded as one rather than fixed. The other ten are not: `inbox_limit` and
+`domain_limit` are already columns on our `organizations` table and simply are not emitted.
+
+================================================================================
+DIVERGENCE 2 — the error envelope omits `fix`
+================================================================================
+
+  GET /v0/no-such-route   ref 404, cand 404 — `- $.fix: present in REF, MISSING in CAND`
+  DELETE /v0/auth/me      ref 404, cand 404 — same
+
+Status, `name`, `code`, `message` and `docs` all match. `fix` is documented in the envelope
+(`[SPEC:docs errors]`, and B1 in the plan) and we never emit it.
+
+================================================================================
+DIVERGENCE 3 — a malformed id in a path segment escapes the error contract entirely
+================================================================================
+
+  GET /v0/pods/not-a-uuid
+    ! status: ref=404 cand=400
+    ! header content-type: ref='application/json' cand='text/plain'
+    - $.code / $.docs / $.fix / $.message / $.name: present in REF, MISSING in CAND
+    + $.__nonjson__: present in CAND, absent in REF
+
+This is axum's own `Path<Uuid>` rejection leaking straight to the client: a plain-text 400 from a
+server whose entire error contract is a JSON envelope. Note `GET /v0/pods/<well-formed but absent
+uuid>` PASSES — so the handler is right and the extractor is what escapes. It is the same class as
+the "there is no 405" rule the amk-http contract already enforces, one layer further out, and it
+was not caught because every existing test reaches the handler.
+
+================================================================================
+DIVERGENCE 4 — an inbox-scoped api key must also carry its pod_id
+================================================================================
+
+Probed directly, because it decides a schema question:
+
+  GET /v0/api-keys (reference, count 2)
+    key: {organization_id: <set>, pod_id: -,     inbox_id: -    } | permissions: False | used_at: True
+    key: {organization_id: <set>, pod_id: <set>, inbox_id: <set>} | permissions: True  | used_at: False
+
+**The reference emits `pod_id` AND `inbox_id` on the same key.** Ours emits only `inbox_id` for an
+inbox-scoped key. `NewApiKey`'s own doc says "exactly one of `pod_id`/`inbox_id` may be `Some` —
+enforced by the migration's `CHECK`", so the divergence reads at first like a storage-model
+conflict. It is not: `inbox_id` is still the *scope*, and `pod_id` is the containing pod, the same
+denormalised provenance `organization_id` already is on every object. The scope CHECK stays; the
+response gains the pod the inbox belongs to.
+
+NOT a divergence, checked and dismissed: `permissions` is absent on our keys because none of the
+seeded keys set any (absent grants everything — the NULL-vs-`{}` distinction), and absent-means-
+omitted is correct. The reference's second key has an explicit permissions object, which is state.
+The gate's seed should mint one key with explicit permissions so the field is exercised rather
+than assumed.
+
+================================================================================
+RESULT
+================================================================================
+
+19 requests, 19 compared, 0 skipped, 12 with structural diffs — reducing to the four distinct
+causes above. `p1-gate-conformance` stays PENDING until they are closed and this diff is clean.

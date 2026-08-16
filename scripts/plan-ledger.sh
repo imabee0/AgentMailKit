@@ -149,6 +149,7 @@ DEFERRALS=$(cat <<'EOF'
 17-message-complained.txt|amk-events complaint payload, P4
 20-search-and-label-precedence.txt|amk-core label access modes, P1
 24-p0-gate-sdk-authme.txt|P0 gate transcript, asserted by plan-ledger
+25-p1-gate-conformance.txt|P1 gate diff, asserted by the conformance run
 C1-domain-shape.txt|amk-types domain shapes, P5
 EOF
 )

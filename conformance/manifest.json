@@ -1,16 +1,97 @@
 {
-  "_comment": "Read-only request manifest for the dual-target conformance harness. Expands per phase as endpoints are implemented. Paths use the throwaway probe resources where an id is needed; swap for the candidate server's own seeded ids when running against localhost. Destructive/mutating requests are added only against throwaway scopes.",
+  "_comment": "Dual-target manifest for the P1 control-plane gate. Covers the READ surface of the 25 operations amk-http mounts, plus the error-shape asymmetry. Ids are PLACEHOLDERS resolved per target at runtime (see `resolve`), because the reference account's pod is not our pod and `inbox_id` IS an email address \u2014 a hardcoded id can only ever exist on one side. Mutating requests are NOT here: every POST/PATCH/DELETE in this phase creates or destroys a real resource on the reference account, so they are exercised by the SDK smoke against the candidate and added here only against a throwaway scope.",
+  "resolve": {
+    "pod_id": {
+      "from": "/v0/pods?limit=1",
+      "pick": "pods.0.pod_id"
+    },
+    "inbox_id": {
+      "from": "/v0/pods/{pod_id}/inboxes?limit=1",
+      "pick": "inboxes.0.inbox_id"
+    }
+  },
   "requests": [
-    { "method": "GET", "path": "/v0/auth/me" },
-    { "method": "GET", "path": "/v0/organizations" },
-    { "method": "GET", "path": "/v0/pods?limit=5" },
-    { "method": "GET", "path": "/v0/inboxes?limit=5" },
-    { "method": "GET", "path": "/v0/pods/9047724b-2879-416b-8424-82ef81ab9397/inboxes" },
-    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to" },
-    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to/messages?limit=1" },
-    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to/threads?limit=5" },
-    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to/webhooks" },
-    { "method": "GET", "path": "/v0/inboxes/amk-probe@agentmail.to/drafts" },
-    { "method": "GET", "path": "/v0/auth/me", "auth": false, "_note": "unauth => bare 401, exercises the error-shape asymmetry (A8)" }
+    {
+      "method": "GET",
+      "path": "/v0/auth/me"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/organizations"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods?limit=1"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods/{pod_id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/inboxes"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/inboxes?limit=1"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/inboxes/{inbox_id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods/{pod_id}/inboxes"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods/{pod_id}/inboxes?limit=1"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods/{pod_id}/inboxes/{inbox_id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/api-keys"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods/{pod_id}/api-keys"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/inboxes/{inbox_id}/api-keys"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/auth/me",
+      "auth": false,
+      "_note": "unauth -> BARE {message} 401, not the full envelope (A8 asymmetry, fixture 05)"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods/00000000-0000-4000-8000-000000000000",
+      "_note": "well-formed id that does not exist -> not_found envelope"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/pods/not-a-uuid",
+      "_note": "malformed id in a path segment -> whatever the reference does, we must match"
+    },
+    {
+      "method": "GET",
+      "path": "/v0/no-such-route",
+      "_note": "unknown path -> full envelope, code not_found (never a 405, fixture 05)"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v0/auth/me",
+      "_note": "wrong method on a real path -> the SAME 404 envelope, never 405"
+    }
   ]
 }

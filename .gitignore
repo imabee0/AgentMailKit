@@ -19,3 +19,7 @@
 
 # Throwaway venv for the SDK phase gates; see conformance/requirements-gate.txt
 .venv-gate/
+
+# Python bytecode from importing the conformance harness as a module.
+__pycache__/
+*.pyc
