@@ -113,8 +113,18 @@ pub fn router(state: AppState) -> Router {
 /// never the bare auth-layer shape (this fires before or independent of auth; a client can learn
 /// a route does not exist without presenting any credential at all, matching the live API's own
 /// `am_us_...` route-not-found capture in fixture 23: *"Route not found"*).
+///
+/// The explicit `with_fix` is divergence 2 (`reference/fixtures/25-p1-gate-conformance.txt`):
+/// `GET /v0/no-such-route` carries a route-specific `fix` live ("No route matches this path and
+/// HTTP method...") — a different sentence from `error::fix_for`'s generic `NotFound` default,
+/// which exists for a resource lookup, not a route. Overriding it here, once, at the one call
+/// site that means "no route", is cheaper and more honest than teaching the generic default to
+/// guess which of the two situations produced it.
 async fn not_found_fallback() -> AppError {
-    AppError::new(amk_types::ErrorCode::NotFound, "Route not found")
+    AppError::new(amk_types::ErrorCode::NotFound, "Route not found").with_fix(
+        "No route matches this path and HTTP method; check the URL and the HTTP verb against \
+         the documented operations.",
+    )
 }
 
 #[cfg(test)]

@@ -54,13 +54,124 @@ impl AppError {
         eprintln!("amk-http: internal error: {context}");
         Self::new(ErrorCode::InternalError, "Internal error.")
     }
+
+    /// Override the per-code default [`fix_for`] would otherwise backfill — see
+    /// `IntoResponse for AppError`'s own doc for why a handler only ever needs this when it has
+    /// more specific guidance than the generic default (`lib.rs`'s `not_found_fallback` is the one
+    /// caller today).
+    pub fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.0.fix = Some(fix.into());
+        self
+    }
+}
+
+/// Divergence 2 (`reference/fixtures/25-p1-gate-conformance.txt`): `GET /v0/no-such-route` and
+/// `DELETE /v0/auth/me` both carried `fix` live; ours omitted it everywhere. `ErrorEnvelope`
+/// already has the field and `ErrorCode::docs_url()` is the same per-code mechanism already
+/// wired for `docs` — this is that same mechanism for `fix`, kept in this crate because
+/// `amk-types` is frozen for this dispatch.
+///
+/// One sentence per code, exhaustive (no wildcard, so a new `ErrorCode` variant fails to compile
+/// here until it is given one — the same discipline `ErrorCode::as_str` already has). `NotFound`'s
+/// text is `amk_types::error`'s own pinned round-trip fixture
+/// (`not_found_envelope_matches_live_capture`) verbatim, the one code with a complete (untrimmed)
+/// captured sentence to reuse; every other code is written fresh, in the same register — the rest
+/// of `reference/fixtures/05-error-catalog.http`'s captures are hand-trimmed with a mid-sentence
+/// "..." and are not literal wire text to copy.
+///
+/// `NotFound`'s own text is deliberately generic (not resource-specific): this same code covers
+/// both an absent resource lookup (`amk_core::scope::ScopeDenial`, which already sets a
+/// resource-aware `fix` of its own — see `IntoResponse for AppError` for why that value survives
+/// untouched) and a route that never matched at all (`lib.rs`'s `not_found_fallback`, which sets
+/// a route-specific override via [`AppError::with_fix`]). This default only has to be honest for
+/// whatever is left after both of those, which is `amk_core::permissions::Denial::Hidden`.
+fn fix_for(code: ErrorCode) -> &'static str {
+    use ErrorCode::*;
+    match code {
+        // 401 — never actually reaches this function: the auth layer emits the bare
+        // `GatewayFailure` body for all four of these, which has no `fix` field to fill. Entries
+        // exist only so this match stays exhaustive over every `ErrorCode` variant.
+        MissingAuthorization | Unauthorized => {
+            "Include an `Authorization: Bearer <api key>` header on the request."
+        }
+        InvalidTokenType => "Use a Bearer token; other authorization schemes are not accepted.",
+        UnknownApiKey => "Check that the api key is correct and has not been revoked.",
+        // 403
+        MissingPermission => {
+            "Grant this api key the permission the requested operation needs, \
+            or use a key that already has it."
+        }
+        PermissionEscalation => {
+            "A restricted key cannot mint or be granted a permission its \
+            own key does not hold; request only a subset of this key's own permissions."
+        }
+        UnrestrictedKeyRequired => {
+            "Use an organization-scoped key with no permission restrictions for this operation."
+        }
+        Forbidden => {
+            "This credential is not authorized for the requested resource; use a key \
+            with the required scope."
+        }
+        MessageRejected => {
+            "The outbound message was rejected; check the sender, recipients and \
+            content before retrying."
+        }
+        AlreadyExists | ResourceTaken => {
+            "Choose a different, available identifier — see suggestions for alternatives, if \
+            present — and retry."
+        }
+        LimitExceeded => {
+            "This organization has reached its configured limit for the resource; \
+            raise the limit or free up capacity before retrying."
+        }
+        DomainNotVerified => "Verify the domain's DNS records before using it.",
+        // 400 / 404 / 422
+        ValidationError => {
+            "Inspect the errors array — each entry names a path and a message — \
+            and correct the request body."
+        }
+        // Verbatim, `reference/fixtures/05-error-catalog.http`'s one complete capture — see this
+        // function's own doc for why it is deliberately generic rather than resource-specific.
+        NotFound => "No inbox with the given identifier is visible to this credential.",
+        Unprocessable => {
+            "The request was well-formed but could not be processed; check the \
+            values against the documented constraints."
+        }
+        QueryRangeTooWide => "Narrow the query's date or id range and retry.",
+        // 409
+        Conflict | RaceCondition => {
+            "The resource's current state conflicts with this request; reload it and retry."
+        }
+        ResourceDeleting => {
+            "This resource is being deleted and cannot be modified; wait for \
+            deletion to finish."
+        }
+        CannotDelete => {
+            "Remove or reassign the resources that still depend on this one before \
+            deleting it."
+        }
+        // 429 / 5xx
+        RateLimitExceeded => "Slow down and retry after a short delay.",
+        ServiceUnavailable => "The service is temporarily unavailable; retry after a short delay.",
+        InternalError => "Retry the request; if it keeps failing, contact support.",
+    }
 }
 
 impl IntoResponse for AppError {
+    /// The one place every [`AppError`] becomes bytes — so it is also the one place `fix` is
+    /// guaranteed filled, whichever of this crate's several construction paths built the envelope
+    /// (`AppError::new`, `From<ErrorEnvelope>`, `From<ScopeDenial>`, `From<Denial>`). A
+    /// construction that already set `fix` — `amk_core::scope::ScopeDenial::into_envelope`'s own
+    /// resource-aware text, or `AppError::with_fix`'s explicit override — is left untouched: this
+    /// only fills a `None`, never overwrites a `Some`.
     fn into_response(self) -> Response {
+        let mut envelope = self.0;
+        if envelope.fix.is_none() {
+            envelope.fix = Some(fix_for(envelope.code).to_owned());
+        }
         let status =
-            StatusCode::from_u16(self.0.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, Json(self.0)).into_response()
+            StatusCode::from_u16(envelope.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(envelope)).into_response()
     }
 }
 
