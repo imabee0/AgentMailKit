@@ -403,6 +403,7 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         "19-message-label-patch-gate.txt",
         "21-unbracketed-in-reply-to.txt",
         "22-org-mount-and-delete-semantics.txt",
+        "23-inbox-defaults-and-key-shape.txt",
     ];
     // Deferred WITH a reason and the phase that closes it. Not a parking lot: each entry names the
     // crate that will assert it, and this list may only shrink.
@@ -539,5 +540,37 @@ fn cannot_delete_is_409_per_fixture_22() {
     assert_eq!(
         amk_types::error::ErrorCode::CannotDelete.as_str(),
         envelope["code"].as_str().unwrap()
+    );
+}
+
+/// Fixture 23 pinned the shape of a real minted key, superseding the `[ASSUMED]` guess the
+/// api-keys dispatch shipped. `prefix` is a wire field on every `ApiKey` response, so its shape is
+/// not ours to choose.
+///
+/// Asserted here rather than in `amk-store` because this is a wire-shape claim, and asserted by
+/// reading the capture: the fixture's own `prefix` value decides the expected length, so a comment
+/// saying "6" could not drift away from a constant saying 8.
+#[test]
+fn minted_key_prefix_shape_matches_fixture_23() {
+    let text = fixture("23-inbox-defaults-and-key-shape.txt");
+    let envelope = verbatim_json_lines(&text)
+        .into_iter()
+        .find(|v| v.get("prefix").is_some() && v.get("api_key_id").is_some())
+        .expect("23 no longer contains the verbatim create-api-key response");
+    let prefix = envelope["prefix"].as_str().expect("prefix is a string");
+
+    assert!(prefix.starts_with("am_us_"), "the observed tag is am_us_: {prefix}");
+    assert!(!prefix.starts_with("am_eu_"), "a minted key must never route to the EU host");
+    let visible = &prefix["am_us_".len()..];
+    assert_eq!(visible.len(), 6, "fixture 23 records a 6-character visible portion");
+    assert!(
+        visible
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        "the observed visible portion is lowercase hex: {visible}"
+    );
+    assert!(
+        !text.contains("\"api_key\":\"am_us_a"),
+        "the secret must stay redacted in the fixture"
     );
 }

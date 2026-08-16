@@ -1,0 +1,83 @@
+Fixture 23 — inbox creation defaults, api-key delete status, and the real minted key shape.
+Live api.agentmail.to, 2026-08-16 03:56Z.
+
+WHY: the second pre-dispatch review of `.claude/contracts/amk-http.md` found two more of its 25
+operations governed by nothing — `POST /v0/inboxes` with an empty body (both `username` and
+`domain` are optional, with documented but unspecified defaults), and the status of
+`DELETE /v0/api-keys/{api_key_id}`, where `openapi.json` says 200 and had already been wrong about
+exactly that for pods (204) and inboxes (202).
+
+**REDACTION.** The `POST /v0/api-keys` response contains the plaintext secret — it is the one
+response in the whole API that does. It is `<redacted>` below. The probe printed it to a transcript
+before redaction, which was a defect in the probe script, not in the API; the key was deleted in the
+same run and its absence from `GET /v0/api-keys` re-verified afterwards. Any future probe touching
+`CreateApiKeyResponse` redacts at capture, not after.
+
+Throwaway resources: inbox cleananimal661@ (deleted, 202), api key e24f8809-… (deleted, 204,
+confirmed absent from the live listing). End state re-verified at 2 inboxes / 2 api keys.
+
+================================================================================
+Q3 — POST /v0/inboxes WITH AN EMPTY BODY
+================================================================================
+
+POST /v0/inboxes  {} -> 200
+{"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","inbox_id":"cleananimal661@agentmail.to","email":"cleananimal661@agentmail.to","display_name":"AgentMail","updated_at":"2026-08-16T03:56:41.735Z","created_at":"2026-08-16T03:56:41.735Z"}
+
+OBSERVED:
+- **Generated local part: `cleananimal661`** — adjective + noun + 3 digits, all lowercase, no
+  separator, 14 characters here. One sample, so the *shape* is evidence and the exact word lists
+  are not. Reproduce the shape; the vocabulary is ours.
+- **Default domain: `agentmail.to`**, their primary. This one is NOT reproducible and must not be
+  copied: AgentMailKit serves `appsynergy.io`, `imabee.com`, `imabee.ca`, `imabee.cloud`. The
+  default domain is therefore **configuration**, marked `[ASSUMED]`, and a deployment with no
+  configured primary domain must fail closed rather than guess.
+- `pod_id` again equals `organization_id` (fixture 22's Q1 rule, reconfirmed on a second call).
+- `display_name` defaults to `"AgentMail"` when omitted — a *third* default nobody had named. Ours
+  is configuration for the same reason the domain is: it is the operator's product name, not theirs.
+
+================================================================================
+Q4 — DELETE /v0/api-keys/{api_key_id} IS 204, AND openapi IS NOW 0-FOR-3
+================================================================================
+
+POST /v0/api-keys  {"name":"amk-probe-key"} -> 200
+{"organization_id":"133c9cbe-…","api_key_id":"e24f8809-ccc8-4142-97d6-ebb313abd3d1","prefix":"am_us_ae0c53","name":"amk-probe-key","created_at":"2026-08-16T03:56:42.259Z","api_key":"<redacted>"}
+
+DELETE /v0/api-keys/e24f8809-ccc8-4142-97d6-ebb313abd3d1 -> 204   (empty body)
+
+GET /v0/api-keys/e24f8809-… -> 404
+{"name":"NotFoundError","code":"not_found","message":"Route not found","fix":"No route matches this path and HTTP method. …"}
+
+OBSERVED:
+- **DELETE is 204**, not the 200 `openapi.json` documents. That makes the spec **0 for 3** on DELETE
+  status codes: pods 204, inboxes 202, api-keys 204, all documented as 200. Treat every remaining
+  documented DELETE status as unverified.
+- **There is no GET-by-id route for api-keys.** The 404 body says *"Route not found"*, not a
+  resource-not-found — it is the fallback, so the route does not exist. Consistent with the
+  enumeration: the spec has `GET /v0/api-keys` (list) and `DELETE /v0/api-keys/{api_key_id}`, and no
+  GET by id. `amk_store::api_keys::get` therefore has **no wire route** in the first amk-http
+  dispatch; it exists for `authenticate` and for internal use. Do not add a route for it.
+
+================================================================================
+THE MINTED KEY SHAPE — AND IT CONTRADICTS WHAT WE BUILT
+================================================================================
+
+From the create response above, with the secret redacted but its structure preserved:
+
+  prefix     "am_us_ae0c53"                    = `am_us_` + **6** lowercase-hex characters
+  api_key    "am_us_" + 64 lowercase-hex chars = the prefix's 6 hex, then 58 more
+
+So the visible `prefix` is the first 6 characters of a 64-character lowercase-hex secret.
+
+**What `crates/amk-store/src/api_keys.rs` mints today does not match:** `SECRET_LEN = 32` and
+`VISIBLE_LEN = 8`, over a URL-safe alphabet rather than hex. Both constants were tagged `[ASSUMED]`
+by the api-keys contract, correctly and explicitly, because the only prior evidence was
+`reference/fixtures/05-error-catalog.http`'s `am_us_00000000000000000000000000000000` — a *rejected*
+key, whose length told us only what the gateway would accept as well-formed, not what it mints.
+
+That assumption is now superseded by an observation, and `prefix` is a **wire field returned in
+every `ApiKey` response**, not an internal detail — so it is pinned, not ours to choose. The
+correction (`SECRET_LEN` 64, `VISIBLE_LEN` 6, lowercase hex) belongs in `amk-store`. Note the
+security direction is favourable: the observed secret is *longer* than ours (64 hex ≈ 256 bits
+versus 32 URL-safe chars ≈ 190), so matching it does not weaken anything.
+
+The `am_us_` tag itself is confirmed a second time, and a minted key still never begins `am_eu_`.
