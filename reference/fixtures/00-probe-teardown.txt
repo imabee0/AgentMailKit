@@ -8,13 +8,40 @@ DELETED
   confirmed absent from the pod listing afterwards. Created 12:15Z as {"username":"AmkCase"};
   the observation it produced is recorded in 18-inbox-case-normalization.txt.
 
-STILL LIVE (deliberately, until the A2 retry tail completes ~T+28h from 2026-08-15T05:44Z)
+STILL LIVE — and the stated reason is now the WEAKER of two
 - pod    9047724b-2879-416b-8424-82ef81ab9397  "amk-probe-throwaway"
 - inbox  amk-probe@agentmail.to
 - webhook ep_3HwIKMKzmbCirmu4p74HOjg3PZq -> webhook.site 500 sink (drives A2 retry observations)
 - webhook.site tokens: 500-sink 98da41b0-db94-440e-aaa5-9d9bac538565 ; 200-sink 9416815d-ed0d-491e-9555-7bb65f731a78
 
-FINAL TEARDOWN (run when A2 fixture is complete)
+  Original reason: hold until the A2 retry tail completes (~T+28h from 2026-08-15T05:44Z). **That
+  reason has expired** — A2 closed on 2026-08-15, the 10h/10h tail is confirmation-only and blocks
+  nothing, so by this ledger alone these were due for deletion.
+
+  **Do not delete them. `conformance/manifest.json` names them** — `amk-probe` appears 5 times and
+  pod `9047724b` once. The dual-target harness issues identical requests against api.agentmail.to
+  and localhost and structurally diffs the responses, and it gates **every phase from P1 to P5**.
+  Deleting these resources does not invalidate a single captured fixture, which is why this looked
+  safe; it breaks the live half of the gate, which is why it is not.
+
+  This is the failure mode the plan's own "an obligation may be recorded in exactly one place" rule
+  exists to prevent, arriving from the other direction: the obligation to delete was recorded here,
+  the dependency that forbids it was recorded in the harness, and neither file knew about the
+  other. Caught by checking the manifest before running the commands below rather than after.
+
+FINAL TEARDOWN — blocked until V1 acceptance, not until A2
+  Precondition: the dual-target conformance diff is no longer needed, i.e. every V1 endpoint has
+  passed its gate. Re-check `conformance/manifest.json` for these ids immediately before running;
+  if the harness still names them, the harness must be repointed at fresh throwaway resources
+  first, in the same change.
+
   DELETE /v0/inboxes/amk-probe@agentmail.to/webhooks/ep_3HwIKMKzmbCirmu4p74HOjg3PZq
   DELETE /v0/inboxes/amk-probe@agentmail.to
   DELETE /v0/pods/9047724b-2879-416b-8424-82ef81ab9397
+
+  The webhook and its two webhook.site sinks are NOT named by the manifest and carry no such
+  dependency; they may be deleted independently once the A2 tail is abandoned.
+
+NOTE ON QUOTA (measured 2026-08-16, fixture 22): the reference account's inbox limit is 3,
+organization-wide. Two are in use. Any future probe that needs more than one throwaway inbox has to
+delete as it goes, which fixture 22's probe did.
