@@ -130,6 +130,14 @@ impl FromRequestParts<AppState> for AuthContext {
                     // auth-layer failure (nothing has been looked up on the request's behalf yet),
                     // the same reading `amk_core::scope::ScopeResolutionError` gives a
                     // self-contradictory resolved identity.
+                    //
+                    // Accepted, unverified: no test drives this arm (it needs an inbox deleted in
+                    // the gap between `authenticate` and this lookup, not reproducible without an
+                    // injectable delay). It sits directly above `Scope::from_identity`'s own error
+                    // mapping below, which is likewise unverified — two unverified guards stacked,
+                    // so a regression widening this one (e.g. accidentally returning `pod_id: None`
+                    // instead of erroring) would be caught only by the second, which has no
+                    // dedicated test either. The depth here is nominal, not proven.
                     None => return Err(GatewayFailure::forbidden().into()),
                 }
             }
