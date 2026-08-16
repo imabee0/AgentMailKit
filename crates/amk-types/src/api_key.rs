@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 /// the most restrictive states differ by a single `null`, which is exactly the kind of distinction
 /// that gets flattened by a careless `unwrap_or_default()`. [`KeyGrants`] exists so that
 /// distinction has a type rather than a convention.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ApiKeyPermissions {
     /// Read inbox details.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -222,6 +222,36 @@ impl ApiKeyPermissions {
             _ => return None,
         };
         Some(v.unwrap_or(false))
+    }
+}
+
+/// **A present permissions object emits every flag, not only the granted ones.**
+///
+/// `[TESTED]` live, 2026-08-16, during the P1 conformance gate: the reference's permissions object
+/// carries all 38 keys as plain booleans — 2 `true`, 36 `false`, no `null`. Deriving `Serialize`
+/// with `skip_serializing_if` emitted only the flags a caller had set, so a whitelist granting two
+/// permissions went out as a two-key object where the reference sends thirty-eight. Semantically
+/// equivalent — an absent flag inside a present whitelist is not granted — but structurally
+/// different, and 1:1 is the whole point.
+///
+/// Written by hand over [`WIRE_NAMES`] rather than as 38 `serialize_with` attributes so it cannot
+/// drift: `WIRE_NAMES` is already pinned to equal the struct's own fields by
+/// `wire_names_names_every_field`, so a field added to one and not the other fails a test rather
+/// than silently vanishing from the wire.
+///
+/// `Deserialize` stays derived and lenient: a caller may send a partial object, and `None` means
+/// exactly what `false` means here — not granted.
+impl Serialize for ApiKeyPermissions {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(Some(WIRE_NAMES.len()))?;
+        for name in WIRE_NAMES {
+            let granted = self
+                .get(name)
+                .expect("invariant: WIRE_NAMES and `get` cover the same fields");
+            map.serialize_entry(name, &granted)?;
+        }
+        map.end()
     }
 }
 
@@ -549,11 +579,28 @@ mod tests {
         assert!(!g.allows("inbox_create"), "an absent flag is a denial");
     }
 
+    /// **This test asserted the opposite until the P1 gate measured the live API.** It pinned
+    /// `{"message_read":true}` — only the granted flag — and the reference emits all 38 as plain
+    /// booleans, 2 `true` and 36 `false`, no `null`
+    /// (`reference/fixtures/25-p1-gate-conformance.txt`). A test asserting the old behaviour is a
+    /// site exactly as a call site is; this is the third time that rule has been paid for.
     #[test]
-    fn absent_flags_are_omitted_from_the_wire_not_sent_as_null() {
+    fn a_present_permissions_object_emits_every_flag_as_a_boolean() {
         let p = ApiKeyPermissions { message_read: Some(true), ..Default::default() };
-        let json = serde_json::to_string(&p).unwrap();
-        assert_eq!(json, r#"{"message_read":true}"#);
+        let v: serde_json::Value = serde_json::to_value(&p).unwrap();
+        let obj = v.as_object().expect("permissions serializes as an object");
+
+        assert_eq!(obj.len(), WIRE_NAMES.len(), "every flag is emitted, not only the granted ones");
+        assert_eq!(obj["message_read"], serde_json::json!(true));
+        assert_eq!(obj["inbox_read"], serde_json::json!(false), "unset reads as false, not null");
+        assert!(
+            obj.values().all(|x| x.is_boolean()),
+            "no null may appear inside a present permissions object"
+        );
+
+        // It must still round-trip, and an unset flag must still be a denial.
+        let back: ApiKeyPermissions = serde_json::from_value(v).unwrap();
+        assert!(KeyGrants::from_wire(Some(back)).allows("message_read"));
     }
 
     #[test]
@@ -680,9 +727,33 @@ mod tests {
         );
         // A restricted permissions object grants only what it names — the empty-vs-absent
         // distinction that KeyGrants exists to preserve.
+        //
+        // The round trip preserves MEANING, not the `Option` representation, and that is the
+        // correct assertion rather than a weakened one. Since a present object emits every flag as
+        // a boolean (matching the live API), an unset `None` comes back as `Some(false)` — and the
+        // two are the same statement: not granted. Asserting `round == key` would be asserting a
+        // distinction the wire does not carry and the semantics do not have. What must hold is
+        // that every grant decision survives, so that is what is checked, flag by flag across the
+        // whole catalog rather than on the one flag this key happens to set.
         let round: ApiKey = serde_json::from_str(&s).unwrap();
-        assert_eq!(round, key);
-        assert!(KeyGrants::from_wire(round.permissions).allows("message_read"));
+        assert_eq!(round.api_key_id, key.api_key_id);
+        assert_eq!(round.pod_id, key.pod_id);
+        assert_eq!(round.inbox_id, key.inbox_id);
+
+        let before = KeyGrants::from_wire(key.permissions.clone());
+        let after = KeyGrants::from_wire(round.permissions.clone());
+        for flag in WIRE_NAMES {
+            assert_eq!(
+                before.allows(flag),
+                after.allows(flag),
+                "{flag} changed meaning across a round trip"
+            );
+        }
+        assert!(after.allows("message_read"));
+
+        // And it is idempotent from the second pass on: re-serializing the decoded value is
+        // byte-identical, so nothing oscillates.
+        assert_eq!(serde_json::to_string(&round).unwrap(), s);
     }
 
     #[test]

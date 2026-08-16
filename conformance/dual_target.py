@@ -218,6 +218,23 @@ def main():
             if rv != cv:
                 problems.append(f"  ! header {h}: ref={rv!r} cand={cv!r}")
         problems += list(diff_shape(shape(rb), shape(cb)))
+        # DECLARED intentional divergences. AgentMailKit ships no billing surface, so two fields
+        # the reference emits can never appear here — meaning without this the gate could never
+        # pass, no matter how conformant everything else became.
+        #
+        # Deliberately narrow and deliberately loud: only an exact `$.field` path matches, each
+        # carries a reason, and every one that fires is PRINTED on every run. A tolerance that
+        # hides is indistinguishable from a bug, and this project has already been bitten by
+        # checks that quietly stopped checking.
+        allowed = manifest.get("expected_divergences", {})
+        kept = []
+        for x in problems:
+            field = x.split(":")[0].strip().lstrip("-+!~ ")
+            if field in allowed:
+                print(f"  = {field}: EXPECTED — {allowed[field]}")
+            else:
+                kept.append(x)
+        problems = kept
         # a "~ nullable" soft note alone is not a failure
         hard = [x for x in problems if not x.strip().startswith("~")]
         tag = "PASS" if not hard else "DIFF"

@@ -48,9 +48,17 @@ async fn permissions_null_and_empty_round_trip_to_opposite_grants() {
     .await
     .unwrap();
 
-    // The create response itself already carries the distinction...
-    assert_eq!(omitted.permissions, None);
-    assert_eq!(empty.permissions, Some(ApiKeyPermissions::default()));
+    // The create response itself already carries the distinction. What is load-bearing is
+    // ABSENT vs PRESENT, never the `Option<bool>` inside a present object: since a present object
+    // now serializes every flag as a boolean (matching the live API — fixture 25), a `default()`
+    // built from `None`s and one built from explicit `false`s are the same statement, "grants
+    // nothing", and the wire cannot tell them apart. Assert the distinction that exists.
+    assert_eq!(omitted.permissions, None, "an absent object stays absent");
+    assert!(empty.permissions.is_some(), "a present-but-empty object stays present");
+    assert!(
+        !KeyGrants::from_wire(empty.permissions.clone()).allows("inbox_read"),
+        "a present-but-empty object grants nothing"
+    );
 
     // ...and it survives a full round trip back out of storage through `get`.
     let fetched_omitted = api_keys::get(&pool, &org, &KeyScope::Organization, &omitted.api_key_id)
@@ -62,14 +70,13 @@ async fn permissions_null_and_empty_round_trip_to_opposite_grants() {
         .unwrap()
         .expect("just created");
     assert_eq!(fetched_omitted.permissions, None, "an absent object must round-trip as absent");
-    assert_eq!(
-        fetched_empty.permissions,
-        Some(ApiKeyPermissions::default()),
+    assert!(
+        fetched_empty.permissions.is_some(),
         "a present-but-empty object must round-trip as present, not collapse to absent"
     );
 
-    // And the two verdicts KeyGrants derives from them are opposites, for every one of the 36
-    // flags, not merely unequal.
+    // And the two verdicts KeyGrants derives from them are opposites, for every one of the 38
+    // flags, not merely unequal. This is the assertion that actually protects the distinction.
     let omitted_grants = KeyGrants::from_wire(fetched_omitted.permissions);
     let empty_grants = KeyGrants::from_wire(fetched_empty.permissions);
     for name in amk_types::api_key::WIRE_NAMES {

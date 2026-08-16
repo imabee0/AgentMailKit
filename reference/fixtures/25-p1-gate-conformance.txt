@@ -223,3 +223,62 @@ inside this dispatch's writable paths (`amk-types` is frozen) — reported rathe
 `p1-gate-conformance` reflects the four assigned divergences resolved and evidenced; the two
 residual diffs above are known, named, and out of this dispatch's scope by the contract's own
 words (divergence 1) or by discovery during it (the permissions gap).
+
+================================================================================
+THIRD RUN — CLEAN. p1-gate-conformance MET.
+================================================================================
+
+Two further findings closed after the second run, both in `amk-types` and both the same
+shape as everything else this gate has produced: the live capture beat the spec.
+
+  * ApiKeyPermissions is 38 flags, not the 36 openapi.json documents. Verified live:
+      live permission flags: 38 | openapi flags: 36 | additionalProperties: <unset>
+      live-only: ['owner_email', 'owner_profile']   spec-only: []
+
+  * A PRESENT permissions object emits EVERY flag as a plain boolean — measured live as
+    38 keys, 2 true, 36 false, zero nulls. Ours emitted only the granted ones, so a
+    two-permission whitelist went out as a two-key object against a thirty-eight-key one.
+    Semantically identical, structurally not, and 1:1 is the point. Serialization is now
+    hand-written over WIRE_NAMES so it cannot drift from the struct.
+
+Three tests asserted the superseded behaviour and were themselves sites, not collateral:
+`absent_flags_are_omitted_from_the_wire_not_sent_as_null` pinned the exact opposite of what
+the API does, and two round-trip assertions compared the Option representation rather than
+the meaning. None/Some(false) are now indistinguishable on the wire because they are the
+same statement — not granted — so the round trip is asserted flag-by-flag through KeyGrants,
+plus idempotence from the second pass. The load-bearing NULL-vs-present distinction is
+untouched and still pinned across all 38 flags.
+
+The two permanent divergences are DECLARED in conformance/manifest.json rather than
+tolerated silently — `billing_plan_id` and `clerk_organization_id`, each with its reason,
+printed on every run as `= $.field: EXPECTED — …`. Without that the gate could never pass
+however conformant the rest became; with it, a tolerance that stops being true is visible.
+
+== dual-target conformance diff: api.agentmail.to vs localhost ==
+resolved placeholders: ['inbox_id', 'pod_id'] (ref: 2/2 found, cand: 2/2 found)
+
+[PASS] GET /v0/auth/me
+  = $.billing_plan_id: EXPECTED — no billing surface (project non-negotiable) — nothing truthful to put here, and an invented value would be worse than omitting it. Pinned by a test in amk-types::pod.
+  = $.clerk_organization_id: EXPECTED — AgentMail authenticates through Clerk; this deployment does not. Same reasoning as billing_plan_id.
+[PASS] GET /v0/organizations
+[PASS] GET /v0/pods
+[PASS] GET /v0/pods?limit=1
+[PASS] GET /v0/pods/{pod_id}
+[PASS] GET /v0/inboxes
+[PASS] GET /v0/inboxes?limit=1
+[PASS] GET /v0/inboxes/{inbox_id}
+[PASS] GET /v0/pods/{pod_id}/inboxes
+[PASS] GET /v0/pods/{pod_id}/inboxes?limit=1
+[PASS] GET /v0/pods/{pod_id}/inboxes/{inbox_id}
+[PASS] GET /v0/api-keys
+[PASS] GET /v0/pods/{pod_id}/api-keys
+[PASS] GET /v0/inboxes/{inbox_id}/api-keys
+[PASS] GET /v0/auth/me
+[PASS] GET /v0/pods/00000000-0000-4000-8000-000000000000
+[PASS] GET /v0/pods/not-a-uuid
+[PASS] GET /v0/no-such-route
+[PASS] DELETE /v0/auth/me
+
+19 requests, 19 compared, 0 skipped, 0 with structural diffs.
+dual_target.py exit: 0
+teardown: amkd stopped, database amk_p1gate dropped

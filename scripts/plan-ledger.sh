@@ -285,7 +285,23 @@ check p0-gate-sdk-authme no "P0 gate: official Python SDK auth.me() vs localhost
     grep -q "organization_id" "$f" &&
     grep -qi "agentmail" "$f" &&
     ! grep -qi "placeholder\|TODO\|not yet run" "$f"'
-pend p1-gate-conformance     "P1 gate: dual-target conformance diff clean for P1 endpoints"
+# Same shape as p0-gate-sdk-authme: the gate needs a live server and a live reference account, so
+# it is run by hand (`./scripts/p1-gate.sh`) and its verbatim transcript captured. The ledger
+# asserts the EVIDENCE. A run that is not clean must not be able to satisfy this, so the clean
+# result line itself is what is matched — "0 skipped, 0 with structural diffs" — not merely the
+# fixture's existence, plus the harness's own exit line.
+#
+# It does NOT grep for the word "placeholder" as a stub-detector, the way p0-gate-sdk-authme does.
+# This fixture legitimately discusses `{placeholders}` at length — that is the harness feature the
+# gate needed — so the guard matched real prose and reported PENDING on a clean run. A negative
+# check has to be keyed on something that cannot occur in the document it is guarding.
+check p1-gate-conformance no "P1 gate: dual-target conformance diff clean for P1 endpoints" \
+  bash -c '
+    f=reference/fixtures/25-p1-gate-conformance.txt
+    [ -f "$f" ] || exit 1
+    grep -q "0 skipped, 0 with structural diffs" "$f" &&
+    grep -q "THIRD RUN — CLEAN" "$f" &&
+    grep -q "dual_target.py exit: 0" "$f"' 
 pend p6-restore-drill        "P6: restore drill passes from backups alone, before any cutover step"
 
 # ---------------------------------------------------------------- cannot be machine-checked

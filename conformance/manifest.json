@@ -10,6 +10,10 @@
       "pick": "inboxes.0.inbox_id"
     }
   },
+  "expected_divergences": {
+    "$.billing_plan_id": "no billing surface (project non-negotiable) \u2014 nothing truthful to put here, and an invented value would be worse than omitting it. Pinned by a test in amk-types::pod.",
+    "$.clerk_organization_id": "AgentMail authenticates through Clerk; this deployment does not. Same reasoning as billing_plan_id."
+  },
   "requests": [
     {
       "method": "GET",
