@@ -61,6 +61,27 @@ grep -rn "sqlx::Error::Database\|is_unique_violation\|is_foreign_key_violation\|
   crates/amk-store/src/*.rs | sed 's|crates/amk-store/src/|  |; s/ *$//'
 
 echo
+echo "== 4b. every TEST assertion keyed to a behaviour this dispatch changes =="
+# Section 4 grepped src/ only, and the pre-dispatch review found two blocking misses in tests/:
+# an assertion pinning pods::delete's CURRENT failure mode, and two hardcoded VISIBLE_LEN
+# boundaries. A test that asserts the old behaviour is a site, exactly like a call site is.
+grep -rn "StoreError::Database\|pods::delete\|organizations::list" crates/amk-store/tests/*.rs \
+  | sed 's|crates/amk-store/tests/|  |; s/ *$//'
+
+echo
+echo "== 4c. every use of a constant this dispatch changes, src AND tests =="
+grep -rn "SECRET_LEN\|VISIBLE_LEN\|PREFIX_TAG" \
+  crates/amk-store/src/*.rs crates/amk-store/tests/*.rs \
+  | sed 's|crates/amk-store/src/|  src/|; s|crates/amk-store/tests/|  tests/|; s/ *$//'
+
+echo
+echo "== 4d. every caller of the three list functions that change signature =="
+grep -rn "pods::list\|inboxes::list\|api_keys::list" --include=*.rs . \
+  | grep -v '^\./crates/amk-store/src/\(pods\|inboxes\|api_keys\)\.rs:' \
+  | sed 's|^\./|  |; s/ *$//' \
+  || echo "  (none outside the defining modules)"
+
+echo
 echo "== 5. the minted-key constants, against fixture 23 =="
 grep -n "const PREFIX_TAG\|const SECRET_LEN\|const VISIBLE_LEN" crates/amk-store/src/api_keys.rs \
   | sed 's|^|  api_keys.rs:|'

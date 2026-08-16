@@ -1,11 +1,19 @@
-# amk-store — the four things `amk-http` cannot be written without — dispatch contract
+# amk-store — four blockers for `amk-http`, and one deletion — dispatch contract
 
 Scope-derivation: `scripts/derive-http-prereqs.sh`, which (1) prints every `amk-store` list
 function with its return type, (2) partitions the 25 first-dispatch `amk-http` operations by
 whether `openapi.json` gives them a `page_token` parameter, (3) enumerates every foreign key that
-can make a `DELETE` fail `23503`, and (4) greps every database-error class this crate actually
-catches. Its raw output is pasted below and is the scope. **A reviewer re-runs the script; it does
-not read the list.**
+can make a `DELETE` fail `23503`, (4) greps every database-error class this crate catches, (4b/4c/4d)
+enumerates every **test** assertion keyed to a behaviour this dispatch changes, every use of a
+constant it changes across `src` *and* `tests`, and every caller of the three functions whose
+signature changes, and (5) sets the shipped key constants beside fixture 23. Its raw output is
+pasted below and is the scope. **A reviewer re-runs the script; it does not read the list.**
+
+Sections 4b–4d exist because the pre-dispatch review found two blocking misses the first version of
+this script could not have found: it grepped `src/` only, and both misses were assertions in
+`tests/` pinning the behaviour this dispatch overturns. **A test that asserts the old behaviour is a
+site, exactly as a call site is** — that is the general lesson, and it is why the enumeration now
+covers tests.
 
 Written by the orchestrator before dispatch. The design decisions here are settled; the implementer
 resolves ordinary coding detail inside them and escalates anything else.
@@ -62,6 +70,64 @@ threads.rs: pub async fn list(pool, filter: &ScopeFilter, excluded_labels: &[&st
   inboxes.rs:140:        Err(sqlx::Error::Database(db_err)) if is_inbox_pkey_violation(db_err.as_ref()) => {
   inboxes.rs:150:    db_err.is_unique_violation() && db_err.constraint() == Some("inboxes_pkey")
 
+== 4b. every TEST assertion keyed to a behaviour this dispatch changes ==
+  api_keys.rs:449:    let result = pods::delete(&pool, &org, pod).await;
+  api_keys.rs:454:        matches!(result, Err(StoreError::Database(_))),
+  api_keys.rs:839:/// *before* any comparison runs, surfacing as `StoreError::Database` (a 500-class error) rather
+  api_keys.rs:1135:/// `Err(StoreError::Database(_))` from SQLSTATE `22021`, and a mutant that reintroduced that would
+  api_keys.rs:1309:/// database error escaping as `StoreError::Database`, not merely "some Result variant".
+  control_plane.rs:47:    assert!(organizations::list(&pool)
+  control_plane.rs:183:/// Isolates `pods::delete`'s organization pin — a destructive cross-tenant write if dropped.
+  control_plane.rs:195:        !pods::delete(&pool, &org_b, pod_a).await.unwrap(),
+  control_plane.rs:203:    assert!(pods::delete(&pool, &org_a, pod_a).await.unwrap());
+  control_plane.rs:512:// a `StoreError::Database`, not the uniform not-found every other unresolvable id produces. Each
+  control_plane.rs:519:/// `Ok(None)`, never `Err(StoreError::Database(_))`.
+  control_plane.rs:553:/// `INSERT` bind rather than a masked lookup — an ungraceful `StoreError::Database`, not a
+  messages_and_threads.rs:2834:// Postgres parameter encoding (SQLSTATE 22021): a `StoreError::Database`, not the uniform
+  messages_and_threads.rs:2842:/// `inbox_id` *parameter* must return `Ok(None)`, never `Err(StoreError::Database(_))`.
+
+== 4c. every use of a constant this dispatch changes, src AND tests ==
+  src/api_keys.rs:13://! `[PREFIX_TAG]` + `[SECRET_LEN]` below. A minted key never begins `am_eu_` — trivially true of a
+  src/api_keys.rs:20://! first [`VISIBLE_LEN`] characters of that random portion — `[ASSUMED]` split, chosen because the
+  src/api_keys.rs:69:const PREFIX_TAG: &str = "am_us_";
+  src/api_keys.rs:70:/// Total length of the random portion of a minted secret (after [`PREFIX_TAG`]).
+  src/api_keys.rs:71:const SECRET_LEN: usize = 32;
+  src/api_keys.rs:74:const VISIBLE_LEN: usize = 8;
+  src/api_keys.rs:151:/// `SECRET_LEN` alphanumeric characters from a CSPRNG. `rand::rngs::OsRng` draws directly from
+  src/api_keys.rs:157:        .take(SECRET_LEN)
+  src/api_keys.rs:165:    let secret = format!("{PREFIX_TAG}{random}");
+  src/api_keys.rs:167:        .get(..VISIBLE_LEN)
+  src/api_keys.rs:168:        .expect("invariant: SECRET_LEN (32) is always >= VISIBLE_LEN (8)");
+  src/api_keys.rs:169:    let prefix = format!("{PREFIX_TAG}{visible}");
+  src/api_keys.rs:174:/// short or does not carry [`PREFIX_TAG`] at all — a caller-controlled string, so this must never
+  src/api_keys.rs:178:    let rest = presented.strip_prefix(PREFIX_TAG)?;
+  src/api_keys.rs:179:    let visible = rest.get(..VISIBLE_LEN)?;
+  src/api_keys.rs:180:    Some(format!("{PREFIX_TAG}{visible}"))
+  src/api_keys.rs:545:        assert!(secret.starts_with(PREFIX_TAG));
+  src/api_keys.rs:546:        assert_eq!(secret.len(), PREFIX_TAG.len() + SECRET_LEN);
+  src/api_keys.rs:547:        assert!(secret[PREFIX_TAG.len()..]
+  src/api_keys.rs:550:        assert!(prefix.starts_with(PREFIX_TAG));
+  src/api_keys.rs:551:        assert_eq!(prefix.len(), PREFIX_TAG.len() + VISIBLE_LEN);
+  src/api_keys.rs:562:        // cheap to assert so a later change to PREFIX_TAG cannot silently reintroduce it.
+  src/api_keys.rs:594:            "am_us_\u{1F600}\u{1F600}", // multi-byte characters straddling the VISIBLE_LEN cut
+  src/api_keys.rs:595:            "am_us_1234567",            // one short of VISIBLE_LEN
+  tests/api_keys.rs:1343:    // (`PREFIX_TAG`/`VISIBLE_LEN` are private, and this test has no business hardcoding either):
+
+== 4d. every caller of the three list functions that change signature ==
+  crates/amk-store/tests/api_keys.rs:500:    let listed_a = api_keys::list(&pool, &org, &KeyScope::Pod(pod_a))
+  crates/amk-store/tests/api_keys.rs:506:    let listed_b = api_keys::list(&pool, &org, &KeyScope::Pod(pod_b))
+  crates/amk-store/tests/api_keys.rs:551:    let listed_a = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_a))
+  crates/amk-store/tests/api_keys.rs:557:    let listed_b = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_b))
+  crates/amk-store/tests/api_keys.rs:735:    let listed_a = api_keys::list(&pool, &org_a, &KeyScope::Organization)
+  crates/amk-store/tests/api_keys.rs:794:    let listed = api_keys::list(&pool, &org, &KeyScope::Organization)
+  crates/amk-store/tests/api_keys.rs:1245:    let listed = api_keys::list(&pool, &org, &KeyScope::Inbox(hostile))
+  crates/amk-store/tests/api_keys.rs:1292:    let listed = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_a))
+  crates/amk-store/tests/control_plane.rs:81:    let all = pods::list(&pool, &org).await.unwrap();
+  crates/amk-store/tests/control_plane.rs:229:    let all = inboxes::list(&pool, &org, None).await.unwrap();
+  crates/amk-store/tests/control_plane.rs:366:    let rows = inboxes::list(&pool, &org, None).await.unwrap();
+  crates/amk-store/tests/control_plane.rs:465:/// `inboxes::list` must return the *exact* set for its organization, not merely include it:
+  crates/amk-store/tests/control_plane.rs:476:    let list_a = inboxes::list(&pool, &org_a, None).await.unwrap();
+
 == 5. the minted-key constants, against fixture 23 ==
   api_keys.rs:69:const PREFIX_TAG: &str = "am_us_";
   api_keys.rs:71:const SECRET_LEN: usize = 32;
@@ -71,8 +137,11 @@ threads.rs: pub async fn list(pool, filter: &ScopeFilter, excluded_labels: &[&st
 ```
 
 Section 4 is the one worth reading twice: **exactly one** database-error class is caught anywhere in
-this crate, and it is a unique violation. Nothing catches a foreign-key violation, so every row of
-section 3 is a potential `500`.
+this crate's `src`, and it is a unique violation. Nothing catches a foreign-key violation, so every
+row of section 3 is a potential `500`.
+
+Section 4b's first two lines are the second thing to read twice —
+`tests/api_keys.rs:449,454` is a test that *asserts* the defect decision 2 fixes.
 
 ## `[SPEC:*]` and `[TESTED]` citations
 
@@ -131,28 +200,61 @@ inboxes::list(pool, organization_id, pod_id, query)      -> Result<Page<Inbox>, 
 api_keys::list(pool, organization_id, scope, query)      -> Result<Page<ApiKey>, StoreError>
 ```
 
-Three new cursor types in `pagination.rs`, beside `MessageCursor`/`ThreadCursor`:
+Three new cursor types in `pagination.rs`, beside `MessageCursor`/`ThreadCursor`. **The exact
+fields and `decode` signatures, settled — do not add, drop, or rename one:**
 
-| Cursor | Keyset | Scope coordinates it carries |
-|---|---|---|
-| `PodCursor` | `(created_at, pod_id)` | `organization_id` |
-| `InboxCursor` | `(created_at, inbox_id)` | `organization_id`, `pod_id: Option<PodId>` |
-| `ApiKeyCursor` | `(created_at, api_key_id)` | `organization_id`, and the `KeyScope` it was minted under |
+```rust
+pub struct PodCursor    { pub created_at: DateTime<Utc>, pub pod_id: PodId }
+pub struct InboxCursor  { pub created_at: DateTime<Utc>, pub inbox_id: InboxId, pub pod_id: PodId }
+pub struct ApiKeyCursor { pub created_at: DateTime<Utc>, pub api_key_id: ApiKeyId,
+                          pub pod_id: Option<PodId>, pub inbox_id: Option<InboxId> }
 
-**Two columns, not three** — unlike `MessageCursor`. `pod_id`, `inbox_id` and `api_key_id` are each
-their table's primary key, so `(created_at, <pk>)` is already a total order; `MessageCursor` needs
-`inbox_id` in the tiebreak only because a Message-ID is unique per *inbox*, not per table. Do not
-copy that third column here, and do not omit the tiebreak either: `created_at` alone is
+PodCursor::decode(token: &str)                          -> Result<Self, PageTokenError>
+InboxCursor::decode(token: &str, pinned: Option<PodId>) -> Result<Self, PageTokenError>
+ApiKeyCursor::decode(token: &str, pinned: &KeyScope)    -> Result<Self, PageTokenError>
+```
+
+JSON field names are the Rust field names verbatim, as `MessageCursor`/`ThreadCursor` already do.
+Timestamps encode through the existing `encode_timestamp`/`decode_timestamp` pair — do not write a
+second RFC-3339 formatter.
+
+**Keyset is two columns, not three** — unlike `MessageCursor`. `pod_id`, `inbox_id` and
+`api_key_id` are each their table's primary key, so `(created_at, <pk>)` is already a total order;
+`MessageCursor` needs `inbox_id` in the tiebreak only because a Message-ID is unique per *inbox*,
+not per table. Do not copy that third column, and do not drop the tiebreak either: `created_at` is
 `timestamp(3)` and two rows created in the same millisecond would make the walk skip one.
 
-`decode` takes the request's pinned scope and returns `PageTokenError::WrongScope` on any mismatch —
-the same contract `MessageCursor::decode` has, extended to the coordinates each resource actually
-has. Compare `inbox_id` with `eq_normalized`, never `==` (fixture 18). Every free-text field a
-cursor decodes (`organization_id`, `inbox_id`) gets the `has_forbidden_byte` check the two existing
-decoders already apply; a UUID field needs none, because a NUL fails its parse as `WrongType` first.
+**A cursor carries exactly the coordinates a narrower mount could differ on — no more.** That is
+the rule `MessageCursor` already follows, and it is why none of the three carries
+`organization_id`: neither existing cursor does, one credential resolves to exactly one
+organization, and the query's own `WHERE organization_id = $1` pin is what isolates tenants. Adding
+an org check would be a new check with no precedent and nothing it can catch. So:
+
+- `PodCursor` — `GET /v0/pods` is its only mount, so there is nothing to pin and `decode` takes no
+  pinned argument. It also has **no free-text field**, so it needs no `has_forbidden_byte` check;
+  a NUL in `pod_id` fails the UUID parse as `WrongType` first. Both absences are decisions, not
+  omissions — say so in the doc comment.
+- `InboxCursor` — two mounts (org, pod). `pinned: None` is the org mount and accepts any token;
+  `Some(p)` requires `cursor.pod_id == p`, else `WrongScope`. `inboxes.pod_id` is `NOT NULL`, so
+  the field is always knowable. This is `check_inbox_scope`'s exact shape, one level up.
+- `ApiKeyCursor` — three mounts, and the subtlety worth stating: the *mount* is not the key's own
+  scope. `KeyScope::Organization` lists pod- and inbox-scoped keys too (see `KeyScope`'s own doc),
+  so the cursor records the **mount it was minted at**, encoded as the same `(Option<PodId>,
+  Option<InboxId>)` pair `scope_params` already collapses `KeyScope` into. `decode` rebuilds that
+  pair from `pinned` and requires equality — `Organization` is `(None, None)`, a real checkable
+  value, not "no coordinate". Compare the inbox half with `eq_normalized`, never `==` (fixture 18),
+  and apply `has_forbidden_byte` to it, exactly as the two existing decoders do to theirs.
+
 `WrongScope` is not decoration: without it a token minted at `GET /v0/pods/A/inboxes` replayed at
 `GET /v0/pods/B/inboxes` silently resumes mid-list of a *different* pod — not a disclosure, since
 the query pins its own scope, but a wrong page returned as if it were right.
+
+**The `Page<T>` → `{count, limit?, next_page_token?, <resource>: []}` envelope conversion is
+`amk-http`'s, not yours.** `Page` is this crate's shape and stays that way; `amk_types::page`'s
+macro builds the wire envelope. Do not construct a wire envelope here.
+
+`ascending` maps to `SortDirection` exactly as it already does for messages and threads: this crate
+takes a resolved `SortDirection`, and turning `Option<bool>` into one is the caller's job.
 
 Reuse, do not re-derive:
 
@@ -200,6 +302,15 @@ complete set from section 3 of the derivation, and they are the live names — v
 returns `409` for (commit `2318e9c`). **This crate constructs no wire error** — it exposes the
 distinguishable variant and stops, exactly as `InboxAlreadyExists` does.
 
+**`crates/amk-store/tests/api_keys.rs:429-462` currently asserts the defect.**
+`deleting_a_pod_that_owns_keys_is_rejected_by_the_declared_fk_behaviour` pins
+`Err(StoreError::Database(_))` and carries a doc comment reading *"the declared FK behaviour is the
+default (no ON DELETE clause, same as every other table in this crate)"* — which stops being true
+in this dispatch, for `inboxes` in decision 3, and stops being the observable outcome here.
+Rewrite the assertion to `Err(StoreError::PodNotEmpty)` **and** the comment; leave its second
+assertion (the pod survives) exactly as it is, because that half is what fixture 22's *total*
+refusal requires. Found by the pre-dispatch review, in section 4b — not by reading this contract.
+
 ### 3. `inboxes::delete` cascades; `pods::delete` does not
 
 These two are deliberately opposite answers and the difference is derived, not stylistic. Fixture 22
@@ -216,8 +327,32 @@ Migration `0008`: add `ON DELETE CASCADE` to the three foreign keys referencing 
 
 `messages_thread_id_fkey` is in the list because the inbox cascade deletes `threads` rows whose
 `messages` are being deleted by a *different* cascade in the same statement, and the order Postgres
-runs those referential actions in is not something to reason about from an armchair. The assigned
-test below is what settles it: if the cascade set is wrong, that test fails with a `23503`.
+runs those referential actions in is not something to settle from an armchair. So it was measured.
+**`[TESTED]` against the dev database, 2026-08-16, inside a rolled-back transaction** — this is the
+DDL, verbatim, and it is what `0008` must contain:
+
+```sql
+alter table threads  drop constraint threads_inbox_id_fkey,
+  add constraint threads_inbox_id_fkey   foreign key (inbox_id)  references inboxes (inbox_id)  on delete cascade;
+alter table messages drop constraint messages_inbox_id_fkey,
+  add constraint messages_inbox_id_fkey  foreign key (inbox_id)  references inboxes (inbox_id)  on delete cascade;
+alter table api_keys drop constraint api_keys_inbox_id_fkey,
+  add constraint api_keys_inbox_id_fkey  foreign key (inbox_id)  references inboxes (inbox_id)  on delete cascade;
+alter table messages drop constraint messages_thread_id_fkey,
+  add constraint messages_thread_id_fkey foreign key (thread_id) references threads (thread_id) on delete cascade;
+```
+
+With one org / pod / inbox / thread / message / inbox-scoped key seeded behind it:
+
+```
+delete from pods ...     ->  ERROR 23503, constraint "inboxes_pod_id_fkey"     <- the refusal survives
+delete from inboxes ...  ->  DELETE 1, and afterwards:
+                             inboxes 0 | threads 0 | messages 0 | api_keys 0 | pods 1
+```
+
+No ordering problem: the two cascades run in the same statement without `messages_thread_id_fkey`
+firing on rows that are themselves being deleted. The assigned test below re-establishes this from
+Rust; if the cascade set is ever narrowed, it fails with a `23503`.
 
 Do it at the database, not in a Rust transaction: a cascade is atomic by construction and cannot be
 forgotten by a future caller of `inboxes::delete`.
@@ -232,9 +367,29 @@ dependency** for four characters of format string.
 Both constants were tagged `[ASSUMED]` by the api-keys contract, correctly: the only prior evidence
 was fixture 05's rejected `am_us_0000…0000`, whose length showed what the gateway accepts as
 well-formed, not what it mints. Fixture 23 supersedes that with an observation, and `prefix` is
-returned in **every** `ApiKey` response — it is a pinned wire field, not an internal detail. Update
-the module doc, which currently states the 32/8 shape as the observed one; leave the `am_eu_`
-assertion exactly as it is.
+returned in **every** `ApiKey` response — it is a pinned wire field, not an internal detail. Leave
+the `am_eu_` assertion exactly as it is.
+
+**Section 4c is the scope of this change and it is 24 lines long, not two.** Three of those sites
+are hardcoded values that will assert something *false* under the new constants, so they are
+corrections, not mechanical renames:
+
+- `src/api_keys.rs:168` — `.expect("invariant: SECRET_LEN (32) is always >= VISIBLE_LEN (8)")`
+  embeds both numbers in a string literal. `cargo-mutants` does not mutate string literals, and a
+  wrong `expect` message is the kind of thing a reader trusts. Restate it with the new numbers.
+- `src/api_keys.rs:599` — `assert_eq!(candidate_prefix("am_us_1234567"), None, "too short to have
+  a prefix at all")`. Seven characters past the tag is **no longer too short** at `VISIBLE_LEN = 6`;
+  this now yields `Some("am_us_123456")`. The "one short" case becomes `"am_us_12345"`.
+- `src/api_keys.rs:600-602` — `assert_eq!(candidate_prefix("am_us_12345678rest-of-the-secret"),
+  Some("am_us_12345678"))` now yields `Some("am_us_123456")`.
+
+The module doc (`src/api_keys.rs:9-20`) states the 32/8 shape as the observed one, citing fixture
+05's *rejected* key. Rewrite it to cite fixture 23 and say what that fixture actually shows.
+
+Both `candidate_prefix` assertions were found by the pre-dispatch review, in section 4c — the first
+version of the derivation script grepped `src/` for *error catches* and never for *uses of the
+constants being changed*, so neither could have surfaced from it. This is the same failure shape as
+the id-safety dispatch's five missing sites, caught one stage earlier this time.
 
 **Six hex characters is 16.7M prefixes and `api_keys_prefix_idx` is `UNIQUE`, so a mint can now
 collide.** At ten thousand keys a collision is likelier than not over the deployment's life. It is
@@ -250,10 +405,14 @@ nothing.
 
 It takes no credential and returns every organization in the deployment. It has no wire route —
 `GET /v0/organizations` returns *the* organization for the authenticated key and calls
-`organizations::get` — and its only callers are two lines in `tests/control_plane.rs`. The
-`amk-http` contract currently forbids calling it in prose, which is the "one obligation recorded in
-two places" shape this project has already been bitten by. Delete the function; rewrite those test
-lines against `organizations::get`. A function that does not exist cannot be reached for.
+`organizations::get` — and it has exactly **one** call site anywhere in the workspace,
+`tests/control_plane.rs:47` (section 4d). The `amk-http` contract currently forbids calling it in
+prose, which is the "one obligation recorded in two places" shape this project has already been
+bitten by. Delete the function; rewrite that one assertion against `organizations::get`. A function
+that does not exist cannot be reached for.
+
+`.claude/contracts/amk-http.md:272-275` carries the prose prohibition and goes stale the moment this
+lands. **The orchestrator rewrites it at merge — do not touch that file.**
 
 `organizations::delete` stays: it also has no wire route, but it is scoped to one id and the tests
 legitimately use it for cleanup.
