@@ -17,10 +17,17 @@ fidelity to the reference API, not elegance**.
 
 ## Writable paths (exact)
 
-`crates/amk-http/**`, plus the workspace `Cargo.lock` **only** as the automatic consequence of
-adding a dependency this contract sanctions. Nothing else. Same rule and same hook as every other
-dispatch: if the work requires a path outside that tree, **STOP and report** rather than widening
-scope.
+`crates/amk-http/**`, the workspace `Cargo.lock` **only** as the automatic consequence of
+adding a dependency this contract sanctions, and the root `Cargo.toml` **only** to add
+`"crates/amk-http"` to `[workspace.members]` and the dependencies this contract sanctions to
+`[workspace.dependencies]`. Nothing else. Same rule and same hook as every other dispatch: if the
+work requires a path outside that tree, **STOP and report** rather than widening scope.
+
+The root `Cargo.toml` is named because **this crate does not exist yet** — `crates/` holds
+`amk-types`, `amk-core`, `amk-store` and nothing else, and `[workspace.members]` lists exactly
+those three. Every prior dispatch edited a crate that was already a member, so no earlier contract
+needed this and its omission here would have blocked the dispatch at its first command. Add the
+member line and the dependency pins; change nothing else in that file.
 
 `Cargo.lock` is named explicitly because the api-keys dispatch proved the omission matters. Its
 contract said `crates/amk-store/**` and nothing else, adding a dependency necessarily rewrote the
@@ -28,6 +35,29 @@ root lockfile, and **the scope hook never saw it** — the guard is a `PreToolUs
 `Write`/`Edit`/`Bash`, so it observes what an agent writes and is structurally blind to what cargo
 writes. That left the implementer choosing between violating its stated scope and being unable to
 do what the contract asked. Committing lockfiles is a project rule; so the contract names it.
+
+## Dependencies — pinned here, not chosen by the implementer
+
+Add exactly these to `[workspace.dependencies]` and depend on them from `crates/amk-http/Cargo.toml`.
+Every version is `[TESTED]` — `reference/fixtures/15-compile-spike.txt` built against them, exit 0.
+
+```toml
+axum = { version = "=0.8.9", features = ["ws"] }
+tower = "=0.5.3"
+```
+
+plus the workspace members and pins that already exist: `amk-types`, `amk-core`, `amk-store`,
+`tokio`, `serde`, `serde_json`, `chrono`, `uuid`, `thiserror`, `base64`, `percent-encoding`.
+
+- **`features = ["ws"]` is required**, even though the WebSocket upgrade is P4 and not in this
+  dispatch — `axum::extract::ws::WebSocketUpgrade` does not exist without it, and the spike found
+  that the hard way (F1).
+- **`uuid` needs its `serde` feature for `Path<Uuid>`** or the handler fails with an opaque
+  Handler-trait error that names neither `uuid` nor `serde` (spike F2). It is already enabled in
+  the workspace pin; do not remove it.
+- **No other dependency.** Not `tower-http`, not `governor`, not `hyper` directly. Rate limiting is
+  a later dispatch and `governor` arrives with it. If you believe you need a crate that is not
+  listed, **STOP and report** — adding one is a decision, and it is not yours.
 
 ## `[SPEC:*]` citations governing every shape here
 
