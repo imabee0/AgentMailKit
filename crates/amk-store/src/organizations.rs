@@ -94,20 +94,6 @@ pub async fn get(
     }
 }
 
-pub async fn list(pool: &PgPool) -> Result<Vec<Organization>, StoreError> {
-    let rows = sqlx::query(
-        "SELECT organization_id, inbox_limit, domain_limit, created_at, updated_at \
-         FROM organizations ORDER BY created_at ASC, organization_id ASC",
-    )
-    .fetch_all(pool)
-    .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(hydrate_row(pool, row).await?);
-    }
-    Ok(out)
-}
-
 pub async fn delete(pool: &PgPool, organization_id: &OrganizationId) -> Result<bool, StoreError> {
     let result = sqlx::query("DELETE FROM organizations WHERE organization_id = $1")
         .bind(organization_id.as_str())
