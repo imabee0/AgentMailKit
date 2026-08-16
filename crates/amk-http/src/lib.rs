@@ -18,6 +18,8 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod handlers;
+pub mod ids;
+pub mod pagination;
 pub mod scope_ext;
 
 use axum::routing::get;
