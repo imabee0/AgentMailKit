@@ -1,11 +1,17 @@
 # amk-cli — the `amk` and `amkd` binaries — dispatch contract
 
 Scope-derivation: `scripts/derive-bins.sh`, which prints (1) everything `amk-http` exposes for a
-server to mount, including `AppState`'s fields and the config surface, (2) the `amk-store` entry
-points for connect/migrate and the three `create` functions `init` needs, (3) the `New*` structs
-those creates require, field by field, (4) the binaries that exist today, and (5) what the plan's
-own P0 line requires of them. Its raw output is pasted below and is the scope. **A reviewer re-runs
-the script; it does not read the list.**
+server to mount, including `AppState`'s fields and the config surface, (2) `amk-store`'s **whole
+public surface** for the three modules these binaries touch, plus `pool.rs` and the crate's
+re-exports, (3) the `New*` structs the `create` functions require, field by field, (4) the binaries
+that exist today, and (5) what the plan's own P0 line requires of them. Its raw output is pasted
+below and is the scope. **A reviewer re-runs the script; it does not read the list.**
+
+Section 2 was narrower on the first pass — it grepped `connect`, `connect_unmigrated` and
+`migrate!` by name, so it printed two comment lines out of the middle of `migration_status` and
+never its signature, while the sections below instruct the implementer to *call* that function.
+Widened to enumerate, because a derivation that cannot show a function the contract names is a
+hand-written scope wearing a script's clothes.
 
 Written by the orchestrator before dispatch. The design decisions here are settled; the implementer
 resolves ordinary coding detail inside them and escalates anything else.
@@ -44,14 +50,41 @@ dispatch, not a report of it.
       pub product_name: Option<String>,
   }
 
-== 2. what amk-store exposes for init and migrate ==
-  pool.rs:10:/// The migrator is compiled in (`sqlx::migrate!`), so a deployed binary carries its own schema
+== 2. what amk-store exposes for init, migrate and doctor ==
+  --- crate re-exports (lib.rs) ---
+  lib.rs:41:pub mod api_keys;
+  lib.rs:42:pub mod error;
+  lib.rs:43:pub mod inboxes;
+  lib.rs:44:pub mod messages;
+  lib.rs:45:pub mod organizations;
+  lib.rs:46:pub mod pagination;
+  lib.rs:47:pub mod pods;
+  lib.rs:48:pub mod pool;
+  lib.rs:49:pub mod threads;
+  lib.rs:51:pub use error::{PageTokenError, StoreError};
+  lib.rs:52:pub use pagination::{
+  lib.rs:55:pub use pool::{connect, connect_unmigrated, migration_status, MigrationStatus};
+  --- pool.rs public surface ---
   pool.rs:12:pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
-  pool.rs:18:    sqlx::migrate!("./migrations").run(&pool).await?;
   pool.rs:25:pub async fn connect_unmigrated(database_url: &str) -> Result<PgPool, sqlx::Error> {
-  organizations.rs: pub async fn create(pool: &PgPool, new: NewOrganization) -> Result<Organization, StoreError> {
-  pods.rs: pub async fn create(pool: &PgPool, new: NewPod) -> Result<Pod, StoreError> {
-  api_keys.rs: pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyResponse, StoreError> {
+  pool.rs:38:pub struct MigrationStatus {
+  pool.rs:48:    pub fn is_current(&self) -> bool {
+  pool.rs:67:pub async fn migration_status(pool: &PgPool) -> Result<MigrationStatus, sqlx::Error> {
+  --- every public fn in the modules init/doctor touch ---
+  organizations.rs:64:pub async fn create(pool: &PgPool, new: NewOrganization) -> Result<Organization, StoreError> {
+  organizations.rs:80:pub async fn get(
+  organizations.rs:110:pub async fn exists(pool: &PgPool) -> Result<bool, StoreError> {
+  organizations.rs:117:pub async fn delete(pool: &PgPool, organization_id: &OrganizationId) -> Result<bool, StoreError> {
+  pods.rs:36:pub async fn create(pool: &PgPool, new: NewPod) -> Result<Pod, StoreError> {
+  pods.rs:82:pub async fn get(
+  pods.rs:124:pub async fn list(
+  pods.rs:197:pub async fn delete(
+  api_keys.rs:399:pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyResponse, StoreError> {
+  api_keys.rs:470:pub async fn get(
+  api_keys.rs:510:pub async fn list(
+  api_keys.rs:595:pub async fn delete(
+  api_keys.rs:623:pub async fn authenticate(
+  api_keys.rs:663:pub async fn touch_used_at(pool: &PgPool, api_key_id: &ApiKeyId) -> Result<bool, StoreError> {
 
 == 3. the New* structs those creates require ==
   organizations.rs: pub struct NewOrganization {
@@ -89,7 +122,7 @@ dispatch, not a report of it.
   61:| TLS | cert-manager (Cloudflare DNS-01 — DNS already Cloudflare-as-code) → Secrets; amkd terminates TLS via rustls with hot-reload | kills the in-pod ACME sidecar pattern |
   66:Workspace: crates `amk-types` (wire types + error catalog), `amk-core` (scope/permissions/threading/labels/ids), `amk-store` (sqlx, migrations, blobs, FTS, signed downloads), `amk-ingest`, `amk-outbound`, `amk-events`, `amk-jobs`, `amk-http`, `amk-mcp`, `amk-dns`, `reply-extract`; bins `amkd` (--role api|smtpd|worker|all), `amk` (init/migrate/doctor/import); `conformance/`; `deploy/k3s/`; `reference/` (vendored openapi.json + SDK extracts + mcp-manifest).
   108:- **P0 Skeleton** — workspace, config, migrations, `amk init` (default org+pod, root key shown once), Bearer auth deny-by-default, error shapes **per A8 — RESOLVED, build the asymmetry**: auth-layer failures (missing/invalid credential) return the bare gateway body `{"message":"Unauthorized"}` 401 / `{"message":"Forbidden"}` 403 (no name/code/fix/docs); app-layer failures return the full envelope. cursor pagination = base64(JSON keyset {sort-key,id}) per fixture 04. Gate: official Python SDK `auth.me()` against localhost returns Identity, AND the shape-provenance CI check passes from the first commit: (i) dependency direction — a `cargo metadata`-based script asserting no dependency path from amk-types/amk-core/amk-store to amk-import (chosen over cargo-deny: zero extra tooling, exact graph); (ii) naming — a grep-based deny-lint over those three crates' sources rejecting Stalwart/JMAP-derived concepts (JMAP, Sieve, blob-id-as-Stalwart, RocksDB key shapes, mailbox-role enums absent from AgentMail's spec), run as a CI step alongside the tests; (iii) boundary types — the stalwart-labs crates (mail-parser, mail-auth, mail-send, mail-builder, smtp-proto) are an unguarded leak path because their types are ergonomic and right there: assert no `mail_parser::`/`mail_auth::`/`mail_send::`/`smtp_proto::` type appears in any public signature or re-export of amk-types/amk-core/amk-store — those types live only inside amk-ingest/amk-outbound, converted at the boundary.
-  539:argon2id hash", and there is no `api_keys` table, no repository and no hash in the crate. `amk init`
+  557:argon2id hash", and there is no `api_keys` table, no repository and no hash in the crate. `amk init`
 ```
 
 Everything the binaries need already exists. Section 4 is the finding that created this dispatch:

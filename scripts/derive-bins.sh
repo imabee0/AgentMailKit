@@ -13,12 +13,21 @@ echo "  --- config surface ---"
 awk '/pub struct .*Config/,/^}/' crates/amk-http/src/config.rs | sed 's/^/  /'
 
 echo
-echo "== 2. what amk-store exposes for init and migrate =="
-grep -n "^pub async fn connect\|^pub async fn connect_unmigrated\|migrate!" crates/amk-store/src/pool.rs \
+echo "== 2. what amk-store exposes for init, migrate and doctor =="
+# Enumerated, not recalled. The first version of this section grepped for `connect`,
+# `connect_unmigrated` and `migrate!` by name, so it printed two comment lines out of the middle of
+# `migration_status` and never its signature — while the contract instructed the implementer to
+# CALL that function. A derivation that cannot show a function the contract names is the same
+# defect as a hand-written scope, one layer down. Print the whole public surface of the three
+# things the binaries touch and let the contract be checked against it.
+echo "  --- crate re-exports (lib.rs) ---"
+grep -n "^pub use\|^pub mod" crates/amk-store/src/lib.rs | sed 's/^/  lib.rs:/'
+echo "  --- pool.rs public surface ---"
+grep -n "^pub async fn\|^pub fn\|^pub struct\|^pub enum\|^    pub fn" crates/amk-store/src/pool.rs \
   | sed 's/^/  pool.rs:/'
+echo "  --- every public fn in the modules init/doctor touch ---"
 for f in organizations pods api_keys; do
-  awk "/^pub async fn create\(/,/-> Result</" "crates/amk-store/src/$f.rs" \
-    | sed "s|^|  $f.rs: |"
+  grep -n "^pub async fn\|^pub fn" "crates/amk-store/src/$f.rs" | sed "s|^|  $f.rs:|"
 done
 
 echo
