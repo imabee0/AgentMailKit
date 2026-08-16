@@ -15,11 +15,13 @@
 //! public interface — no SQL in this crate. Nothing here may model a Stalwart or JMAP concept.
 
 pub mod config;
+pub mod error;
 
 use axum::Router;
 use sqlx::PgPool;
 
 pub use config::AppConfig;
+pub use error::AppError;
 
 /// Everything a handler needs beyond the request itself: the database pool and deployment
 /// configuration. `Clone` is cheap — `PgPool` is reference-counted internally, and `AppConfig`
@@ -36,9 +38,25 @@ impl AppState {
     }
 }
 
-/// Build the router. Grows as the crate's modules land — this stage wires no routes yet.
+/// Build the router. Grows as the crate's modules land — this stage wires no operation routes
+/// yet, only the fallback every route eventually shares.
 pub fn router(state: AppState) -> Router {
-    Router::new().with_state(state)
+    Router::new()
+        // Unknown path -> 404 envelope.
+        .fallback(not_found_fallback)
+        // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
+        // default 405 — the dispatch contract is explicit: "There is no 405."
+        .method_not_allowed_fallback(not_found_fallback)
+        .with_state(state)
+}
+
+/// `[SPEC:fixture 05-error-catalog.http]`: unknown path or wrong method both answer the full
+/// envelope, `code: "not_found"`, HTTP 404 — never axum's default plaintext 405/404 body, and
+/// never the bare auth-layer shape (this fires before or independent of auth; a client can learn
+/// a route does not exist without presenting any credential at all, matching the live API's own
+/// `am_us_...` route-not-found capture in fixture 23: *"Route not found"*).
+async fn not_found_fallback() -> AppError {
+    AppError::new(amk_types::ErrorCode::NotFound, "Route not found")
 }
 
 #[cfg(test)]
