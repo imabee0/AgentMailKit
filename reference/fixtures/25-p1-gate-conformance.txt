@@ -109,3 +109,117 @@ RESULT
 
 19 requests, 19 compared, 0 skipped, 12 with structural diffs — reducing to the four distinct
 causes above. `p1-gate-conformance` stays PENDING until they are closed and this diff is clean.
+
+================================================================================
+SECOND RUN — AFTER THE FIX
+================================================================================
+
+`amk/p1/divergences`, `.claude/contracts/amk-p1-divergences.md`. `scripts/p1-gate.sh` itself had
+two bugs of its own, found before any of the four divergences could be re-checked: a leftover
+`$KEYSETS` reference from ad hoc probing that never became a real invocation of
+`dual_target.py`, and a hardcoded `cd /home/imma/projects/AgentMailKit` that silently ran every
+step against the PRIMARY checkout, not the worktree the script lives in — a dispatch worktree
+re-running this gate was gating unmodified `main`. Both are fixed (portable `cd
+"$(dirname "$0")/.."`, matching `scripts/check.sh`'s own idiom; the real `dual_target.py`
+invocation, exit code propagated).
+
+Two intermediate runs (not reproduced verbatim here) surfaced a further class the first run's own
+"state parity" note predicted but did not fully close: the seed step put a `client_id`-bearing
+inbox, and api-keys, at whichever pod/inbox the manifest's resolver was going to pick — but the
+reference's OWN resolved pod/inbox show a different mix (its `?limit=1`-newest inbox carries
+`client_id`, its resolved pod's `/api-keys` and resolved inbox's `/api-keys` come back EMPTY).
+`scripts/p1-gate.sh`'s seed step now places the `client_id`-bearing inbox in the pod the resolver
+will actually pick (pods sort newest-first, fixture 22) and both scoped api-keys in the OTHER
+pod's inbox instead, and seeds one key with an explicit non-empty `permissions` object rather than
+none. This is a harness/state-parity fix, not a change to any of the four divergences' own code.
+
+Divergence 1 also needed one further seed step: the eight non-billing organization columns have
+no endpoint that sets them (the contract's own words: "operator configuration, reachable today
+only by a direct UPDATE"), so the gate now runs that UPDATE directly against the throwaway
+database before serving, to prove hydration end-to-end rather than leaving all eight `None` and
+mistaking "never set" for "can't be emitted."
+
+Verbatim `./scripts/p1-gate.sh` output, final run:
+
+  == build ==
+      Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
+  == throwaway database ==
+  == migrate ==
+  Applied 9 of 9 migrations (current).
+  == init (root key captured, never printed) ==
+  Initialized a new deployment.
+    organization_id: 6059ed04-7e52-471d-acf3-03dec6c19e84
+    pod_id:          6059ed04-7e52-471d-acf3-03dec6c19e84
+    root api key:    <redacted>
+  This key will not be shown again -- store it now.
+  == operator configuration (direct UPDATE — no endpoint sets these; that is the honest state
+       the divergence-1 contract itself names) ==
+  == serve ==
+  curl: (7) Failed to connect to 127.0.0.1:8111 after 0 ms: Could not connect to server
+  amkd: serving --role api on 127.0.0.1:8111
+  == seed the candidate to match the reference's STATE, not just its schema ==
+    inbox: p1gate-b@appsynergy.io
+    pods      2
+    inboxes   2
+    api-keys  2
+
+  == dual-target conformance diff: api.agentmail.to vs localhost ==
+  resolved placeholders: ['inbox_id', 'pod_id'] (ref: 2/2 found, cand: 2/2 found)
+
+  [PASS] GET /v0/auth/me
+  [DIFF] GET /v0/organizations
+    - $.billing_plan_id: present in REF, MISSING in CAND
+    - $.clerk_organization_id: present in REF, MISSING in CAND
+  [PASS] GET /v0/pods
+  [PASS] GET /v0/pods?limit=1
+  [PASS] GET /v0/pods/{pod_id}
+  [PASS] GET /v0/inboxes
+  [PASS] GET /v0/inboxes?limit=1
+  [PASS] GET /v0/inboxes/{inbox_id}
+  [PASS] GET /v0/pods/{pod_id}/inboxes
+  [PASS] GET /v0/pods/{pod_id}/inboxes?limit=1
+  [PASS] GET /v0/pods/{pod_id}/inboxes/{inbox_id}
+  [DIFF] GET /v0/api-keys
+    - $.api_keys[]: element shape only in REF: {"api_key_id": "string", "created_at": "string", "inbox_id": "string", "name": "string", "organization_id": "string", "p
+    + $.api_keys[]: element shape only in CAND: {"api_key_id": "string", "created_at": "string", "inbox_id": "string", "name": "string", "organization_id": "string", "p
+  [PASS] GET /v0/pods/{pod_id}/api-keys
+  [PASS] GET /v0/inboxes/{inbox_id}/api-keys
+  [PASS] GET /v0/auth/me
+  [PASS] GET /v0/pods/00000000-0000-4000-8000-000000000000
+  [PASS] GET /v0/pods/not-a-uuid
+  [PASS] GET /v0/no-such-route
+  [PASS] DELETE /v0/auth/me
+
+  19 requests, 19 compared, 0 skipped, 2 with structural diffs.
+  dual_target.py exit: 1
+  teardown: amkd stopped, database amk_p1gate dropped
+
+17 of 19 requests are now byte-for-byte clean, including every one of the four assigned
+divergences' own routes (`/v0/organizations`'s 15 other fields, `fix` on every error response,
+all ten `Path<Uuid>` sites, and the inbox-scoped key's `pod_id`+`inbox_id` pair). Two diffs
+remain, both are pre-existing gaps orthogonal to this dispatch's four divergences, and neither is
+inside this dispatch's writable paths (`amk-types` is frozen) — reported rather than resolved:
+
+1. `$.billing_plan_id` / `$.clerk_organization_id` on `/v0/organizations` — this is the ONE
+   exception the divergence-1 contract itself names: "Do not add `billing_plan_id` or
+   `clerk_organization_id`. They are excluded by decision, the exclusion is pinned by a test in
+   amk-types, and re-adding them fails that test." (`amk_types::pod::tests::
+   organization_carries_every_live_field_except_the_two_excluded_by_decision` — pre-existing,
+   unmodified by this dispatch.) This diff is expected, permanent, and must stay open.
+
+2. `$.api_keys[]` element shape on `/v0/api-keys` — NOT one of the four divergences, and newly
+   found while seeding this run's `permissions` object. The reference's inbox-scoped key's
+   `permissions` sub-object carries 38 keys, including `owner_email` and `owner_profile`.
+   `amk_types::ApiKeyPermissions` has exactly 36 fields, and they match
+   `reference/openapi.json`'s `type_api-keys:ApiKeyPermissions` schema exactly (36 properties,
+   `additionalProperties` unset) — `owner_email`/`owner_profile` are in neither. Same pattern
+   CLAUDE.md already documents for `Organization` and DELETE statuses ("the live capture wins;
+   this project has been here before"), on a different type, discovered here for the first time.
+   `amk-types` is frozen and outside this dispatch's writable paths and its four assigned
+   divergences — reported, not fixed. A future dispatch adding these two fields to
+   `ApiKeyPermissions` (mirroring the `Organization` migration-0009 pattern: field exists, always
+   omitted until something sets it) would close this.
+
+`p1-gate-conformance` reflects the four assigned divergences resolved and evidenced; the two
+residual diffs above are known, named, and out of this dispatch's scope by the contract's own
+words (divergence 1) or by discovery during it (the permissions gap).

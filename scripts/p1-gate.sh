@@ -5,7 +5,15 @@
 # SECRETS: `amk init` prints the root key once. It is captured into a shell variable, passed to the
 # harness through the environment, and never echoed, never written to a file, never committed.
 set -uo pipefail
-cd /home/imma/projects/AgentMailKit
+# Portable, matching scripts/check.sh's own convention — NOT a hardcoded path to the primary
+# checkout. A hardcoded `/home/imma/projects/AgentMailKit` here silently built and served whatever
+# was checked out THERE, never the tree this script itself lives in: run from inside a dispatch
+# worktree (exactly the "run it early too" use this script's own contract calls for), it gated
+# unmodified `main` against the live reference and reported this dispatch's own fixes as still
+# missing — found by cross-checking a "still failing" gate result against a manual curl of the
+# freshly built binary, which passed. `dirname "$0"` is this script's own directory regardless of
+# caller cwd, so `.. ` from `scripts/` is always the repository root THIS script is part of.
+cd "$(dirname "$0")/.."
 
 DB=amk_p1gate
 CTR=amk-dev-postgres
@@ -44,6 +52,20 @@ CAND_KEY=$(printf '%s\n' "$INIT_OUT" | sed -n 's/.*root api key: *//p' | tr -d '
 printf '%s\n' "$INIT_OUT" | sed -E 's/(root api key: *).*/\1<redacted>/'
 [ -n "$CAND_KEY" ] || { echo "FATAL: could not capture the root key"; exit 1; }
 
+echo "== operator configuration (direct UPDATE — no endpoint sets these; that is the honest state
+     the divergence-1 contract itself names) =="
+# The reference organization carries values for these eight columns; ours has none until an
+# operator sets one directly. Shape comparison never looks at the VALUE, only at whether the key
+# is present, so any non-null value here proves hydration end-to-end. `billing_plan_id` and
+# `clerk_organization_id` are deliberately NOT here — excluded by decision (dispatch contract,
+# divergence 1), pinned by a test in amk-types, and the one expected residual diff on this
+# endpoint that this gate cannot and must not close.
+docker exec "$CTR" psql -U amk -d "$DB" -qc \
+  "UPDATE organizations SET inbox_limit=1000, domain_limit=10, daily_send_limit=5000, \
+     five_minute_send_limit=100, first_day_recipient_limit=200, \
+     first_week_recipient_limit=1000, tracking_allowed=true, \
+     authentication_id='p1gate-auth', authentication_type='p1gate-type'" >/dev/null
+
 echo "== serve =="
 ./target/debug/amkd --role api &
 AMKD_PID=$!
@@ -57,31 +79,41 @@ echo "== seed the candidate to match the reference's STATE, not just its schema 
 # reports it "missing" against a reference whose resources do. That is a data difference wearing a
 # shape difference's clothes, and it hid the real diffs in the first run. Same for
 # `next_page_token`: it is absent on the last page, so a single-pod candidate can never emit one.
-# Seed a second pod and set `client_id` on what the placeholders resolve to.
 api() { curl -fsS -X "$1" "http://${BIND}$2" -H "Authorization: Bearer $CAND_KEY" \
           -H 'Content-Type: application/json' ${3:+-d "$3"}; }
 enc() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"; }
 
-# A second pod, so `?limit=1` on /v0/pods has a next page as it does on the reference.
-api POST /v0/pods '{"name":"p1gate second pod","client_id":"p1gate-pod-client"}' >/dev/null
+# The default pod `amk init` created, captured before a second pod exists so this id is
+# unambiguous (there is exactly one row to pick).
+POD1=$(api GET '/v0/pods' | python3 -c 'import json,sys; print(json.load(sys.stdin)["pods"][0]["pod_id"])')
 
-# Seed into the pod the RESOLVER will pick, not whichever pod happens to be default — the two need
-# not be the same, and when they were not, `{inbox_id}` resolved to nothing and three requests
-# silently dropped out of the gate.
+# A second pod: `?limit=1` on /v0/pods needs a next page as the reference has, and — since pods
+# sort newest-first (fixture 22) — this is also the pod the manifest's own resolver will pick for
+# `{pod_id}`, the same id `POD` below captures.
+api POST /v0/pods '{"name":"p1gate second pod","client_id":"p1gate-pod-client"}' >/dev/null
 POD=$(api GET '/v0/pods?limit=1' | python3 -c 'import json,sys; print(json.load(sys.stdin)["pods"][0]["pod_id"])')
 
-# The reference account holds a MIX: some inboxes carry `client_id`, some do not. Since optionals
-# are omitted when absent, its element-shape SET has two members and a candidate whose inboxes all
-# look alike can never match it. Seed both variants.
-api POST "/v0/pods/$POD/inboxes" '{"username":"p1gate-a","client_id":"p1gate-inbox-a"}' \
+# The reference account holds a MIX: some inboxes carry `client_id`, some do not — its element-
+# shape SET has two members and a candidate whose inboxes all look alike can never match it. But
+# the manifest's `{inbox_id}` resolver always picks the NEWEST (limit=1, newest-first), and on the
+# reference that resolved inbox carries `client_id` — so the client_id-bearing one here must be
+# both the newest overall AND live in $POD (the resolved pod), never POD1: put the two variants in
+# different pods so $POD's own unlimited listing shows exactly ONE element shape (matching what
+# the reference's resolved pod shows), while the org-wide listing still sees the mix.
+api POST "/v0/pods/$POD1/inboxes" '{"username":"p1gate-a"}' >/dev/null
+api POST "/v0/pods/$POD/inboxes" '{"username":"p1gate-b","client_id":"p1gate-inbox-b"}' \
   | python3 -c 'import json,sys; print("  inbox:", json.load(sys.stdin)["inbox_id"])'
-api POST "/v0/pods/$POD/inboxes" '{"username":"p1gate-b"}' >/dev/null
-
-# Keys at all three scopes, for the same reason: the org-mount listing returns every key, so its
-# element-shape set spans org-scoped, pod-scoped and inbox-scoped.
 INBOX=$(api GET "/v0/pods/$POD/inboxes?limit=1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["inboxes"][0]["inbox_id"])')
-api POST "/v0/inboxes/$(enc "$INBOX")/api-keys" '{"name":"p1gate inbox key"}' >/dev/null
-api POST "/v0/pods/$POD/api-keys" '{"name":"p1gate pod key"}' >/dev/null
+
+# One inbox-scoped key, carrying `permissions` — the reference's own inbox-scoped key does, so its
+# element shape has that key present, not absent. It must NOT sit at $POD or at $INBOX: the
+# reference's own pod- and inbox-mounted `/api-keys` listings, at whatever its resolver picks, come
+# back empty (checked live), so a key seeded at the resolved pod/inbox is a shape the reference
+# never shows at that mount. POD1's inbox is neither, and the org-mount listing spans every scope
+# regardless of which pod or inbox holds the key.
+INBOX1=$(api GET "/v0/pods/$POD1/inboxes?limit=1" | python3 -c 'import json,sys; print(json.load(sys.stdin)["inboxes"][0]["inbox_id"])')
+api POST "/v0/inboxes/$(enc "$INBOX1")/api-keys" \
+  '{"name":"p1gate inbox key","permissions":{"message_read":true}}' >/dev/null
 
 for r in pods inboxes api-keys; do
   printf '  %-9s ' "$r"; api GET "/v0/$r" | python3 -c 'import json,sys; print(json.load(sys.stdin)["count"])'
@@ -89,7 +121,13 @@ done
 
 echo
 echo "== dual-target conformance diff: api.agentmail.to vs localhost =="
+# The real gate: conformance/dual_target.py's own structural diff, not the ad hoc key-set probe
+# that established the four divergences in the first place (that was a debugging aid run by hand;
+# this is the thing p1-gate-conformance actually reads). Its own summary line ("N requests, M
+# compared, X skipped, Y with structural diffs") is the ledger's pass/fail criterion verbatim.
 AGENTMAIL_API_KEY='sdxd:agentmail' CAND_KEY="$CAND_KEY" sdxd run -- bash -c '
   REF_KEY="$AGENTMAIL_API_KEY" CAND_BASE="http://127.0.0.1:8111" CAND_KEY="$CAND_KEY" \
-    python3 '"$KEYSETS"' '
-echo "keysets exit: $?"
+    python3 conformance/dual_target.py conformance/manifest.json'
+GATE_EXIT=$?
+echo "dual_target.py exit: $GATE_EXIT"
+exit "$GATE_EXIT"
