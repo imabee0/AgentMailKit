@@ -200,6 +200,52 @@ async fn plus_addressing_round_trips_through_the_path() {
 }
 
 #[tokio::test]
+async fn a_literal_percent_2f_in_an_inbox_id_round_trips_through_the_route_not_just_the_unit() {
+    // `%` is a legal `atext` character in an unquoted RFC 5322 local part, so a literal `%2F`
+    // inside an `inbox_id` is a real, reachable value — `ids.rs`'s own unit test proves the
+    // decode-once arithmetic in isolation (via `MessageId`, which shares `decode_segment`), but
+    // `inbox_id` is the id that actually reaches a route with a caller-controlled value in this
+    // dispatch, and a wiring mistake between the route and `decode_segment` would not show up in
+    // a unit test that never goes through axum's own `Path` extractor at all.
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+
+    let username = format!("weird%2F{}local", support::unique_suffix());
+    let created = support::post(
+        &router,
+        "/v0/inboxes",
+        Some(&key),
+        serde_json::json!({"username": username}),
+    )
+    .await;
+    assert_eq!(created.status, 200, "body: {}", created.body);
+    let inbox_id = created.json.unwrap()["inbox_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(inbox_id.contains("%2f") || inbox_id.contains("%2F"), "{inbox_id}");
+    assert!(
+        !inbox_id.contains('/'),
+        "the literal %2F must never have become a slash: {inbox_id}"
+    );
+
+    let resp =
+        support::get(&router, &format!("/v0/inboxes/{}", percent_encode(&inbox_id)), Some(&key))
+            .await;
+    assert_eq!(
+        resp.status, 200,
+        "must resolve as one segment, not split by a corrupted /: {}",
+        resp.body
+    );
+    assert_eq!(resp.json.unwrap()["inbox_id"], inbox_id);
+}
+
+#[tokio::test]
 async fn a_credential_lacking_inbox_read_gets_the_same_answer_for_an_existing_and_a_nonexistent_inbox(
 ) {
     // `handlers::inboxes::get_inbox` decides permission BEFORE scope: a credential lacking
