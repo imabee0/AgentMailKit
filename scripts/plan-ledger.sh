@@ -260,7 +260,12 @@ check security-timing-guard-live yes \
       grep -q "#\[ignore"'
 
 # ---------------------------------------------------------------- not yet due
-pend p0-gate-sdk-authme      "P0 gate: official Python SDK auth.me() vs localhost (needs amk-http)"
+# Two prerequisites, named so neither is discovered at gate time. The SDK is not installed anywhere
+# on this machine and the harness cannot supply it: `conformance/dual_target.py` is deliberately
+# stdlib-only, so nothing today would fail if the client were missing. Version pinned in
+# `conformance/requirements-gate.txt` — an acceptance test whose point is that the UNMODIFIED
+# official client works is not that test if it runs against an arbitrary version.
+pend p0-gate-sdk-authme      "P0 gate: official Python SDK auth.me() vs localhost (needs amk-http; SDK pinned in conformance/requirements-gate.txt, install to .venv-gate)"
 pend p1-gate-conformance     "P1 gate: dual-target conformance diff clean for P1 endpoints"
 pend p6-restore-drill        "P6: restore drill passes from backups alone, before any cutover step"
 

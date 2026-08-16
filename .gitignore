@@ -11,3 +11,6 @@
 # forgotten.
 .amk-scope
 .amk-task.md
+
+# Throwaway venv for the SDK phase gates; see conformance/requirements-gate.txt
+.venv-gate/
