@@ -4,7 +4,6 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use uuid::Uuid;
 
 use amk_core::permissions;
 use amk_core::scope::{ResourceKind, ScopeFilter};
@@ -14,11 +13,11 @@ use amk_store::StoreError;
 use amk_types::api_key::{
     CreateApiKeyRequest, CreateApiKeyResponse, KeyGrants, ListApiKeysResponse,
 };
-use amk_types::ids::{ApiKeyId, PodId};
+use amk_types::ids::ApiKeyId;
 
 use crate::auth::AuthContext;
 use crate::error::AppError;
-use crate::ids::decode_segment;
+use crate::ids::{decode_segment, PathPodId, PathPodIdString};
 use crate::pagination::{ListQuery, ListQueryNoDirection, Resolved};
 use crate::scope_ext::{key_scope_for, organization_window, settle_inbox_mount, settle_pod_mount};
 use crate::AppState;
@@ -51,10 +50,10 @@ pub async fn list_org(
 pub async fn list_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path(pod_id): Path<Uuid>,
+    PathPodId(pod_id): PathPodId,
     Query(q): Query<ListQueryNoDirection>,
 ) -> Result<Json<ListApiKeysResponse>, AppError> {
-    let filter = settle_pod_mount(&state.pool, &ctx.scope, PodId::from(pod_id)).await?;
+    let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "api_key_read")?;
     list_keys(&state, &filter, q.resolve()).await
 }
@@ -110,10 +109,10 @@ pub async fn create_org(
 pub async fn create_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path(pod_id): Path<Uuid>,
+    PathPodId(pod_id): PathPodId,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
-    let filter = settle_pod_mount(&state.pool, &ctx.scope, PodId::from(pod_id)).await?;
+    let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "api_key_create")?;
     create_key(&state, &ctx, &filter, req).await
 }
@@ -177,9 +176,9 @@ pub async fn delete_org(
 pub async fn delete_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path((pod_id, raw_api_key_id)): Path<(Uuid, String)>,
+    PathPodIdString(pod_id, raw_api_key_id): PathPodIdString,
 ) -> Result<StatusCode, AppError> {
-    let filter = settle_pod_mount(&state.pool, &ctx.scope, PodId::from(pod_id)).await?;
+    let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     delete_key(&state, &ctx, &filter, &raw_api_key_id).await
 }
 

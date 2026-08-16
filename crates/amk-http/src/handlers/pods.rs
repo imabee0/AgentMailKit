@@ -1,10 +1,9 @@
 //! `/v0/pods` — the only mount pods have (there is no `/v0/pods/{pod_id}/pods`, so this handler
 //! set is written once and mounted once, unlike inboxes and api-keys).
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use uuid::Uuid;
 
 use amk_core::permissions;
 use amk_core::scope::ResourceKind;
@@ -16,6 +15,7 @@ use amk_types::pod::{CreatePodRequest, ListPodsResponse, Pod};
 
 use crate::auth::AuthContext;
 use crate::error::AppError;
+use crate::ids::PathPodId;
 use crate::pagination::{ListQuery, Resolved};
 use crate::scope_ext::organization_window;
 use crate::AppState;
@@ -116,7 +116,7 @@ pub async fn create(
 pub async fn get(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path(pod_id): Path<Uuid>,
+    PathPodId(pod_id): PathPodId,
 ) -> Result<Json<Pod>, AppError> {
     // Permission decided BEFORE scope, deliberately the reverse of the ordering this file used to
     // use here (and the opposite of the comment that used to sit on this line). Checking the flag
@@ -131,7 +131,6 @@ pub async fn get(
     // observation.
     permissions::require(&ctx.grants, "pod_read")?;
     let window = organization_window(&ctx.scope);
-    let pod_id = PodId::from(pod_id);
     let row = pods::get(&state.pool, window.organization_id(), pod_id).await?;
     let pod = match row {
         Some(p) => window.check(p)?,
@@ -145,10 +144,9 @@ pub async fn get(
 pub async fn delete(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path(pod_id): Path<Uuid>,
+    PathPodId(pod_id): PathPodId,
 ) -> Result<StatusCode, AppError> {
     let window = organization_window(&ctx.scope);
-    let pod_id = PodId::from(pod_id);
     // `pods::delete` pins only `organization_id` and the exact target `pod_id` — it has no
     // narrower "and belongs to pod X" pin the way `inboxes::*` takes an optional `pod_id`, so a
     // pod- or inbox-scoped credential's OWN pod pin has to be checked here, before the delete

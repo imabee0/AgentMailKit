@@ -1,8 +1,16 @@
-//! Path-segment id handling for the string-typed ids (`inbox_id`, `message_id`, `api_key_id`).
+//! Path-segment id handling: the string-typed ids (`inbox_id`, `message_id`, `api_key_id`) below,
+//! and [`PathPodId`]/[`PathPodIdString`] — divergence 3 (`reference/fixtures/
+//! 25-p1-gate-conformance.txt`) — which wrap axum's own `Path<Uuid>` (the dependency section of
+//! the dispatch contract names this explicitly — `uuid`'s `serde` feature exists for exactly
+//! this).
 //!
-//! `pod_id` is not here: it is a UUID and is extracted with axum's own `Path<Uuid>` (the
-//! dependency section of the dispatch contract names this explicitly — `uuid`'s `serde` feature
-//! exists for exactly this).
+//! # Why `pod_id` alone gets a wrapper, and the other two do not
+//!
+//! Every `Uuid`-typed path segment in this crate's 25 operations names a `pod_id` — no route in
+//! this dispatch has a second one. `api_key_id`/`inbox_id`/`message_id` are `string_id!` newtypes
+//! (opaque strings, see below), extracted as `Path<String>`, which cannot fail to deserialize at
+//! all: any UTF-8 path segment IS a valid `String`. So only a `Uuid`-typed extraction can produce
+//! axum's own plain-text rejection, and `pod_id` is the only place that happens.
 //!
 //! # Why this does *not* call `amk_types::ids::*::from_path_segment`
 //!
@@ -29,7 +37,66 @@
 //! contract's literal wording is flagged in the dispatch report; the resolution is evidenced by
 //! axum's own source and `amk_types`' own doc comment, not a guess.
 
-use amk_types::ids::has_forbidden_byte;
+use amk_core::scope::{ResourceKind, ScopeDenial};
+use amk_types::ids::{has_forbidden_byte, PodId};
+use axum::extract::{FromRequestParts, Path};
+use axum::http::request::Parts;
+use uuid::Uuid;
+
+use crate::error::AppError;
+use crate::AppState;
+
+/// `pod_id`, wrapping axum's own `Path<Uuid>` — divergence 3. A route naming exactly one path
+/// parameter (`/v0/pods/{pod_id}`, `/v0/pods/{pod_id}/api-keys`, `/v0/pods/{pod_id}/inboxes`)
+/// uses this in place of `Path<Uuid>`.
+///
+/// On a malformed `pod_id`, this produces the **exact same** [`AppError`] a well-formed-but-
+/// absent `pod_id` already gets — `ScopeDenial::new(ResourceKind::Pod).into_envelope()`, the same
+/// construction `ScopeFilter::not_found(ResourceKind::Pod)` calls — rather than a bespoke message,
+/// so the two are indistinguishable by construction, not merely by coincidence of wording. This is
+/// also the right disclosure answer (the dispatch contract's own words): it reveals nothing about
+/// which ids are well-formed.
+pub struct PathPodId(pub PodId);
+
+impl FromRequestParts<AppState> for PathPodId {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match Path::<Uuid>::from_request_parts(parts, state).await {
+            Ok(Path(id)) => Ok(Self(PodId::from(id))),
+            Err(_rejection) => Err(ScopeDenial::new(ResourceKind::Pod).into()),
+        }
+    }
+}
+
+/// `(pod_id, <the route's own second segment, raw>)`, wrapping axum's own
+/// `Path<(Uuid, String)>` — the four two-segment routes under a named pod mount
+/// (`/v0/pods/{pod_id}/inboxes/{inbox_id}`, `/v0/pods/{pod_id}/api-keys/{api_key_id}`, and their
+/// `PATCH`/`DELETE` siblings).
+///
+/// Only the first (`Uuid`) element can make the *whole tuple* fail to deserialize — a
+/// `Path<String>` never rejects, so a malformed second segment reaches the handler exactly as
+/// before this dispatch, and is [`decode_segment`]'s job (or the store lookup simply finding
+/// nothing), not this extractor's. See [`PathPodId`]'s own doc for why the rejection this
+/// produces is byte-identical to an absent `pod_id`'s.
+pub struct PathPodIdString(pub PodId, pub String);
+
+impl FromRequestParts<AppState> for PathPodIdString {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match Path::<(Uuid, String)>::from_request_parts(parts, state).await {
+            Ok(Path((id, s))) => Ok(Self(PodId::from(id), s)),
+            Err(_rejection) => Err(ScopeDenial::new(ResourceKind::Pod).into()),
+        }
+    }
+}
 
 /// A decoded path segment carried a byte no identifier may contain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

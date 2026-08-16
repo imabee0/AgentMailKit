@@ -19,7 +19,7 @@ use amk_types::{CreateInboxRequest, ErrorCode, ErrorEnvelope, Inbox, UpdateInbox
 
 use crate::auth::AuthContext;
 use crate::error::AppError;
-use crate::ids::decode_segment;
+use crate::ids::{decode_segment, PathPodId, PathPodIdString};
 use crate::pagination::{ListQuery, Resolved};
 use crate::scope_ext::{organization_window, settle_pod_mount};
 use crate::words;
@@ -70,10 +70,10 @@ pub async fn list_org(
 pub async fn list_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path(pod_id): Path<Uuid>,
+    PathPodId(pod_id): PathPodId,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<ListInboxesResponse>, AppError> {
-    let filter = settle_pod_mount(&state.pool, &ctx.scope, PodId::from(pod_id)).await?;
+    let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "inbox_read")?;
     list_inboxes(&state, &filter, &q).await
 }
@@ -149,10 +149,10 @@ pub async fn create_org(
 pub async fn create_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path(pod_id): Path<Uuid>,
+    PathPodId(pod_id): PathPodId,
     Json(req): Json<CreateInboxRequest>,
 ) -> Result<Json<Inbox>, AppError> {
-    let filter = settle_pod_mount(&state.pool, &ctx.scope, PodId::from(pod_id)).await?;
+    let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "inbox_create")?;
     let pod_id = filter
         .pod_id()
@@ -289,10 +289,10 @@ pub async fn get_org(
 pub async fn get_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path((pod_id, raw_inbox_id)): Path<(Uuid, String)>,
+    PathPodIdString(pod_id, raw_inbox_id): PathPodIdString,
 ) -> Result<Json<Inbox>, AppError> {
     let target = inbox_id_from_path(&raw_inbox_id)?;
-    let window = window_for_pod_own_resource(&ctx.scope, PodId::from(pod_id))?;
+    let window = window_for_pod_own_resource(&ctx.scope, pod_id)?;
     get_inbox(&state, &ctx, &window, &target).await
 }
 
@@ -342,11 +342,11 @@ pub async fn update_org(
 pub async fn update_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path((pod_id, raw_inbox_id)): Path<(Uuid, String)>,
+    PathPodIdString(pod_id, raw_inbox_id): PathPodIdString,
     Json(req): Json<UpdateInboxRequest>,
 ) -> Result<Json<Inbox>, AppError> {
     let target = inbox_id_from_path(&raw_inbox_id)?;
-    let window = window_for_pod_own_resource(&ctx.scope, PodId::from(pod_id))?;
+    let window = window_for_pod_own_resource(&ctx.scope, pod_id)?;
     update_inbox(&state, &ctx, &window, &target, req).await
 }
 
@@ -415,10 +415,10 @@ pub async fn delete_org(
 pub async fn delete_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Path((pod_id, raw_inbox_id)): Path<(Uuid, String)>,
+    PathPodIdString(pod_id, raw_inbox_id): PathPodIdString,
 ) -> Result<StatusCode, AppError> {
     let target = inbox_id_from_path(&raw_inbox_id)?;
-    let window = window_for_pod_own_resource(&ctx.scope, PodId::from(pod_id))?;
+    let window = window_for_pod_own_resource(&ctx.scope, pod_id)?;
     delete_inbox(&state, &ctx, &window, &target).await
 }
 
