@@ -120,12 +120,37 @@ Two shapes, and the branch is on **who rejected the request**, not on status cod
   the last page** — never an empty string.
 - Parameters: `before`/`after`/`ascending`, `labels[]`, the `include_*` visibility flags
   (default false), and the substring filters, which AND together. Filtered-list `limit` caps at 100.
-- The `include_*` flags exist on **4 of the 33** paginated GETs (`/threads`, `/pods/{id}/threads`,
-  `/inboxes/{id}/threads`, `/inboxes/{id}/messages`). Build the `LabelAccess` **mode** from the
-  route, not from a global default: `Mode::List(flags)` on those four, `Mode::Search` on the search
-  endpoints, `Mode::ById` on get-by-id. Routing a search or a drafts list through the list rule
-  makes restricted mail permanently unreachable for every credential that will ever exist
-  (`reference/fixtures/20-search-and-label-precedence.txt`).
+- The `include_*` flags exist on **4 of the 33** paginated GETs. Build the `LabelAccess` **mode**
+  from the route, not from a global default: `Mode::List(flags)` on those four, `Mode::Search` on
+  the search endpoints, `Mode::ById` on get-by-id. Routing a search or a drafts list through the
+  list rule makes restricted mail permanently unreachable for every credential that will ever
+  exist (`reference/fixtures/20-search-and-label-precedence.txt`).
+
+  This is the most security-relevant count in the contract, so it is **generated, not recalled** —
+  re-run this rather than trusting the number:
+
+  ```bash
+  python3 - <<'PY'
+  import json
+  s = json.load(open('reference/openapi.json'))
+  paged, incl = [], []
+  for p, d in s['paths'].items():
+      op = d.get('get')
+      if not op: continue
+      names = {q.get('name') for q in op.get('parameters', [])}
+      if 'page_token' in names or 'limit' in names: paged.append(p)
+      if any(n.startswith('include_') for n in names): incl.append(p)
+  print(len(paged), 'paginated GETs;', len(incl), 'carry include_*:', sorted(incl))
+  PY
+  ```
+
+  Verified output: **33 paginated GETs; 4 carry `include_*`** — `/v0/threads`,
+  `/v0/pods/{pod_id}/threads`, `/v0/inboxes/{inbox_id}/threads`,
+  `/v0/inboxes/{inbox_id}/messages`. The flag set on each is exactly
+  `include_blocked`, `include_spam`, `include_trash`, `include_unauthenticated` — four flags, one
+  per restricted label, matching `amk_types::labels::RESTRICTED`. None of these four is in this
+  dispatch's 25 operations; they land in the second dispatch, and this is pinned here so the mode
+  decision is made from evidence when it gets there.
 - **Never post-filter a page.** Build the `LabelAccess` and hand it to `amk-store`, which pushes the
   exclusion into the query. A `count` computed after filtering leaks the hidden rows.
 
