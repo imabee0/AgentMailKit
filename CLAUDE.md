@@ -43,12 +43,14 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0**, 405 tests green on `main`. `amk-types`, `amk-core` and `amk-store` merged
-and mutation-verified across five store dispatches; Register C3 applied to `amk-core::threading`.
+Current phase: **P0**, 493 tests green on `main`. `amk-types`, `amk-core`, `amk-store` and
+`amk-http` merged and mutation-verified; Register C3 applied to `amk-core::threading`.
 
-**Next: `.claude/contracts/amk-http.md`** — 25 operations, scope generated from `openapi.json` and
-asserted total against all 130. Every `amk-store` dependency is now on `main`; that contract
-describes the crate as it actually is, so read it rather than re-deriving the store surface.
+**Next: `.claude/contracts/amk-bins.md`** — `amk` (`init|migrate|doctor`) and `amkd` (`--role api`).
+No binary exists anywhere yet; the plan named them only in prose, which is why P0's SDK gate has
+read PENDING since P0 began. `amk init` is also what makes the org mount work: it mints one UUID
+that is **both** the `organization_id` and the default pod's `pod_id`, the equality `amk-http`
+resolves `POST /v0/inboxes` by (fixture 22).
 
 **A mutating reviewer works on a private copy, never the dispatch worktree, and never concurrently
 with a reading one.** A test lens mutating in place while two lenses read the same tree produced a
