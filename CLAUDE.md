@@ -14,7 +14,7 @@ Evidence: `reference/fixtures/` — live captures that define the contract.
 ./scripts/check.sh --fast        # same minus clippy (what the Stop hook runs)
 cargo test --workspace           # unit + fixture-regression tests alone
 ./scripts/shape-provenance.sh    # dependency direction + naming + boundary-type gate
-./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (24 cases, both directions)
+./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (both directions; ledger pins the count)
 ./scripts/dev-db.sh up           # Postgres 17 for amk-store on 127.0.0.1:55432 (down|dsn|psql)
 
 # conformance (structural diff vs the live reference API; keys come from sdxd, never inline)
@@ -46,8 +46,13 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 Current phase: **P0**, 352 tests green on `main`. `amk-types`, `amk-core` and `amk-store` merged
 and mutation-verified; Register C3 applied to `amk-core::threading`.
 
-**Next: `.claude/contracts/amk-http.md`** — 25 operations, scope generated from `openapi.json` and
-asserted total against all 130. Everything it depends on is now on `main`.
+**Next: `.claude/contracts/amk-store-http-prereqs.md`, then `.claude/contracts/amk-http.md`.**
+Checking the `amk-http` contract against `amk-store`'s real surface found four gaps for the third
+time: six of its 25 operations are paginated GETs behind `list` functions returning bare `Vec<T>`;
+`pods::delete` cannot express fixture 22's `cannot_delete`; an inbox holding an inbox-scoped api key
+cannot be deleted at all (`23503` on `api_keys_inbox_id_fkey` — reachable in P0, no mail required);
+and fixture 23 contradicts `SECRET_LEN`/`VISIBLE_LEN`. `amk-http` is 25 operations, scope generated
+from `openapi.json` and asserted total against all 130.
 
 **A mutating reviewer works on a private copy, never the dispatch worktree, and never concurrently
 with a reading one.** A test lens mutating in place while two lenses read the same tree produced a
@@ -61,10 +66,13 @@ scoping existing code carries the command that produced its scope and that comma
 it on a `Scope-derivation:` line (`contract-scope-derived` enforces this), and a **read-only lens
 reviews the contract before dispatch**, not only the diff after.
 
-**Mutate guards in both directions.** Twenty deletion mutations reported no survivors while a live
-one sat in `messages::insert`: widening `in_reply_to`'s guard to `is_some()` rejects every threaded
-reply and the suite stayed green, because only hostile-value tests touched that field. Delete *and*
-widen; a guard with no clean-path test is unpinned in the direction that breaks real traffic.
+**A test that has never failed is not evidence, and mutation runs in both directions.** Mutating a
+green, twice-reviewed crate found six defects two rounds of reading had missed, one reachable
+through a sibling of the function its regression test guarded. Twenty *deletion* mutations then
+reported no survivors while a live one sat in `messages::insert`: widening `in_reply_to`'s guard to
+`is_some()` rejects every threaded reply and the suite stayed green, because only hostile-value
+tests touched that field. Delete *and* widen, before claiming a gate; a guard with no clean-path
+test is unpinned in the direction that breaks real traffic.
 
 Still deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
 
@@ -75,10 +83,6 @@ those files (unverified key on 2.1.233; an unsupported key deregisters the agent
 
 No CI: gating is `./scripts/check.sh` plus the hooks, on this machine only — user decision, with
 its cost recorded in the plan.
-
-**A test that has never failed is not evidence.** Mutation testing found six defects in a green,
-twice-reviewed crate that two rounds of reading had missed — including a fail-open reachable
-through a sibling of the function its regression test guarded. Mutate before claiming a gate.
 
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
 writing to `amk-types`, to the plan, outside its dispatched `.amk-scope`, or introducing a
@@ -133,8 +137,7 @@ Closed by probe, and both reversed an implemented choice — check the fixture b
 
 - An unbracketed `In-Reply-To` **does** join the bracketed message's thread (fixture 21). AgentMail
   re-brackets the parsed value before matching: the same message returns `in_reply_to` bracketed
-  while `headers.In-Reply-To` stays bare. `amk-core::threading` currently asserts the opposite and
-  must be inverted.
+  while `headers.In-Reply-To` stays bare. `amk-core::threading` asserted the opposite until C3.
 - The Svix retry schedule is **not** truncated at 5 attempts — a 6th fired on two chains (fixture
   07). Keep all 8, with `message.attempt.exhausted` and the 5-day auto-disable as planned.
 
