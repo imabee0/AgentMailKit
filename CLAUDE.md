@@ -43,11 +43,16 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0**, 324 tests green on `main`. `amk-types`, `amk-core` and `amk-store` (incl.
-`api_keys` and id safety) merged and mutation-verified; Register C3 applied to `amk-core::threading`.
+Current phase: **P0**, 352 tests green on `main`. `amk-types`, `amk-core` and `amk-store` merged
+and mutation-verified; Register C3 applied to `amk-core::threading`.
 
 **Next: `.claude/contracts/amk-http.md`** — 25 operations, scope generated from `openapi.json` and
-asserted total against all 130.
+asserted total against all 130. Everything it depends on is now on `main`.
+
+**A mutating reviewer works on a private copy, never the dispatch worktree, and never concurrently
+with a reading one.** A test lens mutating in place while two lenses read the same tree produced a
+review that reasonably read as a prompt-injection attempt, void test evidence, and a flaky-test
+diagnosis that blamed Postgres for the collision.
 
 **A contract's scope is derived, never recalled.** The id-safety dispatch cost four correction
 rounds because its contract listed call paths remembered from a review report instead of enumerated
