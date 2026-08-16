@@ -1093,3 +1093,272 @@ async fn hostile_api_key_id_inputs_are_total_across_get_delete_and_touch_used_at
         .expect("the real key must survive the entire hostile battery");
     assert_eq!(survivor.used_at, None, "no hostile input should have touched the real key");
 }
+
+// ---- a NUL byte in `inbox_id` itself (not `api_key_id`) ------------------------------------
+//
+// Everything above drives a hostile *`api_key_id`* through `exact_api_key_uuid`'s existing
+// `Option<Uuid>` guard. `inbox_id` is a different, ordinary `InboxId` bound as `text` into
+// `INSERT_SQL`/`GET_SQL`/`LIST_SQL`/`DELETE_SQL`, and until this dispatch's guard, nothing in this
+// module checked it: a review panel's independent enumeration found `api_keys.rs` had zero calls
+// to `has_forbidden_byte` at all.
+
+/// `create`'s own `NewApiKey.inbox_id` reaches `INSERT_SQL` as `text` — a NUL fails the bind, not
+/// the query, so it must be rejected in Rust before the mint even happens, exactly like
+/// `inboxes::create`'s own `inbox_id`.
+#[tokio::test]
+async fn create_rejects_a_nul_byte_in_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let hostile = InboxId::new("abc\0def@example.test");
+
+    let result = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org,
+            pod_id: None,
+            inbox_id: Some(hostile),
+            name: "hostile-inbox".into(),
+            permissions: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StoreError::InvalidValue("inbox_id"))),
+        "expected InvalidValue(\"inbox_id\"), got {result:?}"
+    );
+}
+
+/// `get`'s `KeyScope::Inbox` reaches `scope_params` and then `GET_SQL`'s `inbox_id = $4` as
+/// `text`. Asserting `Ok(None)` (not merely `!= Err`) is the point: the pre-fix behaviour was
+/// `Err(StoreError::Database(_))` from SQLSTATE `22021`, and a mutant that reintroduced that would
+/// still technically "return a Result".
+#[tokio::test]
+async fn get_rejects_a_nul_byte_in_the_inbox_scope() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let created = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox),
+            name: "real-inbox-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+    let _ = pod;
+
+    let hostile_scope = KeyScope::Inbox(InboxId::new("abc\0def@example.test"));
+    let got = api_keys::get(&pool, &org, &hostile_scope, &created.api_key_id).await;
+    assert!(got.is_ok(), "must be Ok(None), not a database error: {got:?}");
+    assert_eq!(got.unwrap(), None);
+}
+
+/// `delete`'s sibling of the `get` test above — same `inbox_id = $4` fragment in `DELETE_SQL`, a
+/// separate call site the dispatch contract requires its own test for (a prior dispatch shipped a
+/// regression test that covered `get` while `delete`'s call site went unmutated).
+#[tokio::test]
+async fn delete_rejects_a_nul_byte_in_the_inbox_scope() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, _pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let created = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox),
+            name: "real-inbox-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let hostile_scope = KeyScope::Inbox(InboxId::new("abc\0def@example.test"));
+    let deleted = api_keys::delete(&pool, &org, &hostile_scope, &created.api_key_id).await;
+    assert!(deleted.is_ok(), "must be Ok(false), not a database error: {deleted:?}");
+    assert!(!deleted.unwrap());
+
+    // The real key must have survived — this is not merely "delete always reports false".
+    assert!(
+        api_keys::get(&pool, &org, &KeyScope::Organization, &created.api_key_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "a hostile scope must not have deleted the real row"
+    );
+}
+
+/// The test this dispatch exists to make impossible to fake: `scope_params` turning a hostile
+/// `KeyScope::Inbox` into `(None, None)` would satisfy every test above (each asserts an *empty*
+/// or *false* result, and `(None, None)` unpins the query rather than narrowing it) while actually
+/// widening an inbox-scoped `list` into an organization-wide one — a cross-tenant leak dressed up
+/// as a not-found. Two *different* inboxes each get a key; listing at a hostile rendering of
+/// inbox A's scope must return neither key, not inbox B's (which a widened, unpinned query would
+/// include). If the guard is ever moved from its per-function early return into `scope_params`
+/// itself, this is the test that fails — the others would still pass.
+#[tokio::test]
+async fn list_at_a_hostile_inbox_scope_returns_empty_not_every_key_in_the_organization() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let inbox_b = support::seed_inbox(&pool, &org, pod, "sibling").await;
+
+    api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox_a.clone()),
+            name: "inbox-a-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+    api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox_b),
+            name: "inbox-b-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // A NUL-bearing rendering of inbox A's own id — not a different inbox, so a correct guard's
+    // only possible non-widening outcome is "match nothing", never "match inbox A's key" and never
+    // "match every key in the organization".
+    let hostile = InboxId::new(format!("{}\0", inbox_a.as_str()));
+    let listed = api_keys::list(&pool, &org, &KeyScope::Inbox(hostile))
+        .await
+        .unwrap();
+    assert!(
+        listed.is_empty(),
+        "a hostile inbox scope must return no keys at all, not the whole organization's: \
+         {listed:?}"
+    );
+}
+
+/// Positive-path sibling of the test above, proving the guard rejects exactly the hostile byte and
+/// nothing more: a *clean* inbox-scoped `list` must still return precisely that inbox's own key,
+/// not its sibling's — ruling out an over-broad guard (one that rejected every inbox scope, clean
+/// or not) as a way to pass the negative test.
+#[tokio::test]
+async fn list_at_a_clean_inbox_scope_still_returns_exactly_that_inboxs_key() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let inbox_b = support::seed_inbox(&pool, &org, pod, "sibling").await;
+
+    let key_a = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox_a.clone()),
+            name: "inbox-a-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+    api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox_b),
+            name: "inbox-b-key".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let listed = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_a))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1, "a clean inbox scope must still resolve exactly one key");
+    assert_eq!(listed[0].api_key_id, key_a.api_key_id);
+}
+
+// ---- a NUL byte in `authenticate`'s presented credential ------------------------------------
+//
+// A different door from every test above: `candidate_prefix` slices the caller's raw credential
+// (not an id newtype at all) and `authenticate` binds the result as `text` into `AUTHENTICATE_SQL`.
+// The module's own doc comment already requires a NUL-bearing presented value to be treated as
+// "a malformed presented value" — one of the three kinds of miss `authenticate` promises to cost
+// the same as every other kind.
+
+/// `authenticate` must resolve `Ok(None)` for a NUL-bearing credential, not `Err` — asserted as
+/// `Ok(None)` specifically (not `is_err()`), because the regression this guards against is a
+/// database error escaping as `StoreError::Database`, not merely "some Result variant".
+#[tokio::test]
+async fn authenticate_with_a_nul_byte_in_the_presented_value_returns_ok_none() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let hostile = "am_us_ab\0cdefg-the-rest-of-a-realistic-length-credential-tail";
+
+    let result = api_keys::authenticate(&pool, hostile).await;
+    assert!(result.is_ok(), "must be Ok(None), not a database error: {result:?}");
+    assert_eq!(result.unwrap(), None);
+}
+
+/// The obvious fix for the test above — an early `return Ok(None)` the moment the presented value
+/// is found to carry a NUL — is wrong: it would skip the module's own documented "exactly one
+/// `verify_secret` call, unconditional on every path" invariant, so a NUL-bearing credential would
+/// resolve measurably faster than a real miss (right prefix, wrong secret) — reopening, at the
+/// query-parameter auth precedence path, precisely the timing side channel the module's five prior
+/// review rounds closed for every other kind of miss. Argon2id's default parameters are a
+/// deliberately expensive, memory-hard hash (tens of milliseconds is the normal cost on ordinary
+/// hardware), so a genuine verify and a skipped one differ by orders of magnitude — the floor below
+/// is generous enough to catch a skip without being sensitive to ordinary scheduling jitter.
+#[tokio::test]
+async fn authenticate_with_a_nul_byte_still_pays_the_real_verify_cost() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let created = api_keys::create(&pool, org_key(&org, "nul-timing-baseline"))
+        .await
+        .unwrap();
+
+    // A NUL inside the same visible-prefix window a real credential's prefix occupies, derived
+    // from an actually-minted prefix rather than from this module's own `[ASSUMED]` constants
+    // (`PREFIX_TAG`/`VISIBLE_LEN` are private, and this test has no business hardcoding either):
+    // replacing the prefix's own last character is guaranteed to land inside whatever slice
+    // `candidate_prefix` re-derives, so `candidate_prefix` still returns `Some(_)` and the only
+    // thing left to distinguish a real miss from a skipped one is whether `verify_secret` ran.
+    let mut hostile_prefix = created.prefix.clone();
+    hostile_prefix.pop();
+    hostile_prefix.push('\0');
+    let hostile = format!("{hostile_prefix}-plus-a-realistic-length-tail-of-more-characters");
+
+    let start = std::time::Instant::now();
+    let result = api_keys::authenticate(&pool, &hostile).await;
+    let elapsed = start.elapsed();
+    assert!(result.is_ok(), "must be Ok(None), not a database error: {result:?}");
+    assert_eq!(result.unwrap(), None);
+
+    assert!(
+        elapsed >= std::time::Duration::from_millis(1),
+        "a NUL-bearing credential resolved in {elapsed:?} — too fast to have run the argon2id \
+         verify against the dummy hash, meaning it took an early-return shortcut instead of \
+         paying the same cost as a real miss"
+    );
+}

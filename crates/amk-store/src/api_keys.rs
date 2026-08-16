@@ -51,7 +51,7 @@
 use std::sync::OnceLock;
 
 use amk_types::api_key::{ApiKey, ApiKeyPermissions, CreateApiKeyResponse};
-use amk_types::ids::{ApiKeyId, InboxId, OrganizationId, PodId};
+use amk_types::ids::{has_forbidden_byte, ApiKeyId, InboxId, OrganizationId, PodId};
 use amk_types::Timestamp;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -356,6 +356,14 @@ const AUTHENTICATE_SQL: &str = "SELECT api_key_id, organization_id, pod_id, inbo
 /// Mint a new key and store it. Returns the one response that carries the plaintext secret —
 /// [`CreateApiKeyResponse`] — which the caller must hand back to its own caller and never store.
 pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyResponse, StoreError> {
+    if new
+        .inbox_id
+        .as_ref()
+        .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
+        return Err(StoreError::InvalidValue("inbox_id"));
+    }
+
     let api_key_id = Uuid::new_v4();
     let (secret, prefix) = mint();
     let hash = hash_secret(&secret);
@@ -396,6 +404,19 @@ pub async fn get(
     scope: &KeyScope,
     api_key_id: &ApiKeyId,
 ) -> Result<Option<ApiKey>, StoreError> {
+    // The guard lives here, before `scope_params`, and deliberately not inside it. `scope_params`
+    // turns `KeyScope::Inbox` into a *pin*: `Some(id)` narrows the query to that one inbox, but
+    // `None` does not fail closed — it becomes `($3::text IS NULL OR inbox_id = $3)`, which is
+    // *unpinned* and matches every inbox in the organization. If a NUL byte were handled by
+    // returning `(None, None)` from `scope_params`, a hostile inbox-scoped request would silently
+    // widen into an organization-wide one instead of failing — a cross-tenant read, strictly worse
+    // than the 500 this dispatch fixes. Rejecting here, before that helper ever runs, is what keeps
+    // the failure mode a miss instead of a leak.
+    if let KeyScope::Inbox(i) = scope {
+        if has_forbidden_byte(i.as_str()) {
+            return Ok(None);
+        }
+    }
     let (pod_param, inbox_param) = scope_params(scope);
     let row = sqlx::query(GET_SQL)
         .bind(organization_id.as_str())
@@ -413,6 +434,14 @@ pub async fn list(
     organization_id: &OrganizationId,
     scope: &KeyScope,
 ) -> Result<Vec<ApiKey>, StoreError> {
+    // See the identical comment in `get`: this must run before `scope_params`, not inside it, or a
+    // hostile NUL-bearing inbox scope silently widens to every key in the organization instead of
+    // returning none.
+    if let KeyScope::Inbox(i) = scope {
+        if has_forbidden_byte(i.as_str()) {
+            return Ok(Vec::new());
+        }
+    }
     let (pod_param, inbox_param) = scope_params(scope);
     let rows = sqlx::query(LIST_SQL)
         .bind(organization_id.as_str())
@@ -430,6 +459,14 @@ pub async fn delete(
     scope: &KeyScope,
     api_key_id: &ApiKeyId,
 ) -> Result<bool, StoreError> {
+    // See the identical comment in `get`: this must run before `scope_params`, not inside it, or a
+    // hostile NUL-bearing inbox scope silently widens to every key in the organization instead of
+    // deleting nothing.
+    if let KeyScope::Inbox(i) = scope {
+        if has_forbidden_byte(i.as_str()) {
+            return Ok(false);
+        }
+    }
     let (pod_param, inbox_param) = scope_params(scope);
     let result = sqlx::query(DELETE_SQL)
         .bind(organization_id.as_str())
@@ -448,14 +485,22 @@ pub async fn authenticate(
     pool: &PgPool,
     presented: &str,
 ) -> Result<Option<AuthenticatedKey>, StoreError> {
+    // A NUL-bearing `presented` value is treated as the same kind of miss as `candidate_prefix`
+    // returning `None` — folded into this match, not a new statement ahead of it, so it shares the
+    // unconditional `verify_secret` call below rather than short-circuiting past it. An early
+    // `return Ok(None)` here would skip the argon2 verify entirely and resolve measurably faster
+    // than a real miss, reopening the exact timing distinction the module doc (and five prior
+    // review rounds) require `authenticate` not to have. Postgres `text` cannot encode the byte
+    // either way, so the query must not run — but "must not query" and "must not verify" are not
+    // the same requirement, and only the first one is true here.
     let row = match candidate_prefix(presented) {
-        Some(prefix) => {
+        Some(prefix) if !has_forbidden_byte(&prefix) => {
             sqlx::query(AUTHENTICATE_SQL)
                 .bind(prefix)
                 .fetch_optional(pool)
                 .await?
         }
-        None => None,
+        _ => None,
     };
 
     // Exactly one argon2id verify, on every path, against a hash chosen by a pure fallback:
