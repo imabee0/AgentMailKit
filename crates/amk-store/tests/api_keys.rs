@@ -1324,14 +1324,14 @@ async fn walk_api_keys(
     org: &OrganizationId,
     scope: &KeyScope,
     direction: SortDirection,
+    limit: u64,
 ) -> Vec<ApiKeyId> {
     let mut seen = Vec::new();
     let mut cursor = None;
     loop {
-        let page =
-            api_keys::list(pool, org, scope, ListApiKeysQuery { limit: 2, direction, cursor })
-                .await
-                .unwrap();
+        let page = api_keys::list(pool, org, scope, ListApiKeysQuery { limit, direction, cursor })
+            .await
+            .unwrap();
         seen.extend(page.items.into_iter().map(|k| k.api_key_id));
         match page.next {
             Some(token) => cursor = Some(ApiKeyCursor::decode(&token, scope).unwrap()),
@@ -1355,7 +1355,8 @@ async fn api_keys_list_full_walk_ascending_sees_every_row_exactly_once() {
         seeded.insert(created.api_key_id);
     }
 
-    let seen = walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending).await;
+    let seen =
+        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending, 2).await;
     assert_eq!(seen.len(), 5, "no duplicate and no omission: {seen:?}");
     assert_eq!(seen.into_iter().collect::<std::collections::BTreeSet<_>>(), seeded);
 }
@@ -1373,9 +1374,9 @@ async fn api_keys_list_full_walk_descending_is_the_exact_reverse() {
     }
 
     let ascending =
-        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending).await;
+        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending, 2).await;
     let mut descending =
-        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Descending).await;
+        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Descending, 2).await;
     descending.reverse();
     assert_eq!(ascending, descending);
 }
@@ -1421,7 +1422,10 @@ async fn api_keys_list_with_u64_max_limit_returns_every_row_without_panicking() 
 
 /// The test that fails if the primary-key tiebreak is dropped from `ORDER BY`: two keys sharing
 /// one `created_at` millisecond, seeded via raw SQL (`api_keys::create` cannot pin `created_at`;
-/// it is always `DEFAULT now()`) must both be seen exactly once across the walk.
+/// it is always `DEFAULT now()`) must both be seen exactly once across the walk. `limit: 1`,
+/// deliberately: `control_plane.rs`'s `pods_list_breaks_a_created_at_tie_by_pod_id` explains why a
+/// larger limit that returns both tied rows from one query never exercises a cursor comparison at
+/// all.
 #[tokio::test]
 async fn api_keys_list_breaks_a_created_at_tie_by_api_key_id() {
     let Some(pool) = support::pool().await else {
@@ -1454,7 +1458,8 @@ async fn api_keys_list_breaks_a_created_at_tie_by_api_key_id() {
         ids.push(ApiKeyId::new(api_key_id.to_string()));
     }
 
-    let seen = walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending).await;
+    let seen =
+        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending, 1).await;
     assert_eq!(seen.len(), 2, "both same-instant keys must be seen exactly once each: {seen:?}");
     let mut seen_sorted = seen;
     seen_sorted.sort();
@@ -1505,7 +1510,7 @@ async fn api_keys_list_pod_scoped_walk_never_returns_a_sibling_pods_key_on_any_p
         .unwrap();
     }
 
-    let seen = walk_api_keys(&pool, &org, &KeyScope::Pod(pod_a), SortDirection::Ascending).await;
+    let seen = walk_api_keys(&pool, &org, &KeyScope::Pod(pod_a), SortDirection::Ascending, 2).await;
     assert_eq!(seen.len(), 3, "pod_a's walk must see exactly its own three keys: {seen:?}");
     assert_eq!(seen.into_iter().collect::<std::collections::BTreeSet<_>>(), pod_a_keys);
 }

@@ -1501,11 +1501,16 @@ async fn api_keys_create_with_a_clean_name_succeeds() {
 
 // ---- pods::list / inboxes::list keyset pagination (`.claude/contracts/amk-store-http-prereqs.md`) --
 
-async fn walk_pods(pool: &PgPool, org: &OrganizationId, direction: SortDirection) -> Vec<PodId> {
+async fn walk_pods(
+    pool: &PgPool,
+    org: &OrganizationId,
+    direction: SortDirection,
+    limit: u64,
+) -> Vec<PodId> {
     let mut seen = Vec::new();
     let mut cursor = None;
     loop {
-        let page = pods::list(pool, org, ListPodsQuery { limit: 2, direction, cursor })
+        let page = pods::list(pool, org, ListPodsQuery { limit, direction, cursor })
             .await
             .unwrap();
         seen.extend(page.items.into_iter().map(|p| p.pod_id));
@@ -1528,7 +1533,7 @@ async fn pods_list_full_walk_ascending_sees_every_row_exactly_once() {
         seeded.insert(support::seed_pod(&pool, &org).await);
     }
 
-    let seen = walk_pods(&pool, &org, SortDirection::Ascending).await;
+    let seen = walk_pods(&pool, &org, SortDirection::Ascending, 2).await;
     assert_eq!(seen.len(), 5, "no duplicate and no omission: {seen:?}");
     assert_eq!(seen.into_iter().collect::<BTreeSet<_>>(), seeded);
 }
@@ -1543,8 +1548,8 @@ async fn pods_list_full_walk_descending_is_the_exact_reverse() {
         support::seed_pod(&pool, &org).await;
     }
 
-    let ascending = walk_pods(&pool, &org, SortDirection::Ascending).await;
-    let mut descending = walk_pods(&pool, &org, SortDirection::Descending).await;
+    let ascending = walk_pods(&pool, &org, SortDirection::Ascending, 2).await;
+    let mut descending = walk_pods(&pool, &org, SortDirection::Descending, 2).await;
     descending.reverse();
     assert_eq!(ascending, descending);
 }
@@ -1589,7 +1594,10 @@ async fn pods_list_with_u64_max_limit_returns_every_row_without_panicking() {
 /// The test that fails if the primary-key tiebreak is dropped from `ORDER BY`: two pods sharing
 /// one `created_at` millisecond, seeded via raw SQL (`pods::create`'s own `INSERT` has no way to
 /// pin `created_at` — it is always `DEFAULT now()`) must both be seen exactly once across the
-/// walk.
+/// walk. `limit: 1` is deliberate, not `walk_pods`'s usual `2`: with exactly two tied rows, a
+/// `limit` large enough to return both in one query never exercises a cursor comparison at all,
+/// so a dropped `ORDER BY` tiebreak would go uncaught — the walk must actually cross a page
+/// boundary between the two tied rows for this test to test anything.
 #[tokio::test]
 async fn pods_list_breaks_a_created_at_tie_by_pod_id() {
     let Some(pool) = support::pool().await else {
@@ -1614,7 +1622,7 @@ async fn pods_list_breaks_a_created_at_tie_by_pod_id() {
         ids.push(PodId::from(pod_id));
     }
 
-    let seen = walk_pods(&pool, &org, SortDirection::Ascending).await;
+    let seen = walk_pods(&pool, &org, SortDirection::Ascending, 1).await;
     assert_eq!(seen.len(), 2, "both same-instant pods must be seen exactly once each: {seen:?}");
     let mut seen_sorted = seen;
     seen_sorted.sort();
@@ -1628,11 +1636,12 @@ async fn walk_inboxes(
     org: &OrganizationId,
     pod: Option<PodId>,
     direction: SortDirection,
+    limit: u64,
 ) -> Vec<InboxId> {
     let mut seen = Vec::new();
     let mut cursor = None;
     loop {
-        let page = inboxes::list(pool, org, pod, ListInboxesQuery { limit: 2, direction, cursor })
+        let page = inboxes::list(pool, org, pod, ListInboxesQuery { limit, direction, cursor })
             .await
             .unwrap();
         seen.extend(page.items.into_iter().map(|i| i.inbox_id));
@@ -1656,7 +1665,7 @@ async fn inboxes_list_full_walk_ascending_sees_every_row_exactly_once() {
         seeded.insert(support::seed_inbox(&pool, &org, pod, &format!("walk-{i}")).await);
     }
 
-    let seen = walk_inboxes(&pool, &org, None, SortDirection::Ascending).await;
+    let seen = walk_inboxes(&pool, &org, None, SortDirection::Ascending, 2).await;
     assert_eq!(seen.len(), 5, "no duplicate and no omission: {seen:?}");
     assert_eq!(seen.into_iter().collect::<BTreeSet<_>>(), seeded);
 }
@@ -1672,8 +1681,8 @@ async fn inboxes_list_full_walk_descending_is_the_exact_reverse() {
         support::seed_inbox(&pool, &org, pod, &format!("walk-{i}")).await;
     }
 
-    let ascending = walk_inboxes(&pool, &org, None, SortDirection::Ascending).await;
-    let mut descending = walk_inboxes(&pool, &org, None, SortDirection::Descending).await;
+    let ascending = walk_inboxes(&pool, &org, None, SortDirection::Ascending, 2).await;
+    let mut descending = walk_inboxes(&pool, &org, None, SortDirection::Descending, 2).await;
     descending.reverse();
     assert_eq!(ascending, descending);
 }
@@ -1718,6 +1727,7 @@ async fn inboxes_list_with_u64_max_limit_returns_every_row_without_panicking() {
 
 /// Sibling of [`pods_list_breaks_a_created_at_tie_by_pod_id`]: two inboxes sharing one `created_at`
 /// millisecond, seeded via raw SQL for the same reason (`inboxes::create` cannot pin `created_at`).
+/// `limit: 1`, deliberately — see that test's own comment on why.
 #[tokio::test]
 async fn inboxes_list_breaks_a_created_at_tie_by_inbox_id() {
     let Some(pool) = support::pool().await else {
@@ -1745,7 +1755,7 @@ async fn inboxes_list_breaks_a_created_at_tie_by_inbox_id() {
         ids.push(InboxId::new(inbox_id));
     }
 
-    let seen = walk_inboxes(&pool, &org, None, SortDirection::Ascending).await;
+    let seen = walk_inboxes(&pool, &org, None, SortDirection::Ascending, 1).await;
     assert_eq!(
         seen.len(),
         2,
