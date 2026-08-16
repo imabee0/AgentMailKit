@@ -1,5 +1,11 @@
-//! `/v0/api-keys` at all three mounts: creation scope inheritance, listing per `KeyScope`, the
-//! secret shape (fixture 23: 204 delete, no GET-by-id), and the secret-redaction contract.
+//! `/v0/api-keys` at all three mounts: creation scope inheritance, listing per `KeyScope`, and the
+//! secret shape (fixture 23: 204 delete, no GET-by-id).
+//!
+//! **Not tested here, because it is structural rather than behavioural:** a list/get response
+//! never carries the plaintext secret. `handlers::api_keys::list_keys` and `delete_key` both
+//! serialize `amk_types::api_key::ApiKey`, which has no `api_key` field at all — only
+//! `CreateApiKeyResponse` (the one-time create response) does. There is no redaction step to test
+//! because there is nothing to redact: the type itself cannot carry the secret on those paths.
 
 mod support;
 
