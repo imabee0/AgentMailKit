@@ -23,7 +23,7 @@ pub mod pagination;
 pub mod scope_ext;
 mod words;
 
-use axum::routing::get;
+use axum::routing::{delete, get};
 use axum::Router;
 use sqlx::PgPool;
 
@@ -45,7 +45,10 @@ impl AppState {
     }
 }
 
-/// Build the router. Grows as the crate's modules land.
+/// Build the router for this dispatch's 25 operations. Three mounts share one handler set per
+/// collection (see each `handlers::*` module) — every `*_org`/`*_pod`/`*_inbox` sibling calls the
+/// same shared inner function, so the routing table below is the only place mount and path are
+/// spelled out.
 pub fn router(state: AppState) -> Router {
     Router::new()
         // ---- identity + organization (2) ----
@@ -74,6 +77,28 @@ pub fn router(state: AppState) -> Router {
             get(handlers::inboxes::get_pod)
                 .patch(handlers::inboxes::update_pod)
                 .delete(handlers::inboxes::delete_pod),
+        )
+        // ---- api-keys (9) — the one collection mounted all three ways ----
+        .route(
+            "/v0/api-keys",
+            get(handlers::api_keys::list_org).post(handlers::api_keys::create_org),
+        )
+        .route("/v0/api-keys/{api_key_id}", delete(handlers::api_keys::delete_org))
+        .route(
+            "/v0/pods/{pod_id}/api-keys",
+            get(handlers::api_keys::list_pod).post(handlers::api_keys::create_pod),
+        )
+        .route(
+            "/v0/pods/{pod_id}/api-keys/{api_key_id}",
+            delete(handlers::api_keys::delete_pod),
+        )
+        .route(
+            "/v0/inboxes/{inbox_id}/api-keys",
+            get(handlers::api_keys::list_inbox).post(handlers::api_keys::create_inbox),
+        )
+        .route(
+            "/v0/inboxes/{inbox_id}/api-keys/{api_key_id}",
+            delete(handlers::api_keys::delete_inbox),
         )
         // Unknown path -> 404 envelope.
         .fallback(not_found_fallback)
