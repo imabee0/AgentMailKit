@@ -50,6 +50,9 @@ pub fn router(state: AppState) -> Router {
         // ---- identity + organization (2) ----
         .route("/v0/auth/me", get(handlers::identity::auth_me))
         .route("/v0/organizations", get(handlers::identity::get_organization))
+        // ---- pods (4) — the only mount pods have ----
+        .route("/v0/pods", get(handlers::pods::list).post(handlers::pods::create))
+        .route("/v0/pods/{pod_id}", get(handlers::pods::get).delete(handlers::pods::delete))
         // Unknown path -> 404 envelope.
         .fallback(not_found_fallback)
         // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
