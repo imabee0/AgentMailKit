@@ -118,6 +118,32 @@ async fn an_empty_bearer_token_is_bare_403() {
 }
 
 #[tokio::test]
+async fn get_organizations_is_a_bare_object_not_a_list_envelope() {
+    // Every OTHER plural path among the 25 operations IS a list envelope
+    // ({"count":N,"<resource>":[...]}) — GET /v0/organizations is the one exception (fixture 22's
+    // own contract note; organizations::list was deleted upstream). Nothing before this test
+    // asserted the SUCCESS shape: a later "helpful" refactor wrapping this route in an envelope to
+    // match its neighbours would look like a consistency fix and pass every other test in this
+    // suite.
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let key = support::org_key(&pool, &org).await;
+    let router = support::test_router(pool);
+
+    let resp = support::get(&router, "/v0/organizations", Some(&key)).await;
+    assert_eq!(resp.status, 200, "body: {}", resp.body);
+    let v = resp.json.expect("body must be JSON");
+    assert_eq!(v["organization_id"], org.as_str());
+    assert!(!v.is_array(), "must be a bare object, not a list: {v}");
+    assert!(
+        v.get("count").is_none(),
+        "a bare object has no list envelope's count field: {v}"
+    );
+}
+
+#[tokio::test]
 async fn a_valid_key_reaches_the_handler_and_gets_the_full_envelope_shape_on_error() {
     let Some(pool) = support::pool().await else {
         return;
