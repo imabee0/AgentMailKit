@@ -402,6 +402,7 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         "18-inbox-case-normalization.txt",
         "19-message-label-patch-gate.txt",
         "21-unbracketed-in-reply-to.txt",
+        "22-org-mount-and-delete-semantics.txt",
     ];
     // Deferred WITH a reason and the phase that closes it. Not a parking lot: each entry names the
     // crate that will assert it, and this list may only shrink.
@@ -496,4 +497,47 @@ fn system_and_restricted_labels_match_fixture_19() {
     assert!(labels::is_restricted(labels::SPAM) && !labels::is_system(labels::SPAM));
     assert!(labels::is_system(labels::SCHEDULED) && !labels::is_restricted(labels::SCHEDULED));
     assert!(!labels::is_system(labels::UNREAD) && !labels::is_restricted(labels::UNREAD));
+}
+
+/// Fixture 22 measured two things `openapi.json` does not contain and one it contains wrongly.
+/// This asserts the one that is a wire shape this crate owns: the status of `cannot_delete`.
+///
+/// It reads the capture rather than quoting it. The mapping was **403** until this fixture landed,
+/// derived from the docs page — `cannot_delete` appears zero times in `reference/openapi.json` —
+/// and the live API answered 409. A comment saying "409" would not have failed when the code said
+/// 403; this does.
+#[test]
+fn cannot_delete_is_409_per_fixture_22() {
+    let text = fixture("22-org-mount-and-delete-semantics.txt");
+
+    // Find the DELETE that was refused, and take the status from the fixture's own arrow.
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("DELETE /v0/pods/") && l.contains("-> "))
+        .expect("22 no longer records a refused pod DELETE");
+    let observed: u16 = line
+        .rsplit("-> ")
+        .next()
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("the refused DELETE line must end in a status code");
+
+    // And the code from the verbatim envelope, so the two halves cannot drift apart.
+    let envelope = verbatim_json_lines(&text)
+        .into_iter()
+        .find(|v| v.get("code").map(|c| c == "cannot_delete").unwrap_or(false))
+        .expect("22 no longer contains the verbatim cannot_delete envelope");
+
+    assert_eq!(observed, 409, "fixture 22 records the refusal status");
+    assert_eq!(
+        amk_types::error::ErrorCode::CannotDelete.status(),
+        observed,
+        "ErrorCode::CannotDelete must carry the status the live API returned, not the docs page's"
+    );
+    assert_eq!(envelope["name"].as_str().unwrap(), "CannotDeleteError");
+    assert_eq!(
+        amk_types::error::ErrorCode::CannotDelete.as_str(),
+        envelope["code"].as_str().unwrap()
+    );
 }

@@ -1,0 +1,96 @@
+Fixture 22 — org-mount pod resolution, and delete semantics. Live api.agentmail.to, 2026-08-16 01:43Z.
+
+WHY: the pre-dispatch review of `.claude/contracts/amk-http.md` found two operations among its 25
+that no fixture and no schema settled, and that an implementer would therefore have had to invent:
+
+  Q1  `POST /v0/inboxes` at the ORG mount. `type_inboxes:CreateInboxRequest` has no `pod_id` field
+      (properties: client_id, display_name, domain, metadata, username) yet `type_inboxes:Inbox`
+      requires `pod_id`. So the server resolves one. Which? Undecidable with a single pod present,
+      which is why fixture 18 — which used the POD mount — could not answer it.
+  Q2  `DELETE /v0/pods/{pod_id}` on a pod that still owns an inbox. `openapi.json` documents only
+      200 and 404 for that operation. `cannot_delete` appears ZERO times in openapi.json.
+
+Throwaway resources: pods amk-probe-podB (ae4cae42-…), amk-probe-podC (fbac6164-…), inboxes
+amkorgmount@ and amkpodc@. All deleted; end state re-verified at 2 pods / 2 inboxes, the P-1
+baseline. No production domain touched.
+
+================================================================================
+Q1 — ORG-MOUNT CREATE RESOLVES TO THE POD WHOSE pod_id EQUALS THE organization_id
+================================================================================
+
+GET /v0/pods -> 200
+{"count":2,"pods":[
+ {"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"9047724b-2879-416b-8424-82ef81ab9397","name":"amk-probe-throwaway","client_id":"amk-probe-pod-1","updated_at":"2026-08-15T05:39:29.971Z","created_at":"2026-08-15T05:39:29.971Z"},
+ {"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","name":"Default Pod","updated_at":"2026-08-15T04:16:23.258Z","created_at":"2026-08-15T04:16:23.258Z"}]}
+
+POST /v0/pods  {"name":"amk-probe-podB"} -> 200
+{"organization_id":"133c9cbe-…","pod_id":"ae4cae42-e7b0-4607-b57c-524b2a192867","name":"amk-probe-podB",…}
+
+POST /v0/inboxes  {"username":"amkorgmount"} -> 200
+{"organization_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","pod_id":"133c9cbe-f996-4094-a8d5-0c6603e022ea","inbox_id":"amkorgmount@agentmail.to","email":"amkorgmount@agentmail.to","display_name":"AgentMail","updated_at":"2026-08-16T01:43:20.783Z","created_at":"2026-08-16T01:43:20.783Z"}
+
+OBSERVED, and the detail that decides it: the resolved `pod_id` is
+`133c9cbe-f996-4094-a8d5-0c6603e022ea`, which is **byte-identical to `organization_id`**. The
+account's "Default Pod" is minted carrying the organization's own UUID as its pod id.
+
+Three pods existed at the moment of the create and it chose that one — not the newest
+(ae4cae42, created seconds earlier) and not the throwaway (9047724b).
+
+Two hypotheses survive this observation and it does not discriminate between them: "the pod whose
+pod_id == organization_id" and "the oldest pod" (Default Pod, 04:16Z, is also the oldest). Named
+rather than glossed. The id-equality reading is the one to implement, because it is O(1), exact,
+and reproducible by construction — `amk init` mints the default pod with `pod_id =
+organization_id`, and then both readings agree forever in our own deployment. The "oldest pod"
+reading would additionally require a tiebreak we have no evidence for.
+
+This also explains fixture 01: an org-scoped key reports `scope_id == organization_id`.
+
+================================================================================
+Q2 — DELETING A NON-EMPTY POD IS REFUSED, 409, AND NOTHING CASCADES
+================================================================================
+
+POST /v0/pods  {"name":"amk-probe-podC"} -> 200   pod_id fbac6164-8b98-40f7-a6ee-98d1c665f449
+POST /v0/pods/fbac6164-…/inboxes  {"username":"amkpodc"} -> 200
+
+DELETE /v0/pods/fbac6164-8b98-40f7-a6ee-98d1c665f449 -> 409
+{"name":"CannotDeleteError","code":"cannot_delete","message":"Cannot delete Pod: Cannot delete pod with existing inboxes","fix":"Pod cannot be deleted yet. Resolve the blocker described above (for example, remove dependent resources), then retry.","docs":"https://docs.agentmail.to/errors#cannot_delete"}
+
+GET /v0/pods/fbac6164-… -> 200          (the pod survived)
+GET /v0/inboxes/amkpodc%40agentmail.to -> 200   (its inbox survived)
+
+OBSERVED: refusal is fail-closed and total — no cascade, no soft-delete, no orphan. It is the full
+error envelope (app-layer), not the bare auth body, and it carries `name`/`code`/`message`/`fix`/
+`docs` with no per-code extras. `message` is doubled ("Cannot delete Pod: Cannot delete pod with
+existing inboxes") — reproduce the shape, not that particular prose.
+
+**This corrects `amk-types`.** `ErrorCode::CannotDelete` mapped to **403**; the live status is
+**409**. `cannot_delete` is absent from openapi.json entirely, so the 403 came from the docs page,
+not the spec — and the live capture beats both.
+
+================================================================================
+DELETE STATUS CODES — openapi SAYS 200 FOR BOTH, AND BOTH ARE WRONG
+================================================================================
+
+DELETE /v0/pods/{pod_id}        -> 204   (empty pod; no body)
+DELETE /v0/inboxes/{inbox_id}   -> 202   (accepted; deletion is asynchronous)
+
+`openapi.json` documents `200` for each. Two divergences the conformance diff would have caught
+only after the handlers were written. 202 on the inbox path is the more consequential of the two:
+it says inbox deletion is accepted-then-processed, not completed-on-return, so a test that deletes
+an inbox and immediately asserts 404 on GET is racing the server.
+
+================================================================================
+INCIDENTAL — limit_exceeded, captured in passing
+================================================================================
+
+POST /v0/pods/ae4cae42-…/inboxes  {"username":"amkpodb"} -> 403
+{"name":"LimitExceededError","code":"limit_exceeded","message":"Inbox limit exceeded","fix":"Your plan's inbox limit is 3. Delete an existing inbox, or upgrade at https://console.agentmail.to/dashboard/upgrade — Developer raises it to 10 for $20.00/month.","resource":"inbox","limit":3,"upgrade_url":"https://console.agentmail.to/dashboard/upgrade","docs":"https://docs.agentmail.to/errors#limit_exceeded"}
+
+Corroborates B5 independently of fixture 18: `limit_exceeded` is **403** (not 429), the quota is
+counted **organization-wide** (podB was empty; the org held 3 inboxes), and the extras are
+`resource`/`limit`/`upgrade_url`. AgentMailKit reproduces `resource` and `limit`, and omits
+`upgrade_url` and the price-bearing `fix` prose — the no-billing-surface rule, applied on purpose.
+
+Same rule for `type_organizations:Organization`: it carries `billing_id`, `billing_type` and
+`billing_subscription_id`. We emit none of the three. That is a deliberate divergence from 1:1 and
+the conformance diff must be told so rather than "fixed".

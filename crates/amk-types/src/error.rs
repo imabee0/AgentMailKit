@@ -143,7 +143,6 @@ pub enum ErrorCode {
     ResourceTaken,
     LimitExceeded,
     DomainNotVerified,
-    CannotDelete,
     // --- 400 / 404 / 422 ---
     ValidationError,
     NotFound,
@@ -153,6 +152,14 @@ pub enum ErrorCode {
     Conflict,
     RaceCondition,
     ResourceDeleting,
+    /// **Observed at HTTP 409**, not the 403 the docs imply
+    /// (`reference/fixtures/22-org-mount-and-delete-semantics.txt`: deleting a pod that still owns
+    /// an inbox). `cannot_delete` appears **zero times** in `reference/openapi.json`, so the
+    /// original 403 came from the docs page rather than the spec, and the live capture beats both.
+    /// It belongs at 409 on the merits too: 403 says "you may not", 409 says "the resource's
+    /// current state forbids it", and this is the second. The refusal is total — neither the pod
+    /// nor its inbox is touched.
+    CannotDelete,
     // --- 429 / 5xx ---
     RateLimitExceeded,
     ServiceUnavailable,
@@ -172,12 +179,11 @@ impl ErrorCode {
             | AlreadyExists
             | ResourceTaken
             | LimitExceeded
-            | DomainNotVerified
-            | CannotDelete => 403,
+            | DomainNotVerified => 403,
             ValidationError | QueryRangeTooWide => 400,
             NotFound => 404,
             Unprocessable => 422,
-            Conflict | RaceCondition | ResourceDeleting => 409,
+            Conflict | RaceCondition | ResourceDeleting | CannotDelete => 409,
             RateLimitExceeded => 429,
             ServiceUnavailable => 503,
             InternalError => 500,
