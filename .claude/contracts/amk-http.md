@@ -116,6 +116,12 @@ Two shapes, and the branch is on **who rejected the request**, not on status cod
 - `Authorization: Bearer <key>`, deny-by-default: a route is unreachable without a resolved
   credential unless it is explicitly public.
 - The layer resolves a **`Credential` enum**, not a raw key — one variant today (`ApiKey`).
+  **This type is yours and lives in this crate.** It is not in `amk-types` and must not be added
+  there: it is an internal resolution step, never serialised, never on the wire, so it fails the
+  test `amk-types` exists to apply. Rule 3 ("if a needed type is not in `amk-types` or a fixture,
+  STOP and report") does not bite here, and this line exists so you do not stop to ask. Handlers
+  receive the resolved principal and scope — **never the `Credential` itself**, and never the
+  presented secret.
   Handlers receive the resolved principal and scope and **never see the credential itself**. This
   is a type-shape decision only: no session tokens, no JWT handling, no console surface in V1.
 - Key verification is O(1) lookup by key id then a **constant-time** verify of an argon2id hash.
@@ -151,8 +157,26 @@ Two shapes, and the branch is on **who rejected the request**, not on status cod
 
 - Envelope is `{count, limit?, next_page_token?, <resource>: []}`. **`next_page_token` is absent on
   the last page** — never an empty string.
-- Parameters: `before`/`after`/`ascending`, `labels[]`, the `include_*` visibility flags
-  (default false), and the substring filters, which AND together. Filtered-list `limit` caps at 100.
+- **The six list operations in *this* dispatch take `limit` and `page_token` only, plus `ascending`
+  on four of them.** Generated, not recalled — `/v0/pods`, `/v0/inboxes`, `/v0/pods/{pod_id}/inboxes`
+  and `/v0/api-keys` carry `ascending`; `/v0/pods/{pod_id}/api-keys` and
+  `/v0/inboxes/{inbox_id}/api-keys` **do not**, so do not offer it there. None of the six carries
+  `labels`, `before`/`after`, `include_*`, or any substring filter. Those belong to the
+  messages/threads/drafts lists, which are a later dispatch; the paragraph below describes the
+  machinery so it is built once, not parameters you should wire onto these six.
+- **`limit`: default 100, maximum 100, `[ASSUMED]`.** No fixture settles it — every captured
+  listing passed an explicit `limit`, so the server's behaviour on an omitted one was never
+  observed, and `type_:Limit` is an unbounded `integer` with no `maximum`. 100 is chosen because it
+  is the one documented cap anywhere in this API (`[SPEC:repo agentmail-cli]`, for filtered lists)
+  and because an unbounded default is an unbounded scan. A `limit` above the maximum is **clamped,
+  not rejected** — there is no `validation_error` for it in any fixture, and inventing one would be
+  a wire shape. Reproducing this exactly cannot be probed on the reference account: fixture 22
+  measured its inbox limit at 3, so a listing large enough to reveal a default page size cannot be
+  built there.
+- **Echo `limit` in the envelope only when the caller supplied it.** Every observation
+  (`03-id-formats.http`, `04-pagination.http`) passed `limit` and got it back; what the server
+  emits for an omitted one is unobserved, and the crate-wide rule is that an absent optional is
+  omitted. Emitting our internal default would be claiming an observation we do not have.
 - The `include_*` flags exist on **4 of the 33** paginated GETs. Build the `LabelAccess` **mode**
   from the route, not from a global default: `Mode::List(flags)` on those four, `Mode::Search` on
   the search endpoints, `Mode::ById` on get-by-id. Routing a search or a drafts list through the
@@ -329,6 +353,17 @@ down, end state re-verified. Two of the answers contradict `openapi.json`.
   fallback, not a resource miss. The spec has list and delete and no get-by-id.
   `amk_store::api_keys::get` therefore has **no wire route** in this dispatch; it exists for
   `authenticate` and internal use. Do not add one.
+- **`suggestions[]` on an inbox collision: exactly 3, base + 4 decimal digits, no separator,
+  `[ASSUMED]` in the same way the generated username is.** `reference/fixtures/05-error-catalog.http:25`
+  is the only observation — `amk-probe` colliding produced
+  `["amk-probe4991","amk-probe6813","amk-probe9732"]`. What that evidences is the *shape*: three
+  entries, the requested username unchanged as a base, a 4-digit numeric suffix, no separator. What
+  it does not evidence is whether 3 is fixed, whether the digits avoid leading zeros, or whether
+  the server checks the suggestions are themselves free. **Ours must check** — a suggestion that
+  collides on use is worse than no suggestion, and checking is one query. If fewer than 3 free
+  candidates are found within a bounded number of draws, return the ones found rather than looping;
+  `suggestions` is `Vec<String>` with `skip_serializing_if = "Vec::is_empty"`, so an empty one is
+  omitted and the envelope stays legal.
 - **`billing_id`, `billing_type` and `billing_subscription_id` are omitted deliberately.**
   `type_organizations:Organization` carries all three. This is the no-billing-surface rule, the same
   decision already applied to `upgrade_url`, and the conformance diff must be told rather than
@@ -362,6 +397,34 @@ The wire types already exist and are frozen —
 merge). **This crate owns the two validation rules the store deliberately does not**: an empty
 `metadata` object is rejected, and each update must carry at least one of `display_name` or
 `metadata`. Both produce `validation_error`; the store treats an empty merge as a no-op.
+
+## This crate ships a `Router`, not a binary — and that is a decision, not an omission
+
+**`amk-http` exposes a function returning an `axum::Router` plus the state it needs. It has no
+`main`, no `[[bin]]`, and does not bind a port.** Tests drive the router in-process; nothing in this
+dispatch listens on a socket.
+
+Naming this explicitly because **the binaries are currently assigned to no dispatch at all** —
+`find crates -name main.rs` returns nothing, no `[[bin]]` exists anywhere, and the plan names
+`amkd` (`--role api|smtpd|worker|all`) and `amk` (`init|migrate|doctor|import`) only in prose under
+"P0 Skeleton". This is the third time a capability has been discovered with no owner: `api-keys`
+was in neither the first `amk-store` dispatch nor its deferral list, `inboxes::update` likewise,
+and now the binaries. All three were found the same way — checking a contract against the code
+before dispatching rather than after an implementer stopped.
+
+So it is recorded here as the one place that owns it: **`amk` and `amkd` are the next dispatch
+after this one.** `amk init` (default org + pod + root key shown once) needs only `amk-store`;
+`amkd --role api` serves this crate's router. Splitting them keeps one returned diff reviewable,
+the same reasoning that split `amk-store`'s first dispatch.
+
+**The consequence for this contract, stated rather than left implicit:** the org-mount rule above
+says "`amk init` mints the organization id as a UUID and creates the default pod carrying that same
+UUID". That binary does not exist yet. It changes nothing you build — the handler still parses
+`organization_id` as a `Uuid`, builds the `PodId`, confirms with `pods::get`, and fails closed as
+an internal error — and your tests seed that arrangement directly through `amk-store`'s own
+functions. What it does mean is that **P0's gate (the official Python SDK's `auth.me()` against
+localhost) cannot run until the binaries land**, so do not treat that gate as yours and do not
+build a binary to reach it.
 
 ## Assigned edge cases (write the test before the code it targets)
 
