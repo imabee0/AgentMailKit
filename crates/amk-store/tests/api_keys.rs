@@ -1468,6 +1468,52 @@ async fn api_keys_list_breaks_a_created_at_tie_by_api_key_id() {
     assert_eq!(seen_sorted, expected_sorted);
 }
 
+/// Sibling of `control_plane.rs`'s `pods_list_ascending_returns_the_earliest_created_at_first` —
+/// see its own comment for why the descending-is-a-reversal comparison is blind to a wholesale
+/// `LIST_ASC_SQL`/`LIST_DESC_SQL` swap.
+#[tokio::test]
+async fn api_keys_list_ascending_returns_the_earliest_created_at_first() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let earlier = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:00.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let later = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:01.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut earliest_id = None;
+    for ts in [later, earlier] {
+        let api_key_id = Uuid::new_v4();
+        let suffix = support::unique_suffix();
+        sqlx::query(
+            "INSERT INTO api_keys (api_key_id, organization_id, name, prefix, hash, created_at) \
+             VALUES ($1, $2, $3, $4, 'irrelevant-hash', $5)",
+        )
+        .bind(api_key_id)
+        .bind(org.as_str())
+        .bind(format!("ord-{suffix}"))
+        .bind(format!("am_us_{}", &suffix[..6]))
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .unwrap();
+        if ts == earlier {
+            earliest_id = Some(ApiKeyId::new(api_key_id.to_string()));
+        }
+    }
+
+    let seen =
+        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending, 10).await;
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[0],
+        earliest_id.unwrap(),
+        "ascending must return the earlier created_at first: {seen:?}"
+    );
+}
+
 /// `api_keys::list` at each of the three `KeyScope` mounts paginates within that mount only — a
 /// pod-scoped walk must never see a sibling pod's key on any page, including the last one, which a
 /// single-page test cannot distinguish from "never fetched at all".

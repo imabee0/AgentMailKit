@@ -1631,6 +1631,53 @@ async fn pods_list_breaks_a_created_at_tie_by_pod_id() {
     assert_eq!(seen_sorted, expected_sorted);
 }
 
+/// `pods_list_full_walk_descending_is_the_exact_reverse` compares an ascending walk against a
+/// *reversed* descending walk — a comparison a wholesale swap of `LIST_ASC_SQL`/`LIST_DESC_SQL`
+/// (picking the wrong literal for each `SortDirection` arm) passes anyway, because reversing both
+/// sides of a swapped pair cancels the swap out. This pins an absolute order instead: two pods
+/// with distinct, known `created_at` values, inserted out of order, so `SortDirection::Ascending`
+/// must return the earlier one first regardless of insertion order.
+#[tokio::test]
+async fn pods_list_ascending_returns_the_earliest_created_at_first() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let earlier = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:00.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let later = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:01.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut earliest_id = None;
+    // Inserted latest-first, deliberately: insertion order must not be what the assertion below
+    // happens to agree with.
+    for ts in [later, earlier] {
+        let pod_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO pods (pod_id, organization_id, name, created_at) VALUES ($1, $2, 'ord', $3)",
+        )
+        .bind(pod_id)
+        .bind(org.as_str())
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .unwrap();
+        if ts == earlier {
+            earliest_id = Some(PodId::from(pod_id));
+        }
+    }
+
+    let seen = walk_pods(&pool, &org, SortDirection::Ascending, 10).await;
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[0],
+        earliest_id.unwrap(),
+        "ascending must return the earlier created_at first, not merely a valid reversal of \
+         descending: {seen:?}"
+    );
+}
+
 async fn walk_inboxes(
     pool: &PgPool,
     org: &OrganizationId,
@@ -1766,6 +1813,50 @@ async fn inboxes_list_breaks_a_created_at_tie_by_inbox_id() {
     let mut expected_sorted: Vec<String> = ids.iter().map(|i| i.as_str().to_owned()).collect();
     expected_sorted.sort();
     assert_eq!(seen_sorted, expected_sorted);
+}
+
+/// Sibling of [`pods_list_ascending_returns_the_earliest_created_at_first`] — see its own comment
+/// for why the descending-is-a-reversal comparison is blind to a wholesale `LIST_ASC_SQL`/
+/// `LIST_DESC_SQL` swap.
+#[tokio::test]
+async fn inboxes_list_ascending_returns_the_earliest_created_at_first() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let earlier = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:00.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let later = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:01.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut earliest_id = None;
+    for ts in [later, earlier] {
+        let inbox_id = format!("ord-{}@example.test", support::unique_suffix());
+        sqlx::query(
+            "INSERT INTO inboxes (inbox_id, organization_id, pod_id, created_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&inbox_id)
+        .bind(org.as_str())
+        .bind(pod.0)
+        .bind(ts)
+        .execute(&pool)
+        .await
+        .unwrap();
+        if ts == earlier {
+            earliest_id = Some(InboxId::new(inbox_id));
+        }
+    }
+
+    let seen = walk_inboxes(&pool, &org, None, SortDirection::Ascending, 10).await;
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[0],
+        earliest_id.unwrap(),
+        "ascending must return the earlier created_at first: {seen:?}"
+    );
 }
 
 /// A page token minted at pod A must not resume the walk at pod B — a hand-decoded `InboxCursor`
