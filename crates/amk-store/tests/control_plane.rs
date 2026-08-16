@@ -2159,40 +2159,116 @@ async fn organizations_exists_reports_both_directions() {
     );
 }
 
-/// The second direction, on an isolated schema: a database with no organizations reports `false`.
-/// Run against a dedicated connection with the table emptied inside a transaction that is rolled
-/// back, so the shared suite database is untouched.
+/// The second direction: a database with no organizations reports `false`.
+///
+/// **Incidental fix, found while working the P1-divergences dispatch, not one of its four:** the
+/// previous version of this test emptied the SHARED suite database with six sequential `DELETE`s
+/// (no `WHERE`, the whole table each time) inside a transaction it meant to roll back, reasoning
+/// that transaction isolation alone made this safe against the ~70 other tests in this file
+/// running concurrently (`cargo test`'s default thread-parallel execution). It is not: Postgres's
+/// default READ COMMITTED isolation gives each *statement* in a transaction its own fresh
+/// snapshot, so a sibling test's `INSERT INTO inboxes` committing between this transaction's
+/// `DELETE FROM inboxes` and its later `DELETE FROM pods` was invisible to the first statement but
+/// visible to the second, tripping `inboxes_pod_id_fkey` on a row this transaction never got the
+/// chance to delete. Reproduced deterministically at this dispatch's larger test count. A
+/// `LOCK TABLE ... IN EXCLUSIVE MODE` attempt closed that race but opened a real Postgres deadlock
+/// (`40P01`) against ordinary concurrent `organizations::create`/`pods::create` sequences taking
+/// the same tables' row locks in a different order.
+///
+/// The actual fix is the one this crate's own `amk-cli` sibling already uses for exactly this
+/// problem (`amk-cli/tests/support/mod.rs::FreshDb`): a throwaway, freshly migrated, genuinely
+/// empty database that no other test can reach at all — [`fresh_empty_database`], private to this
+/// one test since it is the only one in this crate that needs it.
 #[tokio::test]
 async fn organizations_exists_is_false_when_there_are_none() {
-    let Some(pool) = support::pool().await else {
+    let Some((pool, db_name)) = fresh_empty_database().await else {
         return;
     };
-    let mut tx = pool.begin().await.unwrap();
-    // Everything referencing organizations goes first; migration 0008 cascades inboxes' children
-    // but pods/organizations are RESTRICT by design (see pods::delete's PodNotEmpty path).
-    for stmt in [
-        "DELETE FROM messages",
-        "DELETE FROM threads",
-        "DELETE FROM api_keys",
-        "DELETE FROM inboxes",
-        "DELETE FROM pods",
-        "DELETE FROM organizations",
-    ] {
-        sqlx::query(stmt).execute(&mut *tx).await.unwrap();
-    }
-    let seen: (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM organizations)")
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap();
-    assert!(!seen.0, "with every organization deleted, the predicate must be false");
-    tx.rollback().await.unwrap();
 
-    // And the rollback really restored the world — otherwise this test would have silently
-    // destroyed every other test's fixtures.
+    assert!(
+        !organizations::exists(&pool).await.unwrap(),
+        "a freshly migrated, never-written-to database must report no organizations"
+    );
+
+    // Control, on the SAME isolated pool: seeding one now makes it true.
+    let org = OrganizationId::new(format!("org-{}", support::unique_suffix()));
+    organizations::create(
+        &pool,
+        NewOrganization {
+            organization_id: org.clone(),
+            name: None,
+            inbox_limit: None,
+            domain_limit: None,
+        },
+    )
+    .await
+    .unwrap();
     assert!(
         organizations::exists(&pool).await.unwrap(),
-        "the transaction must have rolled back; the suite's own rows are still here"
+        "a seeded organization must make exists() true"
     );
+
+    drop_fresh_database(pool, &db_name).await;
+}
+
+/// A throwaway, freshly migrated Postgres database on the same instance `support::pool` uses,
+/// reachable by no other test — see `organizations_exists_is_false_when_there_are_none`'s own doc
+/// for why the shared suite database cannot answer this question safely. `None` when the dev
+/// database is unreachable, mirroring `support::pool`'s own skip-cleanly contract.
+async fn fresh_empty_database() -> Option<(PgPool, String)> {
+    const ADMIN_DSN: &str = "postgres://amk:amk-dev-local@127.0.0.1:55432/postgres";
+    let admin = match sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(5))
+        .connect(ADMIN_DSN)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            if std::env::var("AMK_REQUIRE_DB").as_deref() == Ok("1") {
+                panic!(
+                    "AMK_REQUIRE_DB=1 but the dev database is unreachable ({e}). Run \
+                     `./scripts/dev-db.sh up`, or unset AMK_REQUIRE_DB to allow this suite to \
+                     skip its database-backed tests."
+                );
+            }
+            eprintln!("skipping: dev database unreachable ({e})");
+            return None;
+        }
+    };
+    let name = format!("amk_store_test_{}", Uuid::new_v4().simple());
+    // `CREATE DATABASE` cannot take a bind parameter for the identifier — `AssertSqlSafe` is
+    // warranted because `name` is never caller/user input, only this function's own
+    // `Uuid::new_v4().simple()` output (ASCII hex, cannot contain a `"`).
+    sqlx::query(sqlx::AssertSqlSafe(format!(r#"CREATE DATABASE "{name}""#)))
+        .execute(&admin)
+        .await
+        .unwrap_or_else(|e| panic!("creating throwaway database {name}: {e}"));
+    admin.close().await;
+
+    let dsn = format!("postgres://amk:amk-dev-local@127.0.0.1:55432/{name}");
+    let pool = amk_store::connect(&dsn)
+        .await
+        .unwrap_or_else(|e| panic!("migrating throwaway database {name}: {e}"));
+    Some((pool, name))
+}
+
+/// Best-effort teardown, mirroring `amk-cli`'s own `FreshDb::drop_it`: `WITH (FORCE)` terminates
+/// any straggling connection to the target database rather than failing the drop on one.
+async fn drop_fresh_database(pool: PgPool, name: &str) {
+    pool.close().await;
+    const ADMIN_DSN: &str = "postgres://amk:amk-dev-local@127.0.0.1:55432/postgres";
+    if let Ok(admin) = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(ADMIN_DSN)
+        .await
+    {
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#
+        )))
+        .execute(&admin)
+        .await;
+    }
 }
 
 /// `migration_status` is what `amk doctor` and `amk migrate` report from. Against the dev database
