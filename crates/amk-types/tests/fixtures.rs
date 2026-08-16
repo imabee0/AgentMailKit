@@ -574,3 +574,56 @@ fn minted_key_prefix_shape_matches_fixture_23() {
         "the secret must stay redacted in the fixture"
     );
 }
+
+/// Fixture 23's `POST /v0/api-keys` response carries `organization_id` as its **first** field, and
+/// `amk_types::api_key::{ApiKey, CreateApiKeyResponse}` withheld it until that capture existed —
+/// their own doc comment said "if a capture ever shows it, add it then". This asserts both halves:
+/// that the fixture really shows it (so the type change has evidence behind it), and that the
+/// types now carry it (so a later refactor cannot quietly drop the field back out and reintroduce
+/// the conformance diff). The pre-dispatch review of `.claude/contracts/amk-http.md` found the gap
+/// — the probe that produced the evidence did not act on it, which is why this is a test and not a
+/// comment.
+#[test]
+fn fixture_23_pins_organization_id_on_both_api_key_response_types() {
+    let text = fixture("23-inbox-defaults-and-key-shape.txt");
+    let envelope = verbatim_json_lines(&text)
+        .into_iter()
+        .find(|v| v.get("prefix").is_some() && v.get("api_key_id").is_some())
+        .expect("23 no longer contains the verbatim create-api-key response");
+    assert!(
+        envelope.get("organization_id").is_some(),
+        "fixture 23 is the evidence for this field; if it stopped showing it, the types must be \
+         re-examined rather than left carrying an unevidenced field"
+    );
+
+    // Round-trip through the real types, not a hand-built JSON blob: a field that serialises but
+    // does not deserialise (or vice versa) would pass a one-directional check.
+    let created = amk_types::api_key::CreateApiKeyResponse {
+        organization_id: Some(amk_types::ids::OrganizationId::new("org-23")),
+        api_key_id: amk_types::ids::ApiKeyId::new("11111111-1111-1111-1111-111111111111"),
+        api_key: "am_us_deadbeef".into(),
+        prefix: "am_us_dead".into(),
+        name: "k".into(),
+        pod_id: None,
+        inbox_id: None,
+        permissions: None,
+        created_at: amk_types::Timestamp::from(
+            chrono::DateTime::parse_from_rfc3339("2026-08-16T03:56:42.259Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        ),
+    };
+    let json = serde_json::to_value(&created).expect("serialises");
+    assert_eq!(json["organization_id"], "org-23");
+    let back: amk_types::api_key::CreateApiKeyResponse =
+        serde_json::from_value(json).expect("round-trips");
+    assert_eq!(back.organization_id, created.organization_id);
+
+    // And the absent case still omits rather than emitting null — the rule the whole crate turns on.
+    let anonymous = amk_types::api_key::CreateApiKeyResponse { organization_id: None, ..created };
+    let json = serde_json::to_string(&anonymous).expect("serialises");
+    assert!(
+        !json.contains("organization_id"),
+        "an absent optional is omitted, never null: {json}"
+    );
+}

@@ -237,6 +237,7 @@ fn row_permissions(row: &PgRow) -> Result<Option<ApiKeyPermissions>, StoreError>
 
 fn row_to_api_key(row: &PgRow) -> Result<ApiKey, StoreError> {
     Ok(ApiKey {
+        organization_id: Some(OrganizationId::new(row.try_get::<String, _>("organization_id")?)),
         api_key_id: ApiKeyId::new(row.try_get::<Uuid, _>("api_key_id")?.to_string()),
         prefix: row.try_get("prefix")?,
         name: row.try_get("name")?,
@@ -343,9 +344,10 @@ pub(crate) fn exact_api_key_uuid(id: &ApiKeyId) -> Option<Uuid> {
 const INSERT_SQL: &str = "INSERT INTO api_keys \
     (api_key_id, organization_id, pod_id, inbox_id, name, prefix, hash, permissions) \
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
-     RETURNING api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, created_at";
+     RETURNING api_key_id, organization_id, prefix, name, pod_id, inbox_id, permissions, used_at, created_at";
 
-const GET_SQL: &str = "SELECT api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, \
+const GET_SQL: &str =
+    "SELECT api_key_id, organization_id, prefix, name, pod_id, inbox_id, permissions, used_at, \
         created_at \
      FROM api_keys \
      WHERE organization_id = $1 AND api_key_id = $2 \
@@ -353,7 +355,7 @@ const GET_SQL: &str = "SELECT api_key_id, prefix, name, pod_id, inbox_id, permis
        AND ($4::text IS NULL OR inbox_id = $4)";
 
 const LIST_ASC_SQL: &str =
-    "SELECT api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, created_at \
+    "SELECT api_key_id, organization_id, prefix, name, pod_id, inbox_id, permissions, used_at, created_at \
      FROM api_keys \
      WHERE organization_id = $1 \
        AND ($2::uuid IS NULL OR pod_id = $2) \
@@ -363,7 +365,7 @@ const LIST_ASC_SQL: &str =
      LIMIT $6";
 
 const LIST_DESC_SQL: &str =
-    "SELECT api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, created_at \
+    "SELECT api_key_id, organization_id, prefix, name, pod_id, inbox_id, permissions, used_at, created_at \
      FROM api_keys \
      WHERE organization_id = $1 \
        AND ($2::uuid IS NULL OR pod_id = $2) \
@@ -439,6 +441,9 @@ pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyRespons
         };
 
         return Ok(CreateApiKeyResponse {
+            organization_id: Some(OrganizationId::new(
+                row.try_get::<String, _>("organization_id")?,
+            )),
             api_key_id: ApiKeyId::new(row.try_get::<Uuid, _>("api_key_id")?.to_string()),
             api_key: secret,
             prefix: row.try_get("prefix")?,

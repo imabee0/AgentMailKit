@@ -12,7 +12,7 @@
 
 use std::fmt;
 
-use crate::ids::{ApiKeyId, InboxId, PodId};
+use crate::ids::{ApiKeyId, InboxId, OrganizationId, PodId};
 use crate::{list_response, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -283,14 +283,26 @@ pub fn label_read_flag(label: &str) -> Option<&'static str> {
 /// They are typed as ids rather than the bare `string` `openapi.json` declares, matching how
 /// [`crate::inbox::Inbox`] already types the same values.
 ///
-/// Fields and optionality from `reference/openapi.json` (`type_api-keys:ApiKey`). **No live
-/// capture exists** — we never created a key against the reference account — so unlike the message
-/// and inbox types this one is `[SPEC:openapi]` only. In particular the `organization_id` that
-/// live responses add to other resources is **not** modelled here, because adding a field no
-/// artifact shows is exactly the invention this crate exists to prevent. If a capture ever shows
-/// it, add it then.
+/// Fields and optionality from `reference/openapi.json` (`type_api-keys:ApiKey`), plus
+/// `organization_id` from `reference/fixtures/23-inbox-defaults-and-key-shape.txt:43`.
+///
+/// This doc used to read *"no live capture exists … `organization_id` is not modelled here …
+/// **if a capture ever shows it, add it then**"*. Fixture 23 is that capture — a real
+/// `POST /v0/api-keys` response, `organization_id` first field — and this is the "add it then".
+/// Recorded rather than quietly edited because the instruction worked exactly as intended: the
+/// field was withheld while unevidenced and added the moment evidence arrived, which is the
+/// opposite of inventing it. The gap it left was caught by the pre-dispatch review of
+/// `.claude/contracts/amk-http.md`, not by the probe that produced the evidence — writing a
+/// fixture and acting on it are two obligations, and only the first was met at the time.
+///
+/// `Option`, matching [`crate::pod::Pod`]'s own `organization_id`: fixture 23 observed it on the
+/// **create** response, and no capture of `GET /v0/api-keys` exists to say whether the list
+/// envelope's items carry it too. Optional-and-omitted claims exactly what was seen; making it
+/// required would claim more.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApiKey {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<OrganizationId>,
     pub api_key_id: ApiKeyId,
     /// Leading identifying segment of the key, safe to display and to index for O(1) lookup.
     pub prefix: String,
@@ -333,6 +345,10 @@ pub struct CreateApiKeyRequest {
 /// remember.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateApiKeyResponse {
+    /// Observed first in the live create response, `reference/fixtures/23-...txt:43`. See
+    /// [`ApiKey::organization_id`] for why it is `Option` rather than required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<OrganizationId>,
     pub api_key_id: ApiKeyId,
     /// The secret, returned exactly once. Never log it, never store it in plaintext — the store
     /// keeps an argon2id hash and looks up by `prefix`.
@@ -382,6 +398,7 @@ mod tests {
     #[test]
     fn debug_redacts_the_secret_but_keeps_the_prefix() {
         let resp = CreateApiKeyResponse {
+            organization_id: Some(OrganizationId::new("org-1")),
             api_key_id: ApiKeyId::new("3c5547b5-e7ff-474e-9871-83e82251568e"),
             api_key: "am_us_SUPERSECRETVALUE0000000000000000".into(),
             prefix: "am_us_SUPERSECR".into(),
@@ -550,6 +567,7 @@ mod tests {
         // Optionals are omitted, never null and never "" — the single likeliest source of a
         // conformance diff against the reference API.
         let key = ApiKey {
+            organization_id: Some(OrganizationId::new("org-1")),
             api_key_id: ApiKeyId::new("ak_1"),
             prefix: "am_us_abcd".into(),
             name: "probe".into(),
@@ -560,7 +578,18 @@ mod tests {
             created_at: Timestamp::now(),
         };
         let s = serde_json::to_string(&key).unwrap();
-        assert_eq!(key_fields(&s), ["api_key_id", "created_at", "name", "prefix"]);
+        assert_eq!(
+            key_fields(&s),
+            [
+                "api_key_id",
+                "created_at",
+                "name",
+                "organization_id",
+                "prefix"
+            ],
+            "organization_id is PRESENT (fixture 23 observed it); pod_id, inbox_id, \
+             used_at and permissions are the absent optionals this test is about"
+        );
         assert!(!s.contains("null"), "absent optionals are omitted, not null: {s}");
         assert_eq!(serde_json::from_str::<ApiKey>(&s).unwrap(), key);
     }
@@ -572,6 +601,7 @@ mod tests {
         // merely discouraged — so this asserts the field is absent from ApiKey's wire form, which
         // is what a leak would look like.
         let key = ApiKey {
+            organization_id: Some(OrganizationId::new("org-1")),
             api_key_id: ApiKeyId::new("ak_1"),
             prefix: "am_us_abcd".into(),
             name: "probe".into(),
@@ -585,6 +615,7 @@ mod tests {
         assert!(!fields.iter().any(|f| f == "api_key"), "ApiKey must never carry the secret");
 
         let created = CreateApiKeyResponse {
+            organization_id: Some(OrganizationId::new("org-1")),
             api_key_id: ApiKeyId::new("ak_1"),
             api_key: "am_us_secret".into(),
             prefix: "am_us_abcd".into(),
@@ -605,6 +636,7 @@ mod tests {
     #[test]
     fn a_pod_bound_key_names_its_pod_and_an_inbox_bound_key_its_inbox() {
         let key = ApiKey {
+            organization_id: Some(OrganizationId::new("org-1")),
             api_key_id: ApiKeyId::new("ak_2"),
             prefix: "am_us_efgh".into(),
             name: "pod key".into(),
@@ -622,6 +654,7 @@ mod tests {
                 "created_at",
                 "inbox_id",
                 "name",
+                "organization_id",
                 "permissions",
                 "pod_id",
                 "prefix"
