@@ -212,3 +212,59 @@ pub async fn delete(
         Err(e) => Err(e.into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `is_pod_reference_violation` is a private helper: nothing under `tests/` (a separate
+    /// crate) can reach it directly, so — like `api_keys::is_prefix_collision`'s own test — this
+    /// lives here, as a DB-touching unit test, and skips cleanly when the dev database is
+    /// unreachable.
+    async fn pool_or_skip() -> Option<PgPool> {
+        const DATABASE_URL: &str = "postgres://amk:amk-dev-local@127.0.0.1:55432/amk";
+        match crate::connect(DATABASE_URL).await {
+            Ok(pool) => Some(pool),
+            Err(e) => {
+                eprintln!("skipping: dev database unreachable ({e})");
+                None
+            }
+        }
+    }
+
+    /// The negative case: every test that reaches `is_pod_reference_violation` through
+    /// `pods::delete` triggers one of the four names it matches, by construction — so none of
+    /// them can distinguish this predicate from a bare `is_foreign_key_violation()` (the widened
+    /// guard `matches!(c, Some("a"|"b"|"c"|"d"))` -> `c.is_some()` would collapse to). This test
+    /// manufactures a *different* foreign-key violation — `pods_organization_id_fkey`, the
+    /// outgoing FK from `pods` to `organizations`, raised by an `INSERT` rather than the `DELETE`
+    /// this predicate actually guards — and asserts the predicate rejects it. Matching by
+    /// constraint name, not merely `is_foreign_key_violation()`, is the whole point: a future
+    /// constraint that also happens to raise `23503` on the `DELETE` must not be silently
+    /// misclassified as `PodNotEmpty`.
+    #[tokio::test]
+    async fn is_pod_reference_violation_rejects_a_differently_named_fk_violation() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+
+        let err = sqlx::query(
+            "INSERT INTO pods (pod_id, organization_id, name) VALUES ($1, $2, 'orphan')",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind("org-that-does-not-exist")
+        .execute(&pool)
+        .await
+        .expect_err("a pod naming a nonexistent organization must violate a foreign key");
+        let sqlx::Error::Database(db_err) = err else {
+            panic!("expected a database error, got something else");
+        };
+        assert_eq!(db_err.constraint(), Some("pods_organization_id_fkey"));
+        assert!(db_err.is_foreign_key_violation());
+        assert!(
+            !is_pod_reference_violation(db_err.as_ref()),
+            "a foreign-key violation on a different constraint must not be mistaken for \
+             PodNotEmpty"
+        );
+    }
+}
