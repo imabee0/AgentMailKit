@@ -243,6 +243,50 @@ wrong** — recorded because they are the evidence that generating beats remembe
 `GET /v0/organizations` is the only organizations operation in the whole spec — there is no `POST`
 and no `PATCH`. Do not build one.
 
+## Settled by probe, because nothing else settled them
+
+The pre-dispatch review of this contract found operations among the 25 that neither a fixture nor a
+schema decided, which an implementer would have had to invent. They were probed live rather than
+guessed — `reference/fixtures/22-org-mount-and-delete-semantics.txt`, throwaway resources, torn
+down, end state re-verified. Two of the answers contradict `openapi.json`.
+
+- **`POST /v0/inboxes` at the org mount resolves the pod whose `pod_id` equals the
+  `organization_id`.** `type_inboxes:CreateInboxRequest` carries no `pod_id` and `Inbox.pod_id` is
+  required, so the server picks one; three pods existed at the moment of the probe and it picked
+  that one, not the newest. The account's "Default Pod" is minted carrying the organization's own
+  UUID. The fixture names the one rival reading it cannot exclude — "the oldest pod", since Default
+  Pod is also the oldest — and this contract implements id-equality: it is O(1), exact, and `amk
+  init` mints the default pod that way, so both readings agree in our deployment forever. It also
+  explains fixture 01's org-scoped `scope_id == organization_id`.
+- **`DELETE /v0/pods/{pod_id}` on a pod that still owns an inbox → `409` `cannot_delete`**, full
+  envelope, and the refusal is total: neither the pod nor the inbox is touched. `cannot_delete`
+  appears **zero times** in `openapi.json`, and `amk-types` mapped it to 403 until the probe; that
+  is corrected on `main` (commit `2318e9c`). Do not re-derive the status — use `ErrorCode::status()`.
+- **`DELETE /v0/pods/{pod_id}` → `204`. `DELETE /v0/inboxes/{inbox_id}` → `202`.** `openapi.json`
+  documents `200` for both and is wrong twice. The `202` is the consequential one: inbox deletion is
+  accepted-then-processed, so a test that deletes an inbox and immediately asserts `404` on `GET` is
+  racing the server — write it to tolerate the row still being visible.
+- **`GET /v0/organizations` returns a bare `Organization` object, not a list envelope**, despite the
+  plural path — it is "the organization for the authenticated API key". Every other plural path in
+  these 25 (`/v0/pods`, `/v0/inboxes`, `/v0/api-keys`) *is* a list envelope, so the pattern-match is
+  wrong here specifically. **Call `amk_store::organizations::get` with the resolved identity's
+  `organization_id`. Never `organizations::list`** — that function takes no credential and returns
+  every organization in the deployment; reaching for it here is a cross-tenant disclosure, not a
+  shape bug.
+- **`billing_id`, `billing_type` and `billing_subscription_id` are omitted deliberately.**
+  `type_organizations:Organization` carries all three. This is the no-billing-surface rule, the same
+  decision already applied to `upgrade_url`, and the conformance diff must be told rather than
+  "fixed". `authentication_id`/`authentication_type` are likewise absent from `amk_types`; both are
+  optional and their omission is wire-legal, recorded here for whoever revisits `amk-types`.
+
+**`PATCH` on inboxes depends on work that is not merged yet.** `amk_store::inboxes` has no
+`update`; `.claude/contracts/amk-store-inbox-update.md` adds it, and this dispatch does not start
+until that is on `main`. The wire types already exist and are frozen —
+`amk_types::inbox::UpdateInboxRequest` with `MetadataUpdate`'s three states (absent / `null` /
+merge). **This crate owns the two validation rules the store deliberately does not**: an empty
+`metadata` object is rejected, and each update must carry at least one of `display_name` or
+`metadata`. Both produce `validation_error`; the store treats an empty merge as a no-op.
+
 ## Assigned edge cases (write the test before the code it targets)
 
 - `message_id` round-trip through encode → route → decode with `+`, `%`, `/`, `?`, `#`, space and
