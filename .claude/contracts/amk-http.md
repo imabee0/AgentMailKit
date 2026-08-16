@@ -129,15 +129,91 @@ Two shapes, and the branch is on **who rejected the request**, not on status cod
 - **Never post-filter a page.** Build the `LabelAccess` and hand it to `amk-store`, which pushes the
   exclusion into the query. A `count` computed after filtering leaks the hidden rows.
 
-## Scope of the FIRST dispatch (a second one follows)
+## Scope — derived by enumeration, not recall
 
-**In:** the tower auth layer and `Credential`, scope extraction for all three mounts, the error
-envelope with per-code extras and the auth/app asymmetry, the 404 fallback, pagination parameter
-parsing, and handlers for `auth/me`, organizations, pods, inboxes, api-keys, including
-`client_id` idempotent creates and the inbox-collision path.
+This section was rewritten after the `amk-store` id-safety dispatch cost four correction rounds,
+every one of them because that contract's list of affected code was written from a review report
+instead of from the codebase. A scope written from memory is a scope with holes in it, and the
+holes are invisible until an implementer walks into one. So: this scope is **generated**, the
+command that generates it is below, and a reviewer's job is to re-run it rather than read it.
 
-**Out (second dispatch, named so the omission is a decision):** messages/threads/drafts handlers,
-attachment and raw downloads, the `Idempotency-Key` layer, WebSockets, rate limiting, `/metrics`.
+```bash
+python3 - <<'PY'
+import json, collections
+s = json.load(open('reference/openapi.json'))
+ops = [(p, m.upper()) for p, d in s['paths'].items()
+       for m in d if m in ('get','post','put','patch','delete')]
+print(len(ops), 'operations across', len(s['paths']), 'paths')
+PY
+# → 130 operations across 82 paths
+```
+
+**Every one of those 130 is assigned below. The partition is total and sums to 130 — that
+totality is the property to check, not the individual rows.** An operation appearing in no bucket
+is the defect this table exists to make impossible.
+
+| Count | Bucket |
+|---|---|
+| **25** | **this dispatch** — identity + org (2), pods (4), inboxes (10), api-keys (9) |
+| 12 | second dispatch — allow/block lists |
+| 13 | second dispatch — drafts |
+| 13 | second dispatch — messages |
+| 18 | second dispatch — threads |
+| 6 | second dispatch — metrics |
+| 22 | P4 — webhooks + events |
+| 14 | P5 — domains |
+| 5 | **parked post-V1** — AgentID P-256 public keys (`/v0/api-keys/public-keys*`) |
+| 2 | **parked** — `POST /v0/agent/sign-up`, `POST /v0/agent/verify` (agent signup + OTP; the plan parks these config-gated and off by default) |
+| **130** | **total** |
+
+### The 25 operations of this dispatch, exactly
+
+| Method | Path |
+|---|---|
+| `GET` | `/v0/auth/me` |
+| `GET` | `/v0/organizations` |
+| `GET` | `/v0/pods` |
+| `POST` | `/v0/pods` |
+| `GET` | `/v0/pods/{pod_id}` |
+| `DELETE` | `/v0/pods/{pod_id}` |
+| `GET` | `/v0/inboxes` |
+| `POST` | `/v0/inboxes` |
+| `GET` | `/v0/inboxes/{inbox_id}` |
+| `PATCH` | `/v0/inboxes/{inbox_id}` |
+| `DELETE` | `/v0/inboxes/{inbox_id}` |
+| `GET` | `/v0/pods/{pod_id}/inboxes` |
+| `POST` | `/v0/pods/{pod_id}/inboxes` |
+| `GET` | `/v0/pods/{pod_id}/inboxes/{inbox_id}` |
+| `PATCH` | `/v0/pods/{pod_id}/inboxes/{inbox_id}` |
+| `DELETE` | `/v0/pods/{pod_id}/inboxes/{inbox_id}` |
+| `GET` | `/v0/api-keys` |
+| `POST` | `/v0/api-keys` |
+| `DELETE` | `/v0/api-keys/{api_key_id}` |
+| `GET` | `/v0/pods/{pod_id}/api-keys` |
+| `POST` | `/v0/pods/{pod_id}/api-keys` |
+| `DELETE` | `/v0/pods/{pod_id}/api-keys/{api_key_id}` |
+| `GET` | `/v0/inboxes/{inbox_id}/api-keys` |
+| `POST` | `/v0/inboxes/{inbox_id}/api-keys` |
+| `DELETE` | `/v0/inboxes/{inbox_id}/api-keys/{api_key_id}` |
+
+Plus the cross-cutting machinery those 25 need: the tower auth layer and `Credential`, scope
+extraction for all three mounts, the error envelope with per-code extras and the auth/app
+asymmetry, the 404 fallback, pagination parameter parsing, `client_id` idempotent creates, and the
+inbox-collision path.
+
+**Three things the enumeration caught that the previous, recalled version of this section had
+wrong** — recorded because they are the evidence that generating beats remembering:
+
+- **`/v0/*/lists/{direction}/{type}` (12 operations) appeared in neither the In nor the Out list.**
+  Allow/block lists were simply absent from this contract. They are second dispatch.
+- **`/v0/*/metrics/usage` (6 operations) likewise appeared in neither.** The old Out list said
+  "`/metrics`", which is the Prometheus scrape endpoint — a different thing entirely from these
+  per-scope usage resources. Second dispatch.
+- **`PATCH` on inboxes was never named**, at either mount, though "inboxes" was listed as In. It
+  carries the metadata merge semantics (`key → null` deletes) and is in this dispatch.
+
+`GET /v0/organizations` is the only organizations operation in the whole spec — there is no `POST`
+and no `PATCH`. Do not build one.
 
 ## Assigned edge cases (write the test before the code it targets)
 
