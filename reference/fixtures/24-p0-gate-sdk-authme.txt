@@ -1,0 +1,126 @@
+Fixture 24 — P0 gate: official Python SDK `auth.me()` against localhost. Captured 2026-08-16,
+amk-cli dispatch (.claude/contracts/amk-bins.md), against this checkout's own `amk`/`amkd`
+binaries and a throwaway Postgres database on the dev instance (`amk_gate`, dropped after this
+capture — not the shared `amk` dev database every other crate's tests use).
+
+WHAT THIS PROVES: "official Python SDK auth.me() against localhost returns Identity" — the P0
+gate the plan's own line names, PENDING since P0 began because nothing served HTTP until this
+dispatch. `amk-cli` closes that: `amk init` mints a deployment, `amkd --role api` serves
+`amk_http::router` over plain HTTP, and the UNMODIFIED official `agentmail` SDK (pinned exactly —
+`conformance/requirements-gate.txt`) is pointed at it by environment alone, exactly as a real
+self-hosted deployment would be reached.
+
+REDACTION: the root key `amk init` mints is shown, once, by `amk init` itself — this transcript
+redacts it structurally (`am_us_[0-9a-f]+` -> `<redacted>`) as each command's raw output was
+captured, before anything was written here or displayed. No `Authorization` header value and no
+DSN password appear below. The dev database's own local password (`amk-dev-local`,
+`scripts/dev-db.sh`'s own comment: "not a secret in any meaningful sense") is masked anyway, for
+the same reason `doctor`'s own output never shows a configured value: this file is exactly the
+kind of thing that gets pasted into a chat window.
+
+Toolchain: rustc 1.97.1, cargo 1.97.1. SDK: agentmail==0.5.9 (conformance/requirements-gate.txt),
+installed into .venv-gate. Python 3.14.6.
+
+================================================================================
+1. amk migrate — against a fresh throwaway database
+================================================================================
+
+$ AMK_DATABASE_URL=postgres://amk:***@127.0.0.1:55432/amk_gate ./target/debug/amk migrate
+Applied 8 of 8 migrations (current).
+exit: 0
+
+================================================================================
+2. amk init — mints the default organization, its default pod, and the root key
+================================================================================
+
+$ AMK_DATABASE_URL=postgres://amk:***@127.0.0.1:55432/amk_gate ./target/debug/amk init
+Initialized a new deployment.
+  organization_id: dee00d5a-03aa-403f-b45e-ca420c1c633b
+  pod_id:          dee00d5a-03aa-403f-b45e-ca420c1c633b
+  root api key:    <redacted>
+This key will not be shown again -- store it now.
+exit: 0
+
+organization_id == pod_id, both dee00d5a-03aa-403f-b45e-ca420c1c633b (fixture 22's equality,
+minted by this dispatch's own `amk init`).
+
+================================================================================
+3. amkd --role api — serves amk_http::router over plain HTTP
+================================================================================
+
+$ AMK_DATABASE_URL=postgres://amk:***@127.0.0.1:55432/amk_gate AMK_BIND=127.0.0.1:8099 \
+    ./target/debug/amkd --role api &
+amkd: serving --role api on 127.0.0.1:8099
+
+================================================================================
+4. Raw HTTP probe — GET /v0/auth/me, Bearer <the redacted root key> (urllib, no SDK)
+================================================================================
+
+$ python3 -c '... GET http://127.0.0.1:8099/v0/auth/me, Authorization: Bearer <redacted> ...'
+HTTP/1.1 200 OK
+content-type: application/json
+content-length: 188
+connection: close
+date: Sun, 16 Aug 2026 18:35:43 GMT
+
+{"api_key_id":"7a10864a-b44d-4ffb-b668-c2ac54b8e3e5","organization_id":"dee00d5a-03aa-403f-b45e-ca420c1c633b","scope_id":"dee00d5a-03aa-403f-b45e-ca420c1c633b","scope_type":"organization"}
+
+================================================================================
+5. THE GATE — official `agentmail` 0.5.9 Python SDK, auth.me(), against localhost
+================================================================================
+
+$ .venv-gate/bin/python3 - <<'PY'
+from agentmail import AgentMail, AgentMailEnvironment
+
+env = AgentMailEnvironment(http="http://127.0.0.1:8099", websockets="ws://127.0.0.1:8099")
+client = AgentMail(environment=env, api_key=<redacted, read from a 0600 file, never printed>)
+
+identity = client.auth.me()
+print(f"type(identity) = {type(identity).__module__}.{type(identity).__qualname__}")
+print(f"identity.api_key_id  = {identity.api_key_id!r}")
+print(f"identity.organization_id = {identity.organization_id!r}")
+print(f"identity.scope_id    = {identity.scope_id!r}")
+print(f"identity.scope_type  = {identity.scope_type!r}")
+print(f"identity.pod_id      = {identity.pod_id!r}")
+print(f"identity.inbox_id    = {identity.inbox_id!r}")
+assert identity.organization_id == identity.scope_id
+assert str(identity.scope_type) in ("organization", "ScopeType.ORGANIZATION") \
+    or getattr(identity.scope_type, "value", None) == "organization"
+print("GATE RESULT: PASS -- official agentmail 0.5.9 Python SDK auth.me() against localhost:8099 returned an Identity")
+PY
+
+type(identity) = agentmail.auth.types.identity.Identity
+identity.api_key_id  = '7a10864a-b44d-4ffb-b668-c2ac54b8e3e5'
+identity.organization_id = 'dee00d5a-03aa-403f-b45e-ca420c1c633b'
+identity.scope_id    = 'dee00d5a-03aa-403f-b45e-ca420c1c633b'
+identity.scope_type  = 'organization'
+identity.pod_id      = None
+identity.inbox_id    = None
+GATE RESULT: PASS -- official agentmail 0.5.9 Python SDK auth.me() against localhost:8099 returned an Identity
+python exit: 0
+
+================================================================================
+6. amk doctor — read-only, against the same deployment, no value leaked
+================================================================================
+
+$ AMK_DATABASE_URL=postgres://amk:***@127.0.0.1:55432/amk_gate AMK_BIND=127.0.0.1:8099 \
+    ./target/debug/amk doctor
+AMK_DATABASE_URL: set
+AMK_BIND: set
+AMK_PRIMARY_DOMAIN: unset
+AMK_PRODUCT_NAME: unset
+database DSN: parses as a well-formed Postgres connection string
+database: reachable
+migrations: 8 of 8 applied (current)
+exit: 0
+
+================================================================================
+7. teardown
+================================================================================
+
+$ kill <amkd pid>                                   # server stopped
+$ dropdb amk_gate                                    # throwaway database removed
+$ rm -f <the 0600 root-key file, the plaintext init.out capture>   # scratch, outside this repo
+
+Nothing in this file, at any point of its capture, held the key's plaintext or the database
+password.
