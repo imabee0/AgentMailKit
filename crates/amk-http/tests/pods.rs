@@ -43,6 +43,30 @@ async fn create_list_get_delete_round_trip() {
 }
 
 #[tokio::test]
+async fn deleting_a_pod_that_still_owns_an_inbox_is_409_cannot_delete_and_nothing_is_touched() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "occupant").await;
+    let key = support::org_key(&pool, &org).await;
+    let router = support::test_router(pool);
+
+    let resp = support::delete(&router, &format!("/v0/pods/{pod}"), Some(&key)).await;
+    assert_eq!(resp.status, 409, "body: {}", resp.body);
+    assert_eq!(resp.code(), Some("cannot_delete"), "body: {}", resp.body);
+
+    // The refusal is total: both survive.
+    let pod_still = support::get(&router, &format!("/v0/pods/{pod}"), Some(&key)).await;
+    assert_eq!(pod_still.status, 200);
+    let inbox_still =
+        support::get(&router, &format!("/v0/inboxes/{}", inbox.to_path_segment()), Some(&key))
+            .await;
+    assert_eq!(inbox_still.status, 200);
+}
+
+#[tokio::test]
 async fn get_pod_requires_pod_read_even_when_the_pod_is_in_scope() {
     let Some(pool) = support::pool().await else {
         return;

@@ -21,6 +21,7 @@ pub mod handlers;
 pub mod ids;
 pub mod pagination;
 pub mod scope_ext;
+mod words;
 
 use axum::routing::get;
 use axum::Router;
@@ -53,6 +54,27 @@ pub fn router(state: AppState) -> Router {
         // ---- pods (4) — the only mount pods have ----
         .route("/v0/pods", get(handlers::pods::list).post(handlers::pods::create))
         .route("/v0/pods/{pod_id}", get(handlers::pods::get).delete(handlers::pods::delete))
+        // ---- inboxes (10) — organization mount + pod mount ----
+        .route(
+            "/v0/inboxes",
+            get(handlers::inboxes::list_org).post(handlers::inboxes::create_org),
+        )
+        .route(
+            "/v0/inboxes/{inbox_id}",
+            get(handlers::inboxes::get_org)
+                .patch(handlers::inboxes::update_org)
+                .delete(handlers::inboxes::delete_org),
+        )
+        .route(
+            "/v0/pods/{pod_id}/inboxes",
+            get(handlers::inboxes::list_pod).post(handlers::inboxes::create_pod),
+        )
+        .route(
+            "/v0/pods/{pod_id}/inboxes/{inbox_id}",
+            get(handlers::inboxes::get_pod)
+                .patch(handlers::inboxes::update_pod)
+                .delete(handlers::inboxes::delete_pod),
+        )
         // Unknown path -> 404 envelope.
         .fallback(not_found_fallback)
         // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
