@@ -19,10 +19,11 @@ cd "$(dirname "$0")/.."
 CURRENT_PHASE=P0
 
 fail=0
-ok()     { printf '  \033[32mMET\033[0m      %-38s %s\n' "$1" "$2"; }
-bad()    { printf '  \033[31mSKIPPED\033[0m  %-38s %s\n' "$1" "$2"; fail=$((fail+1)); }
-pend()   { printf '  PENDING  %-38s %s\n' "$1" "$2"; }
-attest() { printf '  ATTEST   %-38s %s\n' "$1" "$2"; }
+emitted=""
+ok()     { emitted="$emitted $1"; printf '  \033[32mMET\033[0m      %-38s %s\n' "$1" "$2"; }
+bad()    { emitted="$emitted $1"; printf '  \033[31mSKIPPED\033[0m  %-38s %s\n' "$1" "$2"; fail=$((fail+1)); }
+pend()   { emitted="$emitted $1"; printf '  PENDING  %-38s %s\n' "$1" "$2"; }
+attest() { emitted="$emitted $1"; printf '  ATTEST   %-38s %s\n' "$1" "$2"; }
 
 # check <id> <due:yes|no> <description> <command...>
 check() {
@@ -147,6 +148,7 @@ DEFERRALS=$(cat <<'EOF'
 16-threading-matrix|amk-core threading rules, P2
 17-message-complained.txt|amk-events complaint payload, P4
 20-search-and-label-precedence.txt|amk-core label access modes, P1
+24-p0-gate-sdk-authme.txt|P0 gate transcript, asserted by plan-ledger
 C1-domain-shape.txt|amk-types domain shapes, P5
 EOF
 )
@@ -154,7 +156,7 @@ if reg=$(python3 - <<'PY' 2>/dev/null
 import re
 src = open("crates/amk-types/tests/fixtures.rs").read()
 block = src.split("DEFERRED: &[(&str, &str)] = &[", 1)[1].split("];", 1)[0]
-for name, reason in re.findall(r'\("([^"]+)",\s*"([^"]+)"\)', block):
+for name, reason in re.findall(r'\(\s*"([^"]+)",\s*"([^"]+)",?\s*\)', block):
     print(f"{name}|{reason}")
 PY
 ); then
@@ -281,7 +283,7 @@ check p0-gate-sdk-authme no "P0 gate: official Python SDK auth.me() vs localhost
     [ -f "$f" ] || exit 1
     grep -q "organization_id" "$f" &&
     grep -qi "agentmail" "$f" &&
-    ! grep -qi "placeholder\|TODO\|not yet run" "$f"
+    ! grep -qi "placeholder\|TODO\|not yet run" "$f"'
 pend p1-gate-conformance     "P1 gate: dual-target conformance diff clean for P1 endpoints"
 pend p6-restore-drill        "P6: restore drill passes from backups alone, before any cutover step"
 
@@ -304,6 +306,31 @@ attest mem-subagent-memory   "subagent memory split: DECIDED in the plan, NOT bo
 attest evidence-sdk-routing  "node SDK host-routing source not vendored — am_eu_ claim is [UNVERIFIED] from this repo"
 
 echo
+# THE LEDGER CHECKS ITSELF FOR THE ONE FAILURE MODE IT CANNOT OTHERWISE SEE: a line that stops
+# being a line. `p0-gate-sdk-authme`'s `bash -c '…'` was left unterminated, and the runaway quote
+# swallowed the FIVE obligations that followed it — two PENDING gates and three ATTEST lines —
+# while the ledger printed PASS. An obligation that disappears is exactly the "omitted check reads
+# as a passing one" defect this file exists to prevent, arriving through a shell quote rather than
+# an edit, and invisible to `bash -n` because the result is still valid syntax.
+#
+# So the ids DECLARED in the source are diffed against the ids that actually PRINTED. Ids, not a
+# count: a set difference names the obligation that vanished, and a count only says one did. Both
+# sides are derived from the file and the contracts directory — never a transcribed number, which
+# is a check that silently stops checking (the guard-suite count read 24 while the suite ran 32).
+# `$id` in the contracts loop expands from the same glob the loop iterates.
+missing=$(
+  { grep -o '^[[:space:]]*\(check\|pend\|attest\|bad\) *"\?[A-Za-z0-9_$-]*' "$0" \
+      | sed 's/^[[:space:]]*[a-z]* *"\?//' | grep -v '^\$id$'
+    for c in .claude/contracts/*.md; do printf 'contract-%s\n' "$(basename "$c" .md)"; done
+  } | sort -u | while read -r id; do
+        case " $emitted " in *" $id "*) ;; *) printf '%s ' "$id" ;; esac
+      done
+)
+if [ -n "$missing" ]; then
+  printf '  \033[31mSKIPPED\033[0m  %-38s %s\n' "ledger-self-consistent" \
+    "declared but never printed: ${missing}— a line was swallowed (check the quoting)"
+  fail=$((fail+1))
+fi
 if [ "$fail" -gt 0 ]; then
   printf 'plan-ledger: \033[31mFAIL\033[0m (%d due obligation(s) unmet)\n' "$fail"
   exit 1

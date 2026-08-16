@@ -10,9 +10,18 @@ the script; it does not read the list.**
 Written by the orchestrator before dispatch. The design decisions here are settled; the implementer
 resolves ordinary coding detail inside them and escalates anything else.
 
-**This closes P0.** With these two binaries, `./scripts/check.sh`'s `p0-gate-sdk-authme` stops
-reading PENDING and can actually run: the official Python SDK's `auth.me()` against localhost. That
-gate is the point of this dispatch — not a side effect of it.
+**This makes P0's gate runnable, and running it is the deliverable.** There is no way to point the
+official Python SDK at localhost today because nothing serves HTTP: `amk-http` ships a `router()`
+and no binary binds it. These two binaries close that, and then the gate — *official Python SDK
+`auth.me()` against localhost returns an Identity* — is actually executed, against the dev database,
+with its **verbatim transcript captured to `reference/fixtures/24-p0-gate-sdk-authme.txt`**.
+
+That fixture is what `./scripts/check.sh`'s `p0-gate-sdk-authme` reads; the ledger line asserts the
+evidence, not the code, because the gate needs a live server and is too heavy to run inside every
+`check.sh`. **Writing code alone cannot flip it, and this contract said otherwise until the
+pre-dispatch review caught it** — the line was a bare `pend`, statically wired to PENDING and
+unreachable by any implementation. Capturing the transcript is therefore a required output of this
+dispatch, not a report of it.
 
 ## Derivation output (verbatim)
 
@@ -107,9 +116,16 @@ something you need does not exist in them, **STOP and report**.
 
 ## Writable paths (exact)
 
-`crates/amk-cli/**`, the workspace `Cargo.lock`, and the root `Cargo.toml` **only** to add
-`"crates/amk-cli"` to `[workspace.members]`. Nothing else. If the work requires a path outside that
-tree, **STOP and report**.
+`crates/amk-cli/**`, the workspace `Cargo.lock`, the root `Cargo.toml` **only** to add
+`"crates/amk-cli"` to `[workspace.members]`, and `reference/fixtures/24-p0-gate-sdk-authme.txt`
+(the gate transcript — the one file outside the crate this dispatch must produce). Nothing else. If
+the work requires a path outside those, **STOP and report**.
+
+**The fixture is a verbatim capture, under the same rules as every other file in that directory:**
+the commands run and their unmodified output. No `Authorization` header value is ever written into
+it, and the root key minted by `amk init` is `<redacted>` at capture — not redacted afterwards. A
+probe that printed a secret and cleaned up later already happened once here (fixture 23) and is
+recorded as a defect in the probe, not the API.
 
 ## Decisions (settled — implement, do not relitigate)
 
@@ -171,30 +187,52 @@ This is the security requirement of the dispatch and the one most easily lost:
    key.
 5. Print the organization id, the pod id, and the key exactly once.
 
-**Re-running `init` must not mint a second root key.** `organizations::create` is a plain `INSERT`
-with no `ON CONFLICT`, so a second run against an initialised database would fail on the unique
-violation *after* you had already minted a UUID — but "it happens to fail" is not the same as
-"it refuses". Check first with `organizations::list`… **which no longer exists** (deleted in
-`amk-store-http-prereqs.md` decision 5, deliberately: no credential, whole-deployment read). Use a
-`--organization-id` argument, or `organizations::get` on a caller-supplied id, and if you conclude
-you genuinely need to ask "is this deployment initialised?" with no id in hand, **STOP and report**
-— that is a missing store function, not something to work around with a raw query. This crate
-writes no SQL.
+**Re-running `init` must not mint a second root key — and the naive reading of that is wrong.**
+It is tempting to reason "`organizations::create` is a plain `INSERT`, so a second run fails on the
+unique violation". It does not. Step 1 mints a **fresh** UUID, so the second run's row collides with
+nothing and the `INSERT` **succeeds** — silently creating a second organization, a second default
+pod and a second root key. An untracked credential holding every permission is the worst possible
+outcome of a typo'd re-run, and it would happen with no error at all.
 
-An extra root key nobody asked for is an untracked credential with full permissions. Failing
-loudly is correct.
+So: **call `amk_store::organizations::exists(&pool)` first, and refuse if it returns `true`.** That
+function was added for this caller (`d889246`) after the pre-dispatch review found this instruction
+unresolvable as originally written. It is deliberately not a resurrection of `organizations::list`,
+which was deleted for taking no credential and returning every organization in the deployment: this
+discloses one bit — *some* organization exists — and no identifier, no count, no row.
+
+The refusal message names what to do (there is already an organization; use `amk doctor` to inspect
+the deployment) and exits non-zero. **Mint nothing before the check** — not the UUID, not the key.
 
 ### `amk migrate`
 
-`amk_store::connect(url)` — the migrator is compiled in (`sqlx::migrate!`). Report how many
-migrations were applied, or that the schema was already current. Idempotent by construction.
+`amk_store::connect(url)` — the migrator is compiled in (`sqlx::migrate!`). Report the state
+afterwards using `amk_store::migration_status(&pool)`, which returns
+`MigrationStatus { applied, embedded }`: say how many are applied of how many embedded, and whether
+that is current. Idempotent by construction.
+
+**Do not read `_sqlx_migrations` yourself, and do not embed a second `sqlx::migrate!` pointed at
+`amk-store`'s migrations.** The first routes persistence around the crate that owns it; the second
+is two declarations of migration ownership, and the copy is the one that drifts. `migration_status`
+exists (`d889246`) so neither is necessary — it was added after the pre-dispatch review found this
+section asking for information the public interface did not expose.
 
 ### `amk doctor`
 
-Read-only. Reports, each on its own line: whether the database is reachable; whether the schema is
-current; and, for each configuration variable, **set** or **unset** — never its value. `doctor`
-exists to be run when something is wrong, which is exactly when someone will paste its output into
-a chat window. It must be safe to paste.
+Read-only. Reports, each on its own line:
+
+- **Is the DSN even parseable?** Parse it before connecting — `AMK_DATABASE_URL.parse::<sqlx::postgres::PgConnectOptions>()`.
+  This matters more than it looks: `[TESTED]` against this workspace on 2026-08-16, a **malformed**
+  DSN does not report as malformed. `PgPoolOptions::connect` defers the parse, so
+  `not-a-url-at-all` and `mysql://…` both surface as `pool timed out while waiting for an open
+  connection` after five seconds — identical to an unreachable database. `doctor` exists to tell
+  those apart, so it must do the parse itself. No new dependency: `sqlx` is already a dependency of
+  this crate's own dependency tree via the workspace pin.
+- Whether the database is reachable.
+- `migration_status`: applied of embedded, and current or not.
+- For each configuration variable, **set** or **unset** — never its value.
+
+`doctor` is what someone runs when something is wrong, which is exactly when they will paste its
+output into a chat window. It must be safe to paste.
 
 ### `amk import` — does not exist yet
 

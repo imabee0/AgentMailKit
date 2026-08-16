@@ -423,6 +423,11 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         ("16-threading-matrix", "amk-core threading rules, P2"),
         ("17-message-complained.txt", "amk-events complaint payload, P4"),
         ("20-search-and-label-precedence.txt", "amk-core label access modes, P1"),
+        // Pre-authorised: the amk-cli dispatch produces this one, and this tripwire fires the
+        // moment it lands while `amk-types` is frozen — an implementer that cannot pass the check
+        // and cannot fix the cause. Not a wire shape: it is the P0 gate's live transcript, and its
+        // assertion is plan-ledger's `p0-gate-sdk-authme`, which reads the file.
+        ("24-p0-gate-sdk-authme.txt", "P0 gate transcript, asserted by plan-ledger"),
         ("C1-domain-shape.txt", "amk-types domain shapes, P5"),
     ];
 
