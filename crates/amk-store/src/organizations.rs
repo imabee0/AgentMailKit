@@ -44,6 +44,18 @@ async fn hydrate(
         domain_count: 0,
         inbox_limit: inbox_limit.map(|v| v as u64),
         domain_limit: domain_limit.map(|v| v as u64),
+        // The P1 gate (fixture 25) found these emitted live and absent here. `amk-types` now
+        // carries them; giving them a column and a value is the next dispatch's work, so they are
+        // explicitly `None` — omitted on the wire — rather than silently defaulted to a number
+        // this deployment never configured.
+        name: None,
+        daily_send_limit: None,
+        five_minute_send_limit: None,
+        first_day_recipient_limit: None,
+        first_week_recipient_limit: None,
+        tracking_allowed: None,
+        authentication_id: None,
+        authentication_type: None,
         billing_id: None,
         billing_type: None,
         billing_subscription_id: None,
