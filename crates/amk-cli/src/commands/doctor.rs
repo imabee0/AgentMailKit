@@ -66,13 +66,7 @@ pub async fn run(inputs: DoctorInputs) -> DoctorReport {
     match amk_store::connect_unmigrated(&url).await {
         Ok(pool) => {
             lines.push("database: reachable".to_owned());
-            match amk_store::migration_status(&pool).await {
-                Ok(status) => lines.push(migration_line(status)),
-                Err(e) => lines.push(format!(
-                    "migrations: could not read the migration ledger ({})",
-                    describe_connect_failure(&e)
-                )),
-            }
+            lines.push(migration_status_line(amk_store::migration_status(&pool).await));
         }
         Err(e) => {
             lines.push(format!("database: UNREACHABLE ({})", describe_connect_failure(&e)));
@@ -91,12 +85,57 @@ fn migration_line(status: MigrationStatus) -> String {
     format!("migrations: {} of {} applied ({current})", status.applied, status.embedded)
 }
 
+/// Render `amk_store::migration_status`'s outcome as the one report line it produces once the
+/// database is reachable — factored out from [`run`] specifically so the failure arm is
+/// unit-testable against a synthetic `sqlx::Error`. No live database this crate's tests control
+/// can be made to fail *this* query (`SELECT ... FROM _sqlx_migrations`) with anything other than
+/// the one error `migration_status` already handles specially (`42P01`, "not migrated yet",
+/// `Ok(applied: 0)`, not an `Err` at all): reaching a real "connected, but the ledger read still
+/// failed" state deterministically would mean either raw SQL corrupting `amk-store`'s own
+/// migration ledger table (past the DDL-provisioning carve-out `tests/support/mod.rs` already
+/// documents) or a timing race against a statement timeout (flaky by construction — see the
+/// project's own standing rule against seed-dependent tests). Testing the rendering directly
+/// against a constructed `Err` values covers the branch this crate can actually own without
+/// either.
+fn migration_status_line(result: Result<MigrationStatus, sqlx::Error>) -> String {
+    match result {
+        Ok(status) => migration_line(status),
+        Err(e) => {
+            format!(
+                "migrations: could not read the migration ledger ({})",
+                describe_connect_failure(&e)
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn present(name: &'static str, set: bool) -> VarPresence {
         VarPresence { name, set }
+    }
+
+    // ---- migration_status_line: the connected-but-ledger-read-failed arm --------------------
+
+    #[test]
+    fn a_migration_ledger_read_failure_is_redacted_not_the_raw_sqlx_error() {
+        const SECRET: &str = "amk-cli-doctor-migration-ledger-sentinel";
+        let err = sqlx::Error::Io(std::io::Error::other(SECRET));
+        let line = migration_status_line(Err(err));
+        assert!(
+            !line.contains(SECRET),
+            "leaked the raw sqlx::Error into doctor's report: {line}"
+        );
+        assert!(line.contains("could not read the migration ledger"), "got: {line}");
+    }
+
+    #[test]
+    fn a_migration_ledger_read_success_reports_the_counts() {
+        let line = migration_status_line(Ok(MigrationStatus { applied: 8, embedded: 8 }));
+        assert!(line.contains("8 of 8"));
+        assert!(line.contains("(current)"));
     }
 
     // ---- the parse-before-connect claim, checked directly against this workspace's sqlx pin ---

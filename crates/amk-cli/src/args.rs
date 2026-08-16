@@ -170,7 +170,11 @@ mod tests {
     #[test]
     fn amk_extra_arguments_are_rejected_not_silently_ignored() {
         let err = parse_amk(&v(&["init", "extra"])).unwrap_err();
-        assert!(!err.0.is_empty());
+        assert!(
+            err.0.contains("unexpected extra argument"),
+            "message did not name the problem: {err}"
+        );
+        assert!(err.0.contains("\"init\""), "message did not name the leading argument: {err}");
     }
 
     // ---- amkd: clean paths -----------------------------------------------------------------

@@ -15,6 +15,25 @@
 //! Postgres database on the same instance, migrates it fresh via `amk_store::connect`, and drops
 //! it when done. The `amk` role `scripts/dev-db.sh` provisions is a full superuser (`CREATEDB`
 //! included), so this needs no privilege this checkout doesn't already grant itself.
+//!
+//! # Why the `CREATE DATABASE`/`DROP DATABASE` below are not "SQL in this crate"
+//!
+//! The dispatch contract's "No SQL in this crate. All persistence goes through `amk-store`'s
+//! public interface" is unconditional, with no test carve-out written into it — and the two
+//! statements in [`FreshDb::create`]/[`FreshDb::drop_it`] are real, literal SQL. The reason they
+//! do not violate the rule: the rule's purpose is that this crate must never read or write
+//! *domain persistence* — organizations, pods, inboxes, keys, the migration ledger, anything a
+//! row in an EXISTING database represents — outside `amk-store`'s owned interface. `CREATE
+//! DATABASE`/`DROP DATABASE` operate one level above that: they provision and tear down the
+//! *container* a database's schema lives in, before any schema exists to have an owner at all.
+//! `amk-store`'s own public surface cannot express this — both `connect` and the embedded
+//! migrator take an existing database and act inside it; neither can create or drop one — so
+//! there is no interface of `amk-store`'s this could go through instead. This is a narrow,
+//! test-only carve-out for database-level DDL provisioning, not a licence for this crate (or
+//! these tests) to touch anything inside a database's own schema — see
+//! `commands::doctor::migration_status_line`'s own doc for a case where reaching a test scenario
+//! would have needed exactly that (SQL against `amk-store`'s migration ledger table), and where
+//! the deliberate choice was to find another way rather than widen this carve-out to cover it.
 
 #![allow(dead_code)] // not every helper is used by every test binary in this integration suite.
 
@@ -58,6 +77,10 @@ async fn admin_pool_or_skip(test_name: &str) -> Option<PgPool> {
 pub struct FreshDb {
     name: String,
     pub pool: PgPool,
+    /// The DSN this database is reachable at — needed by any test that spawns a real `amk`/
+    /// `amkd` subprocess (a separate process cannot share this struct's own `pool`; it needs its
+    /// own connection string to pass as `AMK_DATABASE_URL`).
+    pub dsn: String,
 }
 
 impl FreshDb {
@@ -81,7 +104,7 @@ impl FreshDb {
         let pool = amk_store::connect(&dsn)
             .await
             .unwrap_or_else(|e| panic!("migrating throwaway database {name} for {test_name}: {e}"));
-        Some(Self { name, pool })
+        Some(Self { name, pool, dsn })
     }
 
     /// Best-effort teardown, called explicitly at the end of a test rather than from `Drop`:

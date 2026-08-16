@@ -86,10 +86,15 @@ mod tests {
     #[test]
     fn database_url_reads_the_documented_variable_name() {
         const SENTINEL: &str = "amk-cli-test-database-url-sentinel";
+        // The literal string, NOT the `AMK_DATABASE_URL` constant: this test exists to catch a
+        // typo/rename of the constant's own VALUE, and reading it back through that same constant
+        // would make the two drift together, so the test could never fail no matter what the
+        // constant's content was renamed to (`tests/process.rs`'s black-box tests are what were
+        // actually catching that class of mutation before this fix).
         // SAFETY: no other test in this binary touches AMK_DATABASE_URL — see the doc above.
-        unsafe { env::set_var(AMK_DATABASE_URL, SENTINEL) };
+        unsafe { env::set_var("AMK_DATABASE_URL", SENTINEL) };
         assert_eq!(database_url().as_deref(), Ok(SENTINEL));
-        unsafe { env::remove_var(AMK_DATABASE_URL) };
+        unsafe { env::remove_var("AMK_DATABASE_URL") };
         assert!(database_url().is_err(), "removing the variable must be observed as unset");
     }
 
