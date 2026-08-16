@@ -82,26 +82,50 @@ async fn get_pod_requires_pod_read_even_when_the_pod_is_in_scope() {
 }
 
 #[tokio::test]
-async fn a_nonexistent_pod_id_is_masked_the_same_whether_or_not_the_permission_is_held() {
+async fn a_nonexistent_pod_id_is_not_found_for_a_credential_that_may_read_pods() {
     let Some(pool) = support::pool().await else {
         return;
     };
     let org = support::seed_org(&pool).await;
     let key_full = support::org_key(&pool, &org).await;
+    let router = support::test_router(pool);
+
+    let missing_pod = uuid::Uuid::new_v4();
+    let resp = support::get(&router, &format!("/v0/pods/{missing_pod}"), Some(&key_full)).await;
+    assert_eq!(resp.status, 404, "body: {}", resp.body);
+    assert_eq!(resp.code(), Some("not_found"));
+}
+
+#[tokio::test]
+async fn a_credential_lacking_pod_read_gets_the_same_answer_for_an_existing_and_a_nonexistent_pod()
+{
+    // `handlers::pods::get` decides permission BEFORE scope, deliberately the reverse of every
+    // other reader in this crate's early history: checking the flag first means a credential that
+    // may not read pods gets the identical 403 whether the id names a real, in-scope pod or
+    // nothing at all — the flag fires before any lookup, so no lookup's outcome can leak through
+    // the status code. This is the test that pins that decision; without it, a future change that
+    // swaps the order back would pass every other test in this file (the in-scope case in
+    // `get_pod_requires_pod_read_even_when_the_pod_is_in_scope` doesn't distinguish "checked
+    // permission first" from "checked it after a successful lookup" — only comparing existing vs.
+    // nonexistent under the SAME missing permission does). `[INFERRED]`: no fixture observes which
+    // error the reference API returns for this combination.
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
     let key_blind = support::mint_key(&pool, &org, None, None, Some(Default::default())).await;
     let router = support::test_router(pool);
 
     let missing_pod = uuid::Uuid::new_v4();
-    let full_resp =
-        support::get(&router, &format!("/v0/pods/{missing_pod}"), Some(&key_full)).await;
-    let blind_resp =
+    let existing_resp = support::get(&router, &format!("/v0/pods/{pod}"), Some(&key_blind)).await;
+    let missing_resp =
         support::get(&router, &format!("/v0/pods/{missing_pod}"), Some(&key_blind)).await;
-    // Scope decided BEFORE the flag: both an unrestricted key AND a permission-less one see the
-    // identical 404 for a resource that genuinely does not exist — the flag never gets a chance
-    // to turn "absent" into "forbidden".
-    assert_eq!(full_resp.status, 404, "body: {}", full_resp.body);
-    assert_eq!(blind_resp.status, 404, "body: {}", blind_resp.body);
-    assert_eq!(full_resp.code(), blind_resp.code());
+
+    assert_eq!(existing_resp.status, 403, "body: {}", existing_resp.body);
+    assert_eq!(missing_resp.status, 403, "body: {}", missing_resp.body);
+    assert_eq!(existing_resp.code(), Some("missing_permission"));
+    assert_eq!(existing_resp.code(), missing_resp.code());
 }
 
 #[tokio::test]

@@ -118,15 +118,25 @@ pub async fn get(
     ctx: AuthContext,
     Path(pod_id): Path<Uuid>,
 ) -> Result<Json<Pod>, AppError> {
+    // Permission decided BEFORE scope, deliberately the reverse of the ordering this file used to
+    // use here (and the opposite of the comment that used to sit on this line). Checking the flag
+    // first still satisfies "a 403 must never confirm a foreign pod exists" — it fires before any
+    // lookup, so it discloses nothing about ANY pod, foreign or otherwise — and it additionally
+    // closes an existence oracle scope-first left open: a credential lacking `pod_read` got 403
+    // for an in-scope pod but 404 for a foreign/absent one, letting it learn which ids exist
+    // without ever being allowed to read them. Permission-first discloses strictly less; matches
+    // every sibling handler in this crate (both creates, all three deletes, all three lists,
+    // inboxes::update). `[INFERRED]`: no fixture observes which error the reference API returns
+    // for "lacks the read flag AND the pod doesn't exist" — this is a fail-closed reading, not an
+    // observation.
+    permissions::require(&ctx.grants, "pod_read")?;
     let window = organization_window(&ctx.scope);
     let pod_id = PodId::from(pod_id);
-    // Scope decided BEFORE the permission flag: a 403 must never confirm a foreign pod exists.
     let row = pods::get(&state.pool, window.organization_id(), pod_id).await?;
     let pod = match row {
         Some(p) => window.check(p)?,
         None => return Err(window.not_found(ResourceKind::Pod).into()),
     };
-    permissions::require(&ctx.grants, "pod_read")?;
     Ok(Json(pod))
 }
 

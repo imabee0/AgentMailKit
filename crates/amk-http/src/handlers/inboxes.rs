@@ -302,6 +302,15 @@ async fn get_inbox(
     window: &ScopeFilter,
     target: &InboxId,
 ) -> Result<Json<Inbox>, AppError> {
+    // Permission decided BEFORE scope — before `bound_inbox_matches`, before any store call. This
+    // used to run last; it moved to the top for the same reasoning as `handlers::pods::get`'s
+    // identical comment, with a sharper stake here: `inbox_id` **is** the email address, directly
+    // guessable, unlike a pod's UUID. Scope-first let a credential lacking `inbox_read` get 403
+    // for an inbox that exists and 404 for one that does not — an enumeration oracle over real
+    // addresses on a public multi-tenant API. Permission-first answers the identical 403 in both
+    // cases, before any lookup. `[INFERRED]`: no fixture observes which error the reference API
+    // returns for this combination — fail-closed reading, not an observation.
+    permissions::require(&ctx.grants, "inbox_read")?;
     if !bound_inbox_matches(window, target) {
         return Err(window.not_found(ResourceKind::Inbox).into());
     }
@@ -316,7 +325,6 @@ async fn get_inbox(
         Some(i) => window.check(i)?,
         None => return Err(window.not_found(ResourceKind::Inbox).into()),
     };
-    permissions::require(&ctx.grants, "inbox_read")?;
     Ok(Json(inbox))
 }
 

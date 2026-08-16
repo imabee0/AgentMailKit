@@ -199,6 +199,44 @@ async fn plus_addressing_round_trips_through_the_path() {
     assert_eq!(resp.json.unwrap()["inbox_id"], inbox_id);
 }
 
+#[tokio::test]
+async fn a_credential_lacking_inbox_read_gets_the_same_answer_for_an_existing_and_a_nonexistent_inbox(
+) {
+    // `handlers::inboxes::get_inbox` decides permission BEFORE scope: a credential lacking
+    // `inbox_read` must get the identical 403 whether the id names a real inbox or nothing at
+    // all. `inbox_id` **is** the email address — directly guessable — so the OLD ordering (scope,
+    // then flag) let such a credential learn which addresses exist by status code alone: 403 for
+    // one that exists, 404 for one that does not. This is the test that pins the fix; the sibling
+    // pod-level test lives in tests/pods.rs. `[INFERRED]`: no fixture observes which error the
+    // reference API returns for this combination.
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "exists").await;
+    let key_blind = support::mint_key(&pool, &org, None, None, Some(Default::default())).await;
+    let router = support::test_router(pool);
+
+    let existing_resp = support::get(
+        &router,
+        &format!("/v0/inboxes/{}", inbox.to_path_segment()),
+        Some(&key_blind),
+    )
+    .await;
+    let missing_resp = support::get(
+        &router,
+        &format!("/v0/inboxes/{}", percent_encode(&format!("nope-{}@example.test", org.as_str()))),
+        Some(&key_blind),
+    )
+    .await;
+
+    assert_eq!(existing_resp.status, 403, "body: {}", existing_resp.body);
+    assert_eq!(missing_resp.status, 403, "body: {}", missing_resp.body);
+    assert_eq!(existing_resp.code(), Some("missing_permission"));
+    assert_eq!(existing_resp.code(), missing_resp.code());
+}
+
 // ---- update validation (this crate's own rules) -----------------------------------------------
 
 #[tokio::test]
