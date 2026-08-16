@@ -8,6 +8,7 @@ mod support;
 
 use amk_store::api_keys::{self, NewApiKey};
 use amk_store::inboxes::{self, ListInboxesQuery, NewInbox};
+use amk_store::organizations::NewOrganization;
 use amk_store::pods::{self, ListPodsQuery, NewPod};
 use amk_store::{organizations, InboxCursor, PageTokenError, PodCursor, SortDirection, StoreError};
 use amk_types::ids::{InboxId, OrganizationId, PodId};
@@ -66,6 +67,195 @@ async fn organization_create_get_delete_round_trips() {
     assert!(organizations::get(&pool, &org).await.unwrap().is_none());
     // Deleting an already-absent organization is a no-op, not an error.
     assert!(!organizations::delete(&pool, &org).await.unwrap());
+}
+
+// ---- divergence 1 (fixture 25): the ten live-only Organization fields ---------------------
+//
+// `GET /v0/organizations` emitted 5 of the reference's 17 fields. `amk_types::pod::Organization`
+// already carries all of them (frozen); migration 0009 gives eight of the missing ten a column
+// (`inbox_limit`/`domain_limit` already had one). `billing_plan_id`/`clerk_organization_id` are
+// the other two and are excluded by decision — asserted here as staying at `None`, never a
+// column, never a value.
+
+/// Every optional field on a freshly created organization — the two pre-existing limits, the
+/// eight new columns, and the three permanently-`None` billing fields — is OMITTED from the wire
+/// JSON when unset: never `null`, never `0`. A `0` send limit means "send nothing", the opposite
+/// of "no configured limit", so a silent default here would be a live outage waiting to happen.
+#[tokio::test]
+async fn organization_optional_fields_are_omitted_not_null_or_zero_when_unset() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let fetched = organizations::get(&pool, &org)
+        .await
+        .unwrap()
+        .expect("just created");
+
+    // Struct-level: every optional is genuinely None, not merely "not serialized".
+    assert_eq!(fetched.name, None);
+    assert_eq!(fetched.inbox_limit, None);
+    assert_eq!(fetched.domain_limit, None);
+    assert_eq!(fetched.daily_send_limit, None);
+    assert_eq!(fetched.five_minute_send_limit, None);
+    assert_eq!(fetched.first_day_recipient_limit, None);
+    assert_eq!(fetched.first_week_recipient_limit, None);
+    assert_eq!(fetched.tracking_allowed, None);
+    assert_eq!(fetched.authentication_id, None);
+    assert_eq!(fetched.authentication_type, None);
+    // No billing surface, by decision: these three never get a column or a value at all.
+    assert_eq!(fetched.billing_id, None);
+    assert_eq!(fetched.billing_type, None);
+    assert_eq!(fetched.billing_subscription_id, None);
+
+    let json = serde_json::to_value(&fetched).unwrap();
+    for field in [
+        "name",
+        "inbox_limit",
+        "domain_limit",
+        "daily_send_limit",
+        "five_minute_send_limit",
+        "first_day_recipient_limit",
+        "first_week_recipient_limit",
+        "tracking_allowed",
+        "authentication_id",
+        "authentication_type",
+        "billing_id",
+        "billing_type",
+        "billing_subscription_id",
+    ] {
+        assert!(
+            json.get(field).is_none(),
+            "{field} must be OMITTED when unset, never present as null: {json}"
+        );
+    }
+}
+
+/// The other direction: every one of the eight new columns, set the only way this dispatch makes
+/// possible — a direct `UPDATE` (the dispatch contract's own words: "operator configuration,
+/// reachable today only by a direct UPDATE, and that is the honest state") — round-trips out
+/// through `get`. `daily_send_limit` is set to a real, present `0` specifically: it must round
+/// trip as `Some(0)`, never collapse into "unset" (`None`) the way a lazier `Option::filter`-style
+/// implementation might.
+#[tokio::test]
+async fn organization_new_columns_round_trip_when_set_directly() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+
+    sqlx::query(
+        "UPDATE organizations SET name = $2, daily_send_limit = $3, five_minute_send_limit = $4, \
+         first_day_recipient_limit = $5, first_week_recipient_limit = $6, tracking_allowed = $7, \
+         authentication_id = $8, authentication_type = $9 \
+         WHERE organization_id = $1",
+    )
+    .bind(org.as_str())
+    .bind("Configured Deployment")
+    .bind(0i64) // the exact edge case: a real, configured zero, not "unset".
+    .bind(5i64)
+    .bind(10i64)
+    .bind(20i64)
+    .bind(true)
+    .bind("password")
+    .bind("api_key")
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let fetched = organizations::get(&pool, &org)
+        .await
+        .unwrap()
+        .expect("still there after the UPDATE");
+    assert_eq!(fetched.name.as_deref(), Some("Configured Deployment"));
+    assert_eq!(
+        fetched.daily_send_limit,
+        Some(0),
+        "a configured 0 must round-trip as Some(0), not collapse to None"
+    );
+    assert_eq!(fetched.five_minute_send_limit, Some(5));
+    assert_eq!(fetched.first_day_recipient_limit, Some(10));
+    assert_eq!(fetched.first_week_recipient_limit, Some(20));
+    assert_eq!(fetched.tracking_allowed, Some(true));
+    assert_eq!(fetched.authentication_id.as_deref(), Some("password"));
+    assert_eq!(fetched.authentication_type.as_deref(), Some("api_key"));
+
+    let json = serde_json::to_value(&fetched).unwrap();
+    assert_eq!(
+        json["daily_send_limit"],
+        serde_json::json!(0),
+        "0 is a real, present value on the wire, not omitted: {json}"
+    );
+    assert!(
+        !json.to_string().contains("null"),
+        "no optional is ever emitted as null: {json}"
+    );
+}
+
+/// `inbox_limit`/`domain_limit` are pre-existing columns (migration 0001) this dispatch does not
+/// touch — asserted here so a future change to their sibling columns cannot silently change their
+/// own omitted-when-unset behaviour without a test noticing.
+#[tokio::test]
+async fn inbox_and_domain_limit_are_still_omitted_when_unset_and_present_when_set() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+
+    let unset_id = OrganizationId::new(format!("org-{}", support::unique_suffix()));
+    organizations::create(
+        &pool,
+        NewOrganization {
+            organization_id: unset_id.clone(),
+            name: None,
+            inbox_limit: None,
+            domain_limit: None,
+        },
+    )
+    .await
+    .unwrap();
+    let unset = organizations::get(&pool, &unset_id).await.unwrap().unwrap();
+    let json = serde_json::to_value(&unset).unwrap();
+    assert!(json.get("inbox_limit").is_none());
+    assert!(json.get("domain_limit").is_none());
+
+    let set_id = OrganizationId::new(format!("org-{}", support::unique_suffix()));
+    organizations::create(
+        &pool,
+        NewOrganization {
+            organization_id: set_id.clone(),
+            name: None,
+            inbox_limit: Some(3),
+            domain_limit: Some(1),
+        },
+    )
+    .await
+    .unwrap();
+    let set = organizations::get(&pool, &set_id).await.unwrap().unwrap();
+    assert_eq!(set.inbox_limit, Some(3));
+    assert_eq!(set.domain_limit, Some(1));
+}
+
+/// `NewOrganization::name` — the one new field it gains — is settable at creation, unlike the
+/// eight send/receive-limit columns (no endpoint sets those; see `NewOrganization`'s own doc).
+#[tokio::test]
+async fn new_organization_name_is_settable_at_creation() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let id = OrganizationId::new(format!("org-{}", support::unique_suffix()));
+    organizations::create(
+        &pool,
+        NewOrganization {
+            organization_id: id.clone(),
+            name: Some("AgentMailKit".to_owned()),
+            inbox_limit: None,
+            domain_limit: None,
+        },
+    )
+    .await
+    .unwrap();
+    let fetched = organizations::get(&pool, &id).await.unwrap().unwrap();
+    assert_eq!(fetched.name.as_deref(), Some("AgentMailKit"));
 }
 
 #[tokio::test]

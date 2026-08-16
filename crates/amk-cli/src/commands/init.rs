@@ -79,19 +79,33 @@ pub struct InitOutcome {
 }
 
 /// Connect (and migrate) using `AMK_DATABASE_URL`'s value, then run [`run_with_pool`].
-pub async fn run(database_url: &str) -> Result<InitOutcome, InitError> {
+///
+/// `product_name` is `AMK_PRODUCT_NAME`'s value, read by the caller (`src/bin/amk.rs`) — this
+/// function never reads the environment itself, matching every other function in this crate
+/// (`crate::config` is the one place that does).
+pub async fn run(
+    database_url: &str,
+    product_name: Option<String>,
+) -> Result<InitOutcome, InitError> {
     let pool = amk_store::connect(database_url).await.map_err(|e| {
         InitError::Connect(format!(
             "could not connect using AMK_DATABASE_URL: {}",
             describe_connect_failure(&e)
         ))
     })?;
-    run_with_pool(&pool).await
+    run_with_pool(&pool, product_name).await
 }
 
 /// The five steps, against an already-connected pool — split out from [`run`] so tests can drive
 /// it against a database they already hold a pool for, without reconnecting.
-pub async fn run_with_pool(pool: &PgPool) -> Result<InitOutcome, InitError> {
+///
+/// `product_name` becomes the minted organization's `name` (divergence 1, fixture 25) — `Some`
+/// when `AMK_PRODUCT_NAME` is set, `None` (never a default string) when it is not, so an
+/// unconfigured deployment emits no `name` at all rather than a guessed one.
+pub async fn run_with_pool(
+    pool: &PgPool,
+    product_name: Option<String>,
+) -> Result<InitOutcome, InitError> {
     // Step 0 (the guard `organizations::create`'s own `INSERT` cannot give us — see the module
     // doc): refuse before minting anything at all if this deployment already has a root
     // organization.
@@ -112,6 +126,7 @@ pub async fn run_with_pool(pool: &PgPool) -> Result<InitOutcome, InitError> {
         pool,
         NewOrganization {
             organization_id: organization_id.clone(),
+            name: product_name,
             inbox_limit: None,
             domain_limit: None,
         },

@@ -27,7 +27,7 @@ async fn init_against_a_fresh_database_mints_the_org_mount_shape() {
         return;
     };
 
-    let outcome = init::run_with_pool(&db.pool)
+    let outcome = init::run_with_pool(&db.pool, None)
         .await
         .expect("init must succeed against a fresh db");
 
@@ -57,6 +57,51 @@ async fn init_against_a_fresh_database_mints_the_org_mount_shape() {
     db.drop_it().await;
 }
 
+/// Divergence 1 (fixture 25): `run_with_pool`'s own `product_name` parameter — `AMK_PRODUCT_NAME`
+/// read by the caller, `src/bin/amk.rs` — becomes the minted organization's `name`. `Some` is
+/// stored and emitted; `None` (unconfigured deployment) stays absent, never a guessed default —
+/// see `crates/amk-cli/tests/process.rs`'s subprocess siblings for the same edge case exercised
+/// through the real `AMK_PRODUCT_NAME` environment variable end to end.
+#[tokio::test]
+async fn init_sets_the_organization_name_from_the_product_name_argument_when_given() {
+    let Some(db) = support::FreshDb::create("init_sets_organization_name").await else {
+        return;
+    };
+
+    let outcome = init::run_with_pool(&db.pool, Some("AgentMailKit".to_owned()))
+        .await
+        .expect("init must succeed against a fresh db");
+
+    let org = amk_store::organizations::get(&db.pool, &outcome.organization_id)
+        .await
+        .expect("lookup must not error")
+        .expect("just created");
+    assert_eq!(org.name.as_deref(), Some("AgentMailKit"));
+
+    db.drop_it().await;
+}
+
+/// The other direction: `None` leaves `name` genuinely absent — never `Some("")`, never a
+/// hardcoded product name this deployment never configured.
+#[tokio::test]
+async fn init_leaves_the_organization_name_absent_when_product_name_is_none() {
+    let Some(db) = support::FreshDb::create("init_leaves_organization_name_absent").await else {
+        return;
+    };
+
+    let outcome = init::run_with_pool(&db.pool, None)
+        .await
+        .expect("init must succeed against a fresh db");
+
+    let org = amk_store::organizations::get(&db.pool, &outcome.organization_id)
+        .await
+        .expect("lookup must not error")
+        .expect("just created");
+    assert_eq!(org.name, None, "no product_name argument must leave name absent, not defaulted");
+
+    db.drop_it().await;
+}
+
 /// `amk init` twice: the second run refuses, mints no second key, and the deployment still has
 /// exactly the one organization the first run created.
 #[tokio::test]
@@ -65,11 +110,11 @@ async fn init_twice_refuses_the_second_run_and_mints_nothing() {
         return;
     };
 
-    let first = init::run_with_pool(&db.pool)
+    let first = init::run_with_pool(&db.pool, None)
         .await
         .expect("first init must succeed");
 
-    let second = init::run_with_pool(&db.pool).await;
+    let second = init::run_with_pool(&db.pool, None).await;
     match &second {
         Err(init::InitError::AlreadyInitialized) => {}
         other => {
@@ -97,7 +142,7 @@ async fn the_router_amkd_mounts_answers_auth_me_with_the_root_key_from_init() {
         return;
     };
 
-    let outcome = init::run_with_pool(&db.pool)
+    let outcome = init::run_with_pool(&db.pool, None)
         .await
         .expect("init must succeed");
     let app = router(AppState::new(db.pool.clone(), AppConfig::default()));

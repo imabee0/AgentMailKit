@@ -37,7 +37,8 @@ fn database_url_or_exit() -> String {
 
 async fn run_init() {
     let url = database_url_or_exit();
-    match commands::init::run(&url).await {
+    let product_name = std::env::var(config::AMK_PRODUCT_NAME).ok();
+    match commands::init::run(&url, product_name).await {
         Ok(outcome) => {
             // Printed exactly once, to stdout, and nowhere else -- never through `tracing`,
             // `eprintln!`, a file, or `{:?}` (which `CreateApiKeyResponse`'s hand-written `Debug`

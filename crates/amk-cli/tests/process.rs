@@ -11,6 +11,8 @@
 //! missing-variable path, and the connection-failure redaction path (against a fast-refusing
 //! address, never a real database), so they run unconditionally.
 
+mod support;
+
 use std::process::{Command, Output};
 
 fn run_amk(args: &[&str], envs: &[(&str, &str)]) -> Output {
@@ -133,6 +135,82 @@ fn amk_init_never_leaks_the_dsn_password_on_a_failed_connection() {
     let combined = text(&out);
     assert!(!combined.contains(SENTINEL), "password leaked into process output:\n{combined}");
     did_not_panic(&out);
+}
+
+// ---- amk init: AMK_PRODUCT_NAME sets the organization's name (divergence 1, fixture 25) ------
+//
+// The other black-box tests above deliberately never reach a real database (an unreachable DSN
+// is the point). These two need a genuine, migrated, throwaway one — `tests/support::FreshDb` —
+// because the assertion is on the row `amk init` actually wrote, through the real
+// `AMK_PRODUCT_NAME` environment variable end to end, not on `commands::init::run_with_pool`'s
+// own argument (`tests/init_and_serve.rs`'s sibling tests already cover that in-process).
+
+/// Extract the value `amk init`'s own `"  {label}: {value}"` output line prints — the id this
+/// test has no other way to learn, since the subprocess minted it itself.
+fn extract_field(stdout: &str, label: &str) -> String {
+    let needle = format!("{label}:");
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(&needle))
+        .unwrap_or_else(|| panic!("could not find {needle:?} in amk init's output:\n{stdout}"))
+        .trim()
+        .to_owned()
+}
+
+#[tokio::test]
+async fn amk_init_sets_the_organization_name_from_amk_product_name_when_set() {
+    let Some(db) = support::FreshDb::create("amk_init_sets_organization_name").await else {
+        return;
+    };
+    const SENTINEL: &str = "AmkProcessTestProductName";
+
+    let out = run_amk(
+        &["init"],
+        &[
+            ("AMK_DATABASE_URL", db.dsn.as_str()),
+            ("AMK_PRODUCT_NAME", SENTINEL),
+        ],
+    );
+    assert!(out.status.success(), "amk init must succeed: {}", text(&out));
+    did_not_panic(&out);
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let organization_id =
+        amk_types::ids::OrganizationId::new(extract_field(&stdout, "organization_id"));
+    let org = amk_store::organizations::get(&db.pool, &organization_id)
+        .await
+        .expect("lookup must not error")
+        .expect("amk init must have created this organization");
+    assert_eq!(org.name.as_deref(), Some(SENTINEL));
+
+    db.drop_it().await;
+}
+
+#[tokio::test]
+async fn amk_init_leaves_the_organization_name_absent_when_amk_product_name_is_unset() {
+    let Some(db) = support::FreshDb::create("amk_init_no_product_name").await else {
+        return;
+    };
+
+    // AMK_PRODUCT_NAME deliberately not passed — env_clear() inside run_amk means it is genuinely
+    // unset in the subprocess, not merely inherited-and-unset.
+    let out = run_amk(&["init"], &[("AMK_DATABASE_URL", db.dsn.as_str())]);
+    assert!(out.status.success(), "amk init must succeed: {}", text(&out));
+    did_not_panic(&out);
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let organization_id =
+        amk_types::ids::OrganizationId::new(extract_field(&stdout, "organization_id"));
+    let org = amk_store::organizations::get(&db.pool, &organization_id)
+        .await
+        .expect("lookup must not error")
+        .expect("amk init must have created this organization");
+    assert_eq!(
+        org.name, None,
+        "no AMK_PRODUCT_NAME must leave name absent, never a guessed default"
+    );
+
+    db.drop_it().await;
 }
 
 // ---- amk doctor: never a configuration VALUE, only set/unset --------------------------------

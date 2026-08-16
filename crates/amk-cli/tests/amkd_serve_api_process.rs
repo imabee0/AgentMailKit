@@ -111,7 +111,7 @@ async fn amkd_role_api_serves_the_configured_app_config_not_the_default() {
         return;
     };
 
-    let outcome = init::run_with_pool(&db.pool)
+    let outcome = init::run_with_pool(&db.pool, None)
         .await
         .expect("init must succeed against a fresh db");
 

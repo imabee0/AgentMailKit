@@ -87,7 +87,12 @@ pub async fn seed_org(pool: &PgPool) -> OrganizationId {
     let id = OrganizationId::new(format!("org-{}", unique_suffix()));
     organizations::create(
         pool,
-        NewOrganization { organization_id: id.clone(), inbox_limit: None, domain_limit: None },
+        NewOrganization {
+            organization_id: id.clone(),
+            name: None,
+            inbox_limit: None,
+            domain_limit: None,
+        },
     )
     .await
     .expect("seed organization");
