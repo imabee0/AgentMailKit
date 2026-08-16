@@ -17,6 +17,7 @@
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod scope_ext;
 
 use axum::Router;
 use sqlx::PgPool;
