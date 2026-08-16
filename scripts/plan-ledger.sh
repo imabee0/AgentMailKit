@@ -214,6 +214,51 @@ check hygiene-lock-released yes \
   "fan-out lock is not left set with no worktree" \
   bash -c '[ ! -f "$1" ] || [ "$(git worktree list | wc -l)" -gt 1 ]' _ "$LOCK"
 
+# A live worktree's copy of the contracts must match the primary's. The id-safety dispatch was
+# handed a contract, the orchestrator then rewrote that contract on main, and the worktree never
+# saw the rewrite — so the implementer worked a full round against a superseded document and its
+# "gaps" were all real against the current one. Nothing in the plan forbade that ordering and
+# nothing detected it. This does.
+check hygiene-worktree-contract-fresh yes \
+  "any live worktree carries the primary's contracts, not a superseded copy" \
+  bash -c '
+    for wt in "$1"/.claude/worktrees/*/; do
+      [ -d "$wt" ] || continue
+      diff -rq "$1/.claude/contracts" "$wt/.claude/contracts" >/dev/null 2>&1 || exit 1
+    done' _ "$PRIMARY"
+
+# ---------------------------------------------------------------- contract scope derivation
+# THE RULE THE ID-SAFETY DISPATCH BOUGHT, at four correction rounds. Its contract listed "the five
+# call paths the panel reproduced live" — recalled from a review report, never derived from the
+# code. Five sites were missing: messages::insert's `references`, messages::list's cursor, and all
+# of api_keys.rs (inbox_id at four functions plus the presented credential). Every one was found by
+# somebody enumerating; none was ever found by re-reading the contract.
+#
+# So a contract must state where its scope came from. `Scope-derivation:` is a command whose output
+# IS the scope, or an explicit `n/a` with a reason. `n/a` is a legitimate answer — a greenfield
+# crate has no existing surface to enumerate — but it has to be written down, because an absent
+# derivation and a deliberate one are indistinguishable until someone walks into the difference.
+check contract-scope-derived yes \
+  "every contract states how its scope was derived (command, or an explicit n/a)" \
+  bash -c '
+    for c in .claude/contracts/*.md; do
+      grep -q "^Scope-derivation:" "$c" || exit 1
+    done'
+
+# ---------------------------------------------------------------- security invariants with one guardian
+# `authenticate` must cost the same on every kind of miss. The obvious NUL fix — an early
+# `return Ok(None)` — skips the argon2 verify and resolves in ~700ns against ~500ms for a real
+# miss. The review panel confirmed by mutation that exactly ONE test catches that, and that the
+# value-asserting tests all still pass. A single-guardian property whose guardian is a "slow" test
+# is one #[ignore] away from silently reopening, so the guardian itself is now pinned.
+check security-timing-guard-live yes \
+  "authenticate's equal-cost timing test exists and is not ignored" \
+  bash -c '
+    f=crates/amk-store/tests/api_keys.rs
+    grep -q "fn authenticate_with_a_nul_byte_still_pays_the_real_verify_cost" "$f" || exit 1
+    ! grep -B4 "fn authenticate_with_a_nul_byte_still_pays_the_real_verify_cost" "$f" |
+      grep -q "#\[ignore"'
+
 # ---------------------------------------------------------------- not yet due
 pend p0-gate-sdk-authme      "P0 gate: official Python SDK auth.me() vs localhost (needs amk-http)"
 pend p1-gate-conformance     "P1 gate: dual-target conformance diff clean for P1 endpoints"

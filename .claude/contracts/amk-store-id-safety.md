@@ -1,5 +1,8 @@
 # amk-store — hostile id bytes reaching SQL — dispatch contract
 
+Scope-derivation: `grep -rn '\.bind(' crates/amk-store/src` — 120 bind sites, every one
+classified; no dynamic SQL, so `.bind()` is provably the complete set of parameter paths.
+
 Written by the orchestrator before dispatch. The design decisions here are settled; the
 implementer resolves ordinary coding detail inside them and escalates anything else.
 

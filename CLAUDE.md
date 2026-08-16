@@ -43,18 +43,23 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0**, 294 tests green on `main`. `amk-types`, `amk-core` and `amk-store` (incl.
-`api_keys`) merged and mutation-verified; Register C3 applied to `amk-core::threading`.
+Current phase: **P0**, 324 tests green on `main`. `amk-types`, `amk-core` and `amk-store` (incl.
+`api_keys` and id safety) merged and mutation-verified; Register C3 applied to `amk-core::threading`.
 
-**In flight: `.claude/contracts/amk-store-id-safety.md` (branch `amk/p0/store-id-safety`). Then
-`.claude/contracts/amk-http.md`.** A caller-supplied id carrying a NUL reaches a Postgres `text`
-parameter and errors `22021` instead of returning not-found — a 500 where the contract requires
-uniform `not_found`, and a side channel that distinguishes malformed from absent. An id newtype has
-**two wire-reachable doors**: `from_path_segment` (closed at `59d5b20`; `has_forbidden_byte` is the
-single definition of the rule) and `MessageCursor`/`ThreadCursor::decode`, which build ids through
-raw `::new()` from page-token JSON and never touch that function. A third opens in P2, when
-`amk-ingest` hands `messages::insert` a `MessageId` parsed from hostile MIME — which is why the
-store functions are made total, not just the doors closed.
+**Next: `.claude/contracts/amk-http.md`** — 25 operations, scope generated from `openapi.json` and
+asserted total against all 130.
+
+**A contract's scope is derived, never recalled.** The id-safety dispatch cost four correction
+rounds because its contract listed call paths remembered from a review report instead of enumerated
+from the code; five sites were missing and every one was found by enumerating. So: a contract
+scoping existing code carries the command that produced its scope and that command's output, states
+it on a `Scope-derivation:` line (`contract-scope-derived` enforces this), and a **read-only lens
+reviews the contract before dispatch**, not only the diff after.
+
+**Mutate guards in both directions.** Twenty deletion mutations reported no survivors while a live
+one sat in `messages::insert`: widening `in_reply_to`'s guard to `is_some()` rejects every threaded
+reply and the suite stayed green, because only hostile-value tests touched that field. Delete *and*
+widen; a guard with no clean-path test is unpinned in the direction that breaks real traffic.
 
 Still deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
 

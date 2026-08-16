@@ -1,5 +1,8 @@
 # amk-store, second dispatch — api-keys — dispatch contract
 
+Scope-derivation: n/a — new module (`api_keys.rs`) with no existing surface to enumerate. Dispatch
+complete and merged; retained as the record of what was agreed.
+
 Written by the orchestrator before dispatch. The design decisions here are settled; the
 implementer resolves ordinary coding detail inside them and escalates anything else.
 

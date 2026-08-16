@@ -1,5 +1,8 @@
 # amk-http — dispatch contract
 
+Scope-derivation: `python3` over `reference/openapi.json` — 130 operations partitioned across
+dispatches, sum asserted; command and output in "Scope — derived by enumeration, not recall".
+
 Written by the orchestrator before dispatch. The design decisions here are settled; the
 implementer resolves ordinary coding detail inside them and escalates anything else.
 
