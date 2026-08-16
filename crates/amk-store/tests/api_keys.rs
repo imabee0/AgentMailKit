@@ -4,9 +4,9 @@
 
 mod support;
 
-use amk_store::api_keys::{self, AuthenticatedKey, KeyScope, NewApiKey};
+use amk_store::api_keys::{self, AuthenticatedKey, KeyScope, ListApiKeysQuery, NewApiKey};
 use amk_store::inboxes::{self, NewInbox};
-use amk_store::{pods, StoreError};
+use amk_store::{pods, ApiKeyCursor, PageTokenError, SortDirection, StoreError};
 use amk_types::api_key::{ApiKeyPermissions, KeyGrants};
 use amk_types::ids::{ApiKeyId, InboxId, OrganizationId};
 use sqlx::Row;
@@ -20,6 +20,12 @@ fn org_key(organization_id: &OrganizationId, name: &str) -> NewApiKey {
         name: name.into(),
         permissions: None,
     }
+}
+
+/// Every existing pre-pagination test just wants "everything, in one page" — a limit comfortably
+/// above anything these tests seed.
+fn no_cursor(limit: u64) -> ListApiKeysQuery {
+    ListApiKeysQuery { limit, direction: SortDirection::Ascending, cursor: None }
 }
 
 // ---- permissions NULL vs '{}' -----------------------------------------------------------------
@@ -85,7 +91,11 @@ async fn the_minted_secret_is_not_recoverable_from_the_stored_row() {
         .await
         .unwrap();
     assert!(created.api_key.starts_with("am_us_"));
-    assert_eq!(created.api_key.len(), "am_us_".len() + 32);
+    // 64, not 32: fixture 23. This site was not caught by the dispatch derivation's section 4c
+    // (it greps for uses of the named constants, and this is a raw numeric literal), and it failed
+    // this run the same way the contract predicted its enumerated sites would: silently asserting
+    // something false under the new constants rather than failing loudly.
+    assert_eq!(created.api_key.len(), "am_us_".len() + 64);
     // The secret is a true extension of the prefix (the prefix is a real leading segment)...
     assert!(created.api_key.starts_with(&created.prefix));
     // ...but the prefix is strictly shorter: it does not itself disclose the whole secret.
@@ -447,13 +457,15 @@ async fn deleting_a_pod_that_owns_keys_is_rejected_by_the_declared_fk_behaviour(
     .unwrap();
 
     let result = pods::delete(&pool, &org, pod).await;
-    // The declared FK behaviour is the default (no ON DELETE clause, same as every other table in
-    // this crate) — NO ACTION, so the delete itself fails outright rather than orphaning or
-    // cascading through the key.
+    // Every FK referencing `pods` is left at its database default (NO ACTION, migration 0008's own
+    // comment — the deliberate opposite of the `inboxes` FKs, which cascade), so the delete itself
+    // fails outright rather than orphaning or cascading through the key. `pods::delete` turns that
+    // `23503` (matched by constraint name, `api_keys_pod_id_fkey`) into `StoreError::PodNotEmpty`,
+    // not a bare `StoreError::Database` — fixture 22's `cannot_delete` / HTTP 409.
     assert!(
-        matches!(result, Err(StoreError::Database(_))),
-        "deleting a pod with keys attached must fail via the FK, not silently orphan them: \
-         {result:?}"
+        matches!(result, Err(StoreError::PodNotEmpty)),
+        "deleting a pod with keys attached must be the typed PodNotEmpty, not a bare database \
+         error or a silent orphan: {result:?}"
     );
     assert!(
         pods::get(&pool, &org, pod).await.unwrap().is_some(),
@@ -497,18 +509,21 @@ async fn listing_at_one_pod_never_returns_a_sibling_pods_keys() {
     .await
     .unwrap();
 
-    let listed_a = api_keys::list(&pool, &org, &KeyScope::Pod(pod_a))
+    let listed_a = api_keys::list(&pool, &org, &KeyScope::Pod(pod_a), no_cursor(10))
         .await
         .unwrap();
-    assert_eq!(listed_a.len(), 1);
-    assert_eq!(listed_a[0].api_key_id, key_a.api_key_id);
+    assert_eq!(listed_a.items.len(), 1);
+    assert_eq!(listed_a.items[0].api_key_id, key_a.api_key_id);
 
-    let listed_b = api_keys::list(&pool, &org, &KeyScope::Pod(pod_b))
+    let listed_b = api_keys::list(&pool, &org, &KeyScope::Pod(pod_b), no_cursor(10))
         .await
         .unwrap();
-    assert_eq!(listed_b.len(), 1);
+    assert_eq!(listed_b.items.len(), 1);
     assert!(
-        listed_b.iter().all(|k| k.api_key_id != key_a.api_key_id),
+        listed_b
+            .items
+            .iter()
+            .all(|k| k.api_key_id != key_a.api_key_id),
         "pod_b's listing must not contain pod_a's key"
     );
 }
@@ -548,18 +563,21 @@ async fn listing_at_one_inbox_never_returns_a_sibling_inboxs_keys() {
     .await
     .unwrap();
 
-    let listed_a = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_a))
+    let listed_a = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_a), no_cursor(10))
         .await
         .unwrap();
-    assert_eq!(listed_a.len(), 1);
-    assert_eq!(listed_a[0].api_key_id, key_a.api_key_id);
+    assert_eq!(listed_a.items.len(), 1);
+    assert_eq!(listed_a.items[0].api_key_id, key_a.api_key_id);
 
-    let listed_b = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_b))
+    let listed_b = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_b), no_cursor(10))
         .await
         .unwrap();
-    assert_eq!(listed_b.len(), 1);
+    assert_eq!(listed_b.items.len(), 1);
     assert!(
-        listed_b.iter().all(|k| k.api_key_id != key_a.api_key_id),
+        listed_b
+            .items
+            .iter()
+            .all(|k| k.api_key_id != key_a.api_key_id),
         "inbox_b's listing must not contain inbox_a's key"
     );
 }
@@ -732,11 +750,14 @@ async fn listing_at_org_scope_never_leaks_a_sibling_organizations_keys() {
         .await
         .unwrap();
 
-    let listed_a = api_keys::list(&pool, &org_a, &KeyScope::Organization)
+    let listed_a = api_keys::list(&pool, &org_a, &KeyScope::Organization, no_cursor(10))
         .await
         .unwrap();
-    assert!(listed_a.iter().any(|k| k.api_key_id == key_a.api_key_id));
-    assert_eq!(listed_a.len(), 1, "org_a's listing must contain only its own key");
+    assert!(listed_a
+        .items
+        .iter()
+        .any(|k| k.api_key_id == key_a.api_key_id));
+    assert_eq!(listed_a.items.len(), 1, "org_a's listing must contain only its own key");
 
     // Directly reading org_a's key by id, but scoped under org_b, must miss.
     let leaked = api_keys::get(&pool, &org_b, &KeyScope::Organization, &key_a.api_key_id)
@@ -791,10 +812,10 @@ async fn org_mount_listing_returns_every_scope_level_within_the_organization() {
     .await
     .unwrap();
 
-    let listed = api_keys::list(&pool, &org, &KeyScope::Organization)
+    let listed = api_keys::list(&pool, &org, &KeyScope::Organization, no_cursor(10))
         .await
         .unwrap();
-    let ids: Vec<ApiKeyId> = listed.into_iter().map(|k| k.api_key_id).collect();
+    let ids: Vec<ApiKeyId> = listed.items.into_iter().map(|k| k.api_key_id).collect();
     assert!(ids.contains(&org_scoped.api_key_id));
     assert!(ids.contains(&pod_scoped.api_key_id));
     assert!(ids.contains(&inbox_scoped.api_key_id));
@@ -1242,11 +1263,11 @@ async fn list_at_a_hostile_inbox_scope_returns_empty_not_every_key_in_the_organi
     // only possible non-widening outcome is "match nothing", never "match inbox A's key" and never
     // "match every key in the organization".
     let hostile = InboxId::new(format!("{}\0", inbox_a.as_str()));
-    let listed = api_keys::list(&pool, &org, &KeyScope::Inbox(hostile))
+    let listed = api_keys::list(&pool, &org, &KeyScope::Inbox(hostile), no_cursor(10))
         .await
         .unwrap();
     assert!(
-        listed.is_empty(),
+        listed.items.is_empty(),
         "a hostile inbox scope must return no keys at all, not the whole organization's: \
          {listed:?}"
     );
@@ -1289,11 +1310,246 @@ async fn list_at_a_clean_inbox_scope_still_returns_exactly_that_inboxs_key() {
     .await
     .unwrap();
 
-    let listed = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_a))
+    let listed = api_keys::list(&pool, &org, &KeyScope::Inbox(inbox_a), no_cursor(10))
         .await
         .unwrap();
-    assert_eq!(listed.len(), 1, "a clean inbox scope must still resolve exactly one key");
-    assert_eq!(listed[0].api_key_id, key_a.api_key_id);
+    assert_eq!(listed.items.len(), 1, "a clean inbox scope must still resolve exactly one key");
+    assert_eq!(listed.items[0].api_key_id, key_a.api_key_id);
+}
+
+// ---- api_keys::list keyset pagination (`.claude/contracts/amk-store-http-prereqs.md`) ---------
+
+async fn walk_api_keys(
+    pool: &sqlx::PgPool,
+    org: &OrganizationId,
+    scope: &KeyScope,
+    direction: SortDirection,
+) -> Vec<ApiKeyId> {
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page =
+            api_keys::list(pool, org, scope, ListApiKeysQuery { limit: 2, direction, cursor })
+                .await
+                .unwrap();
+        seen.extend(page.items.into_iter().map(|k| k.api_key_id));
+        match page.next {
+            Some(token) => cursor = Some(ApiKeyCursor::decode(&token, scope).unwrap()),
+            None => break,
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn api_keys_list_full_walk_ascending_sees_every_row_exactly_once() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let mut seeded = std::collections::BTreeSet::new();
+    for i in 0..5 {
+        let created = api_keys::create(&pool, org_key(&org, &format!("walk-{i}")))
+            .await
+            .unwrap();
+        seeded.insert(created.api_key_id);
+    }
+
+    let seen = walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending).await;
+    assert_eq!(seen.len(), 5, "no duplicate and no omission: {seen:?}");
+    assert_eq!(seen.into_iter().collect::<std::collections::BTreeSet<_>>(), seeded);
+}
+
+#[tokio::test]
+async fn api_keys_list_full_walk_descending_is_the_exact_reverse() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    for i in 0..5 {
+        api_keys::create(&pool, org_key(&org, &format!("walk-{i}")))
+            .await
+            .unwrap();
+    }
+
+    let ascending =
+        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending).await;
+    let mut descending =
+        walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Descending).await;
+    descending.reverse();
+    assert_eq!(ascending, descending);
+}
+
+#[tokio::test]
+async fn api_keys_list_with_limit_zero_returns_empty_and_runs_no_query() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    pool.close().await;
+
+    let page = api_keys::list(&pool, &org, &KeyScope::Organization, no_cursor(0))
+        .await
+        .unwrap();
+    assert_eq!(page.items, Vec::new());
+    assert!(page.next.is_none());
+}
+
+#[tokio::test]
+async fn api_keys_list_with_u64_max_limit_returns_every_row_without_panicking() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    for i in 0..3 {
+        api_keys::create(&pool, org_key(&org, &format!("max-{i}")))
+            .await
+            .unwrap();
+    }
+
+    let page = api_keys::list(
+        &pool,
+        &org,
+        &KeyScope::Organization,
+        ListApiKeysQuery { limit: u64::MAX, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 3);
+    assert!(page.next.is_none());
+}
+
+/// The test that fails if the primary-key tiebreak is dropped from `ORDER BY`: two keys sharing
+/// one `created_at` millisecond, seeded via raw SQL (`api_keys::create` cannot pin `created_at`;
+/// it is always `DEFAULT now()`) must both be seen exactly once across the walk.
+#[tokio::test]
+async fn api_keys_list_breaks_a_created_at_tie_by_api_key_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let same_instant = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:00.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    // `prefix` is `UNIQUE` (`api_keys_prefix_idx`) and this dev database is shared and never
+    // rolled back between runs (`tests/support/mod.rs`'s own doc), so a fixed literal prefix
+    // collides with a leftover row from a previous run of this very test — mint each prefix from
+    // this run's own unique suffix instead, exactly as every other seed helper in this crate does.
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let api_key_id = Uuid::new_v4();
+        let suffix = support::unique_suffix();
+        sqlx::query(
+            "INSERT INTO api_keys (api_key_id, organization_id, name, prefix, hash, created_at) \
+             VALUES ($1, $2, $3, $4, 'irrelevant-hash', $5)",
+        )
+        .bind(api_key_id)
+        .bind(org.as_str())
+        .bind(format!("tie-{suffix}"))
+        .bind(format!("am_us_{}", &suffix[..6]))
+        .bind(same_instant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(ApiKeyId::new(api_key_id.to_string()));
+    }
+
+    let seen = walk_api_keys(&pool, &org, &KeyScope::Organization, SortDirection::Ascending).await;
+    assert_eq!(seen.len(), 2, "both same-instant keys must be seen exactly once each: {seen:?}");
+    let mut seen_sorted = seen;
+    seen_sorted.sort();
+    let mut expected_sorted = ids;
+    expected_sorted.sort();
+    assert_eq!(seen_sorted, expected_sorted);
+}
+
+/// `api_keys::list` at each of the three `KeyScope` mounts paginates within that mount only — a
+/// pod-scoped walk must never see a sibling pod's key on any page, including the last one, which a
+/// single-page test cannot distinguish from "never fetched at all".
+#[tokio::test]
+async fn api_keys_list_pod_scoped_walk_never_returns_a_sibling_pods_key_on_any_page() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod_a = support::seed_pod(&pool, &org).await;
+    let pod_b = support::seed_pod(&pool, &org).await;
+    let mut pod_a_keys = std::collections::BTreeSet::new();
+    for i in 0..3 {
+        let created = api_keys::create(
+            &pool,
+            NewApiKey {
+                organization_id: org.clone(),
+                pod_id: Some(pod_a),
+                inbox_id: None,
+                name: format!("pod-a-{i}"),
+                permissions: None,
+            },
+        )
+        .await
+        .unwrap();
+        pod_a_keys.insert(created.api_key_id);
+    }
+    for i in 0..3 {
+        api_keys::create(
+            &pool,
+            NewApiKey {
+                organization_id: org.clone(),
+                pod_id: Some(pod_b),
+                inbox_id: None,
+                name: format!("pod-b-{i}"),
+                permissions: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let seen = walk_api_keys(&pool, &org, &KeyScope::Pod(pod_a), SortDirection::Ascending).await;
+    assert_eq!(seen.len(), 3, "pod_a's walk must see exactly its own three keys: {seen:?}");
+    assert_eq!(seen.into_iter().collect::<std::collections::BTreeSet<_>>(), pod_a_keys);
+}
+
+/// A page token minted while walking pod A must not resume the walk at pod B — the same guarantee
+/// `inboxes_list_a_pod_a_cursor_is_rejected_at_pod_b` exercises for `InboxCursor`, here through a
+/// real `ApiKeyCursor` minted by `api_keys::list` itself, not a hand-built one.
+#[tokio::test]
+async fn api_keys_list_a_pod_a_cursor_is_rejected_at_pod_b() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod_a = support::seed_pod(&pool, &org).await;
+    let pod_b = support::seed_pod(&pool, &org).await;
+    for i in 0..2 {
+        api_keys::create(
+            &pool,
+            NewApiKey {
+                organization_id: org.clone(),
+                pod_id: Some(pod_a),
+                inbox_id: None,
+                name: format!("pod-a-{i}"),
+                permissions: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let page = api_keys::list(
+        &pool,
+        &org,
+        &KeyScope::Pod(pod_a),
+        ListApiKeysQuery { limit: 1, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    let token = page.next.expect("one row remains on the second page");
+
+    assert_eq!(
+        ApiKeyCursor::decode(&token, &KeyScope::Pod(pod_b)),
+        Err(PageTokenError::WrongScope)
+    );
 }
 
 // ---- a NUL byte in `authenticate`'s presented credential ------------------------------------

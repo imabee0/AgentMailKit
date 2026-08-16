@@ -30,6 +30,13 @@
 // `api_keys` (second dispatch): migration 0007 plus create/get/list/delete/authenticate/
 // touch_used_at, now that `amk_types::api_key::ApiKey` exists to build them from. See
 // `api_keys.rs`'s own module doc for the minting format and its `[ASSUMED]` reasoning.
+//
+// http-prereqs (third dispatch, `.claude/contracts/amk-store-http-prereqs.md`): `pods::list`,
+// `inboxes::list` and `api_keys::list` become keyset-paginated `Page<T>`, matching
+// `messages::list`/`threads::list`; `pods::delete` gains `StoreError::PodNotEmpty` (fixture 22);
+// migration 0008 cascades the FKs referencing `inboxes` (deliberately not the ones referencing
+// `pods`); the minted-key constants are corrected against fixture 23; `organizations::list` is
+// deleted (no wire route, one call site, now rewritten against `organizations::get`).
 
 pub mod api_keys;
 pub mod error;
@@ -42,5 +49,7 @@ pub mod pool;
 pub mod threads;
 
 pub use error::{PageTokenError, StoreError};
-pub use pagination::{MessageCursor, Page, SortDirection, ThreadCursor};
+pub use pagination::{
+    ApiKeyCursor, InboxCursor, MessageCursor, Page, PodCursor, SortDirection, ThreadCursor,
+};
 pub use pool::{connect, connect_unmigrated};

@@ -6,9 +6,11 @@ mod support;
 
 use amk_core::labels::{excluded_labels, IncludeFlags, LabelAccess};
 use amk_core::scope::{Mount, Resolved, Scope, ScopeFilter};
+use amk_store::api_keys::{self, KeyScope, NewApiKey};
 use amk_store::inboxes::{self, NewInbox};
 use amk_store::messages::{self, ListMessagesQuery, NewMessage};
 use amk_store::pagination::{MessageCursor, SortDirection, ThreadCursor};
+use amk_store::pods;
 use amk_store::threads::{self, ListThreadsQuery, NewThread};
 use amk_store::{PageTokenError, StoreError};
 use amk_types::api_key::{ApiKeyPermissions, KeyGrants};
@@ -3330,5 +3332,282 @@ async fn thread_insert_rejects_a_nul_byte_in_last_message_id() {
         matches!(result, Err(StoreError::InvalidValue("last_message_id"))),
         "a NUL-bearing last_message_id must be a typed InvalidValue, not a raw database error: \
          {result:?}"
+    );
+}
+
+// ---- `pods::delete`'s four-name constraint match, one referencing table at a time ------------
+//
+// `is_pod_reference_violation` matches exactly four constraint names
+// (`inboxes_pod_id_fkey`/`threads_pod_id_fkey`/`messages_pod_id_fkey`/`api_keys_pod_id_fkey`), and
+// a single test that only ever trips one of them would survive three of the four names being
+// deleted from the `matches!` pattern. `tests/api_keys.rs`'s
+// `deleting_a_pod_that_owns_keys_is_rejected_by_the_declared_fk_behaviour` pins the api-key name;
+// `tests/control_plane.rs`'s pod/inbox tests pin the inbox name (fixture 22's own scenario). These
+// two pin `threads_pod_id_fkey`/`messages_pod_id_fkey` — deliberately via a thread/message whose
+// own `inbox_id` belongs to a *different* pod, so only the one constraint under test can possibly
+// fire (nothing here ties `threads.pod_id`/`messages.pod_id` to their `inbox_id`'s own pod at the
+// schema level, which is what makes this isolation possible).
+
+#[tokio::test]
+async fn deleting_a_pod_referenced_only_by_a_threads_pod_id_is_rejected() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let target_pod = support::seed_pod(&pool, &org).await;
+    let owner_pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, owner_pod, "owner").await;
+
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            target_pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let result = pods::delete(&pool, &org, target_pod).await;
+    assert!(
+        matches!(result, Err(StoreError::PodNotEmpty)),
+        "a pod referenced only by threads_pod_id_fkey must still be refused: {result:?}"
+    );
+    assert!(
+        pods::get(&pool, &org, target_pod).await.unwrap().is_some(),
+        "the pod must survive the rejected delete"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_pod_referenced_only_by_a_messages_pod_id_is_rejected() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let target_pod = support::seed_pod(&pool, &org).await;
+    let owner_pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, owner_pod, "owner").await;
+
+    // The thread this message belongs to is pinned to owner_pod, not target_pod — otherwise this
+    // test would also trip threads_pod_id_fkey and no longer isolate the constraint under test.
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            owner_pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(
+            &inbox,
+            &org,
+            target_pod,
+            thread_id,
+            "<a@x>",
+            &["sent"],
+            "2026-08-15T05:00:01.000Z",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let result = pods::delete(&pool, &org, target_pod).await;
+    assert!(
+        matches!(result, Err(StoreError::PodNotEmpty)),
+        "a pod referenced only by messages_pod_id_fkey must still be refused: {result:?}"
+    );
+    assert!(
+        pods::get(&pool, &org, target_pod).await.unwrap().is_some(),
+        "the pod must survive the rejected delete"
+    );
+}
+
+// ---- migration 0008: `inboxes::delete` cascades ------------------------------------------------
+
+/// The test that settles the cascade set (migration 0008's own `[TESTED]` note): an inbox holding
+/// a thread, a message AND an inbox-scoped api key must delete cleanly, with all four rows gone
+/// afterwards — `Ok(true)`, not the `PodNotEmpty`-style refusal `pods::delete` gives for the
+/// symmetric case.
+#[tokio::test]
+async fn inbox_delete_cascades_through_its_thread_message_and_inbox_scoped_key() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(&inbox, &org, pod, thread_id, "<a@x>", &["sent"], "2026-08-15T05:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+    let key = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox.clone()),
+            name: "inbox-scoped".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(inboxes::delete(&pool, &org, None, &inbox).await.unwrap());
+
+    assert!(
+        inboxes::get(&pool, &org, None, &inbox)
+            .await
+            .unwrap()
+            .is_none(),
+        "the inbox itself must be gone"
+    );
+    let filter = inbox_filter(&org, pod, &inbox);
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::by_id(&grants);
+    assert!(
+        threads::get_with_messages(&pool, &filter, thread_id, &access)
+            .await
+            .unwrap()
+            .is_none(),
+        "the thread must be gone"
+    );
+    assert!(
+        messages::get(&pool, &filter, &inbox, &MessageId::new("<a@x>"), &[])
+            .await
+            .unwrap()
+            .is_none(),
+        "the message must be gone"
+    );
+    assert!(
+        api_keys::get(&pool, &org, &KeyScope::Inbox(inbox), &key.api_key_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the inbox-scoped api key must be gone"
+    );
+}
+
+/// The worst possible version of a cascade defect: a scope miss that still cascades. `inbox_a`
+/// belongs to `pod_a`; deleting it through `pod_b`'s scope must be a no-op, and every row it would
+/// otherwise have taken with it — including an inbox-scoped api key — must survive untouched.
+#[tokio::test]
+async fn inbox_delete_scope_miss_across_pods_cascades_nothing() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod_a, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let pod_b = support::seed_pod(&pool, &org).await;
+
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox_a,
+            &org,
+            pod_a,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<seed>",
+        ),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        &pool,
+        new_message(
+            &inbox_a,
+            &org,
+            pod_a,
+            thread_id,
+            "<a@x>",
+            &["sent"],
+            "2026-08-15T05:00:01.000Z",
+        ),
+    )
+    .await
+    .unwrap();
+    let key = api_keys::create(
+        &pool,
+        NewApiKey {
+            organization_id: org.clone(),
+            pod_id: None,
+            inbox_id: Some(inbox_a.clone()),
+            name: "inbox-a-scoped".into(),
+            permissions: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let result = inboxes::delete(&pool, &org, Some(pod_b), &inbox_a).await;
+    assert!(
+        matches!(result, Ok(false)),
+        "deleting inbox_a through pod_b's scope must be a no-op, not an error: {result:?}"
+    );
+
+    assert!(
+        inboxes::get(&pool, &org, None, &inbox_a)
+            .await
+            .unwrap()
+            .is_some(),
+        "inbox_a must survive the cross-pod delete attempt"
+    );
+    let filter = inbox_filter(&org, pod_a, &inbox_a);
+    let grants = KeyGrants::Unrestricted;
+    let access = LabelAccess::by_id(&grants);
+    assert!(
+        threads::get_with_messages(&pool, &filter, thread_id, &access)
+            .await
+            .unwrap()
+            .is_some(),
+        "the thread must survive"
+    );
+    assert!(
+        messages::get(&pool, &filter, &inbox_a, &MessageId::new("<a@x>"), &[])
+            .await
+            .unwrap()
+            .is_some(),
+        "the message must survive"
+    );
+    assert!(
+        api_keys::get(&pool, &org, &KeyScope::Inbox(inbox_a), &key.api_key_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the inbox-scoped api key must survive — a scope miss must never cascade"
     );
 }

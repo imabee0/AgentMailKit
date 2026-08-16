@@ -1,30 +1,26 @@
 //! API keys: minting, argon2id verification, and the three-mount (organization/pod/inbox)
 //! repository surface.
 //!
-//! # Secret format `[ASSUMED]`
+//! # Secret format
 //!
-//! No fixture shows a real AgentMail API key — `amk_types::api_key::ApiKey`'s own doc comment
-//! records the whole resource as `[SPEC:openapi]` only, and no live capture exists. The one piece
-//! of evidence this project has ever seen is `reference/fixtures/05-error-catalog.http:6`, where
-//! `am_us_00000000000000000000000000000000` (`am_us_` + 32 characters) drew the bare 403 reserved
-//! for a *well-formed but unknown* key rather than the malformed-credential response — so the
-//! reference API's keys carry a region segment, and this crate reproduces that observed shape
-//! exactly: **`am_us_` followed by 32 characters of URL-safe (alphanumeric) CSPRNG output**,
-//! `[PREFIX_TAG]` + `[SECRET_LEN]` below. A minted key never begins `am_eu_` — trivially true of a
-//! constant `am_us_` prefix, and asserted anyway (`a_minted_key_never_begins_am_eu`) so that
-//! changing the tag later cannot silently break it; the `am_eu_`/EU-routing note in the dispatch
-//! contract is downgraded to `[UNVERIFIED]` there (its source is not vendored under
-//! `reference/`), but never minting it is fail-closed and costs nothing regardless.
+//! `reference/fixtures/23-inbox-defaults-and-key-shape.txt` captured a real minted key: `am_us_`
+//! followed by **64 lowercase-hex characters**, whose `prefix` (the wire field, and this table's
+//! O(1) lookup column) is `am_us_` plus the first **6** of them. This supersedes the earlier
+//! `[ASSUMED]` 32-character URL-safe-alphanumeric shape, whose only evidence was
+//! `reference/fixtures/05-error-catalog.http:6` — a *rejected*, synthetic
+//! `am_us_00000000000000000000000000000000`, which showed only what the gateway accepts as
+//! well-formed, never what it mints. [`PREFIX_TAG`] + [`SECRET_LEN`] below now match fixture 23
+//! exactly. A minted key never begins `am_eu_` — trivially true of a constant `am_us_` prefix,
+//! and asserted anyway (`a_minted_key_never_begins_am_eu`) so that changing the tag later cannot
+//! silently break it; the `am_eu_`/EU-routing note in the dispatch contract is `[UNVERIFIED]`
+//! (its source is not vendored under `reference/`), but never minting it is fail-closed and costs
+//! nothing regardless.
 //!
-//! `prefix` (the wire field, and this table's O(1) lookup column) is the region tag plus the
-//! first [`VISIBLE_LEN`] characters of that random portion — `[ASSUMED]` split, chosen because the
-//! alternative, a constant `"am_us_"` for every key, cannot be `UNIQUE` (the dispatch contract's
-//! own requirement for the lookup index) and storing the *entire* 32 characters in clear would
-//! leave nothing secret. Splitting off a short slice for O(1) lookup while hashing the full
-//! presented string is the standard shape for this kind of credential (Stripe, GitHub PATs); the
-//! exact split point has no evidence behind it, so 8 characters is a plain engineering choice
-//! (48 bits of visible entropy is a comfortable margin below any lookup-index concern, and 24
-//! characters — 144 bits — stay behind the argon2id hash).
+//! The random portion is 32 bytes of `rand::rngs::OsRng` output, hex-encoded lowercase by hand
+//! (`write!(s, "{b:02x}")`) rather than through a dependency — 256 bits exactly, with no
+//! modulo-bias question to answer for a fixed byte-to-two-hex-digits mapping. [`VISIBLE_LEN`]
+//! (6, per fixture 23) is short enough that a mint can now collide in `api_keys_prefix_idx`
+//! (`UNIQUE`) at realistic key counts — [`MINT_ATTEMPTS`] below redraws on that one constraint.
 //!
 //! # Timing (`authenticate`)
 //!
@@ -48,6 +44,7 @@
 //! it. The hash never leaves this module: [`ApiKey`] (the read/list wire type) and
 //! [`AuthenticatedKey`] (this crate's own internal read model for the auth path) both omit it.
 
+use std::fmt::Write as _;
 use std::sync::OnceLock;
 
 use amk_types::api_key::{ApiKey, ApiKeyPermissions, CreateApiKeyResponse};
@@ -56,22 +53,26 @@ use amk_types::Timestamp;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use chrono::{DateTime, Utc};
-use rand::distributions::Alphanumeric;
 use rand::Rng;
 use sqlx::postgres::PgRow;
 use sqlx::types::Json;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::error::StoreError;
+use crate::error::{PageTokenError, StoreError};
+use crate::pagination::{ApiKeyCursor, Page, SortDirection};
 
 /// The region segment. `[ASSUMED]` — see the module doc.
 const PREFIX_TAG: &str = "am_us_";
-/// Total length of the random portion of a minted secret (after [`PREFIX_TAG`]).
-const SECRET_LEN: usize = 32;
-/// How many characters of the random portion are echoed into the stored, displayable `prefix`.
-/// `[ASSUMED]` — see the module doc.
-const VISIBLE_LEN: usize = 8;
+/// Total length of the random portion of a minted secret (after [`PREFIX_TAG`]): 64 lowercase-hex
+/// characters, the hex encoding of 32 CSPRNG bytes — observed, fixture 23.
+const SECRET_LEN: usize = 64;
+/// How many characters of the random portion are echoed into the stored, displayable `prefix` —
+/// observed, fixture 23.
+const VISIBLE_LEN: usize = 6;
+/// How many times [`create`] redraws a secret after a `prefix` collision on `api_keys_prefix_idx`
+/// before giving up and surfacing the underlying database error unmapped — see the module doc.
+const MINT_ATTEMPTS: u32 = 4;
 
 /// Which of the three mounts (`/v0/api-keys`, `/v0/pods/{pod_id}/api-keys`,
 /// `/v0/inboxes/{inbox_id}/api-keys`) a `get`/`list`/`delete` call is scoped to.
@@ -148,15 +149,17 @@ pub struct AuthenticatedKey {
 
 // ---- minting -------------------------------------------------------------------------------
 
-/// `SECRET_LEN` alphanumeric characters from a CSPRNG. `rand::rngs::OsRng` draws directly from
-/// the OS's own randomness source on every call — not a general-purpose (non-cryptographic) RNG,
-/// and not a PRNG merely *seeded* from one.
+/// 32 CSPRNG bytes, hex-encoded lowercase by hand (`SECRET_LEN` hex characters). `rand::rngs::OsRng`
+/// draws directly from the OS's own randomness source on every call — not a general-purpose
+/// (non-cryptographic) RNG, and not a PRNG merely *seeded* from one. Written with `write!`, not a
+/// hex-encoding dependency: four characters of format string is not worth a new crate.
 fn random_secret_chars() -> String {
-    rand::rngs::OsRng
-        .sample_iter(Alphanumeric)
-        .take(SECRET_LEN)
-        .map(char::from)
-        .collect()
+    let bytes: [u8; 32] = rand::rngs::OsRng.gen();
+    let mut s = String::with_capacity(SECRET_LEN);
+    for b in bytes {
+        write!(s, "{b:02x}").expect("invariant: writing to a String never fails");
+    }
+    s
 }
 
 /// Mint one new secret. Returns `(full secret to show the caller exactly once, prefix to store)`.
@@ -165,7 +168,7 @@ fn mint() -> (String, String) {
     let secret = format!("{PREFIX_TAG}{random}");
     let visible = random
         .get(..VISIBLE_LEN)
-        .expect("invariant: SECRET_LEN (32) is always >= VISIBLE_LEN (8)");
+        .expect("invariant: SECRET_LEN (64) is always >= VISIBLE_LEN (6)");
     let prefix = format!("{PREFIX_TAG}{visible}");
     (secret, prefix)
 }
@@ -315,7 +318,7 @@ fn row_to_authenticated(row: &PgRow) -> Result<AuthenticatedKey, StoreError> {
 /// independently anyway (a mutation at one site is invisible to a test that only exercises
 /// another), which is what `only_the_canonical_rendering_of_an_api_key_id_resolves_it_everywhere`
 /// does.
-fn exact_api_key_uuid(id: &ApiKeyId) -> Option<Uuid> {
+pub(crate) fn exact_api_key_uuid(id: &ApiKeyId) -> Option<Uuid> {
     let s = id.as_str();
     Uuid::parse_str(s).ok().filter(|u| u.to_string() == s)
 }
@@ -336,13 +339,25 @@ const GET_SQL: &str = "SELECT api_key_id, prefix, name, pod_id, inbox_id, permis
        AND ($3::uuid IS NULL OR pod_id = $3) \
        AND ($4::text IS NULL OR inbox_id = $4)";
 
-const LIST_SQL: &str = "SELECT api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, \
-        created_at \
+const LIST_ASC_SQL: &str =
+    "SELECT api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, created_at \
      FROM api_keys \
      WHERE organization_id = $1 \
        AND ($2::uuid IS NULL OR pod_id = $2) \
        AND ($3::text IS NULL OR inbox_id = $3) \
-     ORDER BY created_at ASC, api_key_id ASC";
+       AND ($4::timestamptz IS NULL OR (created_at, api_key_id) > ($4, $5)) \
+     ORDER BY created_at ASC, api_key_id ASC \
+     LIMIT $6";
+
+const LIST_DESC_SQL: &str =
+    "SELECT api_key_id, prefix, name, pod_id, inbox_id, permissions, used_at, created_at \
+     FROM api_keys \
+     WHERE organization_id = $1 \
+       AND ($2::uuid IS NULL OR pod_id = $2) \
+       AND ($3::text IS NULL OR inbox_id = $3) \
+       AND ($4::timestamptz IS NULL OR (created_at, api_key_id) < ($4, $5)) \
+     ORDER BY created_at DESC, api_key_id DESC \
+     LIMIT $6";
 
 const DELETE_SQL: &str = "DELETE FROM api_keys \
      WHERE organization_id = $1 AND api_key_id = $2 \
@@ -353,8 +368,19 @@ const AUTHENTICATE_SQL: &str = "SELECT api_key_id, organization_id, pod_id, inbo
         permissions, hash \
      FROM api_keys WHERE prefix = $1";
 
+fn is_prefix_collision(db_err: &dyn sqlx::error::DatabaseError) -> bool {
+    db_err.is_unique_violation() && db_err.constraint() == Some("api_keys_prefix_idx")
+}
+
 /// Mint a new key and store it. Returns the one response that carries the plaintext secret —
 /// [`CreateApiKeyResponse`] — which the caller must hand back to its own caller and never store.
+///
+/// Retries up to [`MINT_ATTEMPTS`] times on a `prefix` collision (`api_keys_prefix_idx`, matched
+/// by constraint name, never a bare `is_unique_violation()` — see the module doc for why 6 visible
+/// hex characters makes this reachable at realistic key counts, and `.claude/contracts`'s sibling
+/// note on `pods::delete` for why constraint-name matching, not SQLSTATE alone, is this crate's
+/// rule for turning a database error into a specific outcome). Any other database error, or a
+/// collision on the `MINT_ATTEMPTS`th attempt, propagates unmapped as [`StoreError::Database`].
 pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyResponse, StoreError> {
     if new
         .inbox_id
@@ -370,35 +396,54 @@ pub async fn create(pool: &PgPool, new: NewApiKey) -> Result<CreateApiKeyRespons
         return Err(StoreError::InvalidValue("name"));
     }
 
-    let api_key_id = Uuid::new_v4();
-    let (secret, prefix) = mint();
-    let hash = hash_secret(&secret);
     let inbox_id = new.inbox_id.as_ref().map(|i| i.normalized());
 
-    let row = sqlx::query(INSERT_SQL)
-        .bind(api_key_id)
-        .bind(new.organization_id.as_str())
-        .bind(new.pod_id.map(|p| p.0))
-        .bind(inbox_id.as_ref().map(InboxId::as_str))
-        .bind(&new.name)
-        .bind(&prefix)
-        .bind(&hash)
-        .bind(new.permissions.as_ref().map(Json))
-        .fetch_one(pool)
-        .await?;
+    let mut last_collision: Option<sqlx::Error> = None;
+    for _ in 0..MINT_ATTEMPTS {
+        let api_key_id = Uuid::new_v4();
+        let (secret, prefix) = mint();
+        let hash = hash_secret(&secret);
 
-    Ok(CreateApiKeyResponse {
-        api_key_id: ApiKeyId::new(row.try_get::<Uuid, _>("api_key_id")?.to_string()),
-        api_key: secret,
-        prefix: row.try_get("prefix")?,
-        name: row.try_get("name")?,
-        pod_id: row.try_get::<Option<Uuid>, _>("pod_id")?.map(PodId::from),
-        inbox_id: row
-            .try_get::<Option<String>, _>("inbox_id")?
-            .map(InboxId::new),
-        permissions: row_permissions(&row)?,
-        created_at: Timestamp::from(row.try_get::<DateTime<Utc>, _>("created_at")?),
-    })
+        let attempt = sqlx::query(INSERT_SQL)
+            .bind(api_key_id)
+            .bind(new.organization_id.as_str())
+            .bind(new.pod_id.map(|p| p.0))
+            .bind(inbox_id.as_ref().map(InboxId::as_str))
+            .bind(&new.name)
+            .bind(&prefix)
+            .bind(&hash)
+            .bind(new.permissions.as_ref().map(Json))
+            .fetch_one(pool)
+            .await;
+
+        let row = match attempt {
+            Ok(row) => row,
+            Err(sqlx::Error::Database(db_err)) if is_prefix_collision(db_err.as_ref()) => {
+                last_collision = Some(sqlx::Error::Database(db_err));
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        return Ok(CreateApiKeyResponse {
+            api_key_id: ApiKeyId::new(row.try_get::<Uuid, _>("api_key_id")?.to_string()),
+            api_key: secret,
+            prefix: row.try_get("prefix")?,
+            name: row.try_get("name")?,
+            pod_id: row.try_get::<Option<Uuid>, _>("pod_id")?.map(PodId::from),
+            inbox_id: row
+                .try_get::<Option<String>, _>("inbox_id")?
+                .map(InboxId::new),
+            permissions: row_permissions(&row)?,
+            created_at: Timestamp::from(row.try_get::<DateTime<Utc>, _>("created_at")?),
+        });
+    }
+    Err(last_collision
+        .expect(
+            "invariant: MINT_ATTEMPTS > 0, so the loop only exits without returning after \
+                 recording at least one collision",
+        )
+        .into())
 }
 
 /// Fetch one key by id, pinned to the mount's own scope. A key that exists but is scoped
@@ -434,28 +479,98 @@ pub async fn get(
     row.as_ref().map(row_to_api_key).transpose()
 }
 
-/// List keys visible at `scope`. See [`KeyScope`]'s own doc for what each mount returns.
+/// One list request, already resolved to a concrete direction and a decoded (and scope-validated)
+/// cursor — same role as [`crate::messages::ListMessagesQuery`]/[`crate::threads::ListThreadsQuery`].
+pub struct ListApiKeysQuery {
+    pub limit: u64,
+    pub direction: SortDirection,
+    pub cursor: Option<ApiKeyCursor>,
+}
+
+/// List keys visible at `scope`, paginated. See [`KeyScope`]'s own doc for what each mount
+/// returns.
 pub async fn list(
     pool: &PgPool,
     organization_id: &OrganizationId,
     scope: &KeyScope,
-) -> Result<Vec<ApiKey>, StoreError> {
+    query: ListApiKeysQuery,
+) -> Result<Page<ApiKey>, StoreError> {
+    // See the identical guard in `messages::list`/`threads::list`: a zero-row page has no row to
+    // anchor a cursor on, so return it directly — and before any query, including the scope guard
+    // below, runs.
+    if query.limit == 0 {
+        return Ok(Page { items: Vec::new(), next: None });
+    }
     // See the identical comment in `get`: this must run before `scope_params`, not inside it, or a
     // hostile NUL-bearing inbox scope silently widens to every key in the organization instead of
     // returning none.
     if let KeyScope::Inbox(i) = scope {
         if has_forbidden_byte(i.as_str()) {
-            return Ok(Vec::new());
+            return Ok(Page { items: Vec::new(), next: None });
+        }
+    }
+    // Sibling of the identical guard in `messages::list`/`threads::list`: `ApiKeyCursor`'s fields
+    // are `pub` and nothing at the type level guarantees a cursor reaching this function went
+    // through `ApiKeyCursor::decode` first. `api_key_id` needs no matching check here — a
+    // non-canonical or NUL-bearing value fails `exact_api_key_uuid` below and binds SQL `NULL`
+    // rather than reaching parameter encoding as `text`, exactly as `pod_id`'s `Uuid` binding does.
+    if let Some(c) = &query.cursor {
+        if let Some(inbox) = &c.inbox_id {
+            if has_forbidden_byte(inbox.as_str()) {
+                return Err(StoreError::InvalidPageToken(PageTokenError::ForbiddenByte(
+                    "cursor.inbox_id",
+                )));
+            }
         }
     }
     let (pod_param, inbox_param) = scope_params(scope);
-    let rows = sqlx::query(LIST_SQL)
+    let sql = match query.direction {
+        SortDirection::Ascending => LIST_ASC_SQL,
+        SortDirection::Descending => LIST_DESC_SQL,
+    };
+    let (cursor_ts, cursor_id) = match &query.cursor {
+        Some(c) => (Some(c.created_at), exact_api_key_uuid(&c.api_key_id)),
+        None => (None, None),
+    };
+    // See the identical comment in `messages::list`: `query.limit` is an unclamped `u64`, so
+    // `limit: u64::MAX` or `limit: i64::MAX as u64` must not overflow or wrap `fetch_limit`.
+    let fetch_limit = query.limit.saturating_add(1).min(i64::MAX as u64) as i64;
+
+    let rows = sqlx::query(sql)
         .bind(organization_id.as_str())
         .bind(pod_param)
         .bind(inbox_param)
+        .bind(cursor_ts)
+        .bind(cursor_id)
+        .bind(fetch_limit)
         .fetch_all(pool)
         .await?;
-    rows.iter().map(row_to_api_key).collect()
+
+    let has_more = rows.len() as u64 > query.limit;
+    let items: Vec<ApiKey> = rows
+        .iter()
+        .take(query.limit as usize)
+        .map(row_to_api_key)
+        .collect::<Result<_, _>>()?;
+
+    let next = if has_more {
+        let last = items
+            .last()
+            .expect("has_more implies at least one item when limit > 0");
+        Some(
+            ApiKeyCursor {
+                created_at: last.created_at.into_inner(),
+                api_key_id: last.api_key_id.clone(),
+                pod_id: last.pod_id,
+                inbox_id: last.inbox_id.clone(),
+            }
+            .encode(),
+        )
+    } else {
+        None
+    };
+
+    Ok(Page { items, next })
 }
 
 /// Delete one key, pinned to the mount's own scope exactly as [`get`] is.
@@ -541,12 +656,19 @@ mod tests {
 
     #[test]
     fn minted_key_matches_the_observed_shape() {
+        // reference/fixtures/23-inbox-defaults-and-key-shape.txt: `am_us_` + 64 lowercase-hex
+        // characters, `prefix` = `am_us_` + the first 6 of them. Checking `[0-9a-f]` specifically
+        // — not merely `is_ascii_alphanumeric()` — is the point: a test that only checked lengths
+        // would still pass on the old URL-safe (alphanumeric) alphabet this dispatch replaces.
         let (secret, prefix) = mint();
         assert!(secret.starts_with(PREFIX_TAG));
         assert_eq!(secret.len(), PREFIX_TAG.len() + SECRET_LEN);
-        assert!(secret[PREFIX_TAG.len()..]
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric()));
+        assert!(
+            secret[PREFIX_TAG.len()..]
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "the random portion must be lowercase hex only: {secret:?}"
+        );
         assert!(prefix.starts_with(PREFIX_TAG));
         assert_eq!(prefix.len(), PREFIX_TAG.len() + VISIBLE_LEN);
         assert!(
@@ -592,14 +714,114 @@ mod tests {
             "hello",
             "am_eu_00000000000000000000000000000000",
             "am_us_\u{1F600}\u{1F600}", // multi-byte characters straddling the VISIBLE_LEN cut
-            "am_us_1234567",            // one short of VISIBLE_LEN
+            "am_us_12345",              // one short of VISIBLE_LEN (6)
         ] {
             let _ = candidate_prefix(input);
         }
-        assert_eq!(candidate_prefix("am_us_1234567"), None, "too short to have a prefix at all");
+        // VISIBLE_LEN is 6 now (fixture 23) — the previous version of this test hardcoded 8, which
+        // would silently assert something false under the new constant rather than fail loudly
+        // (`.claude/contracts/amk-store-http-prereqs.md`'s own warning about this site).
+        assert_eq!(candidate_prefix("am_us_12345"), None, "too short to have a prefix at all");
         assert_eq!(
             candidate_prefix("am_us_12345678rest-of-the-secret"),
-            Some("am_us_12345678".to_owned())
+            Some("am_us_123456".to_owned())
+        );
+    }
+
+    // ---- prefix-collision predicate, against a real error --------------------------------
+    //
+    // `is_prefix_collision` is a private helper: nothing under `tests/` (a separate crate) can
+    // reach it, so this lives here, as a DB-touching unit test, rather than in
+    // `tests/api_keys.rs`. Skips cleanly when the dev database is unreachable, matching every
+    // other DB-touching test in this crate.
+
+    /// Connect directly, bypassing `tests/support::pool()` (which this module cannot see — it is
+    /// compiled into a separate integration-test crate). Mirrors its skip behaviour exactly:
+    /// `Ok(None)` on any connection failure, never a panic, so `cargo test -p amk-store` still
+    /// passes on a machine with no Postgres.
+    async fn pool_or_skip() -> Option<PgPool> {
+        const DATABASE_URL: &str = "postgres://amk:amk-dev-local@127.0.0.1:55432/amk";
+        match crate::connect(DATABASE_URL).await {
+            Ok(pool) => Some(pool),
+            Err(e) => {
+                eprintln!("skipping: dev database unreachable ({e})");
+                None
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prefix_collision_is_distinguished_from_the_inboxes_pkey_violation() {
+        let Some(pool) = pool_or_skip().await else {
+            return;
+        };
+
+        let org_id = format!("org-prefix-collision-{}", Uuid::new_v4().simple());
+        sqlx::query("INSERT INTO organizations (organization_id) VALUES ($1)")
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let pod_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO pods (pod_id, organization_id, name) VALUES ($1, $2, 'p')")
+            .bind(pod_id)
+            .bind(&org_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The real error this predicate exists to recognize: two `api_keys` rows sharing one
+        // `prefix`, raised by `api_keys_prefix_idx` (`UNIQUE`).
+        let prefix = format!("am_us_{}", &Uuid::new_v4().simple().to_string()[..6]);
+        let insert_key = || {
+            sqlx::query(
+                "INSERT INTO api_keys (api_key_id, organization_id, name, prefix, hash) \
+                 VALUES ($1, $2, 'collision-probe', $3, 'irrelevant-hash')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&org_id)
+            .bind(&prefix)
+        };
+        insert_key().execute(&pool).await.unwrap();
+        let prefix_err = insert_key()
+            .execute(&pool)
+            .await
+            .expect_err("the second insert must collide on the UNIQUE prefix index");
+        let sqlx::Error::Database(prefix_db_err) = prefix_err else {
+            panic!("expected a database error, got something else");
+        };
+        assert_eq!(prefix_db_err.constraint(), Some("api_keys_prefix_idx"));
+        assert!(
+            is_prefix_collision(prefix_db_err.as_ref()),
+            "a genuine prefix collision must be recognized"
+        );
+
+        // The negative case the dispatch contract names explicitly: a *different* unique
+        // violation — `inboxes_pkey` — must not be misclassified as a prefix collision. Matching
+        // by constraint name, not merely `is_unique_violation()`, is the whole point of this
+        // predicate (see its own doc and `pods::is_pod_reference_violation`'s identical rule for
+        // foreign-key violations).
+        let inbox_id = format!("prefix-collision-probe-{}@example.test", Uuid::new_v4().simple());
+        let insert_inbox = || {
+            sqlx::query(
+                "INSERT INTO inboxes (inbox_id, organization_id, pod_id) VALUES ($1, $2, $3)",
+            )
+            .bind(&inbox_id)
+            .bind(&org_id)
+            .bind(pod_id)
+        };
+        insert_inbox().execute(&pool).await.unwrap();
+        let inbox_err = insert_inbox()
+            .execute(&pool)
+            .await
+            .expect_err("the second insert must collide on inboxes_pkey");
+        let sqlx::Error::Database(inbox_db_err) = inbox_err else {
+            panic!("expected a database error, got something else");
+        };
+        assert_eq!(inbox_db_err.constraint(), Some("inboxes_pkey"));
+        assert!(
+            !is_prefix_collision(inbox_db_err.as_ref()),
+            "a differently-named unique violation must not be misclassified as a prefix collision"
         );
     }
 }

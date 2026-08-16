@@ -7,11 +7,22 @@
 mod support;
 
 use amk_store::api_keys::{self, NewApiKey};
-use amk_store::inboxes::{self, NewInbox};
-use amk_store::pods::{self, NewPod};
-use amk_store::{organizations, StoreError};
-use amk_types::ids::{InboxId, PodId};
+use amk_store::inboxes::{self, ListInboxesQuery, NewInbox};
+use amk_store::pods::{self, ListPodsQuery, NewPod};
+use amk_store::{organizations, InboxCursor, PageTokenError, PodCursor, SortDirection, StoreError};
+use amk_types::ids::{InboxId, OrganizationId, PodId};
 use amk_types::inbox::{Metadata, MetadataUpdate, MetadataValue, UpdateInboxRequest};
+use sqlx::PgPool;
+use std::collections::BTreeSet;
+use uuid::Uuid;
+
+fn no_cursor_asc(limit: u64) -> ListPodsQuery {
+    ListPodsQuery { limit, direction: SortDirection::Ascending, cursor: None }
+}
+
+fn no_cursor_asc_inboxes(limit: u64) -> ListInboxesQuery {
+    ListInboxesQuery { limit, direction: SortDirection::Ascending, cursor: None }
+}
 
 /// Build a [`Metadata`] map from literal pairs — used only by `inboxes::update`'s tests below.
 fn md(pairs: &[(&str, MetadataValue)]) -> Metadata {
@@ -31,8 +42,14 @@ fn merge(pairs: &[(&str, Option<MetadataValue>)]) -> MetadataUpdate {
     )
 }
 
+// `organizations::list` is deleted (dispatch contract decision 5): it took no credential and
+// returned every organization in the deployment, with no wire route behind it —
+// `GET /v0/organizations` returns *the* organization for the authenticated key and calls
+// `organizations::get`, never this. This test's only use of `list` was a redundant re-check of
+// exactly what `get` already establishes below, so it is rewritten against `get`, not replaced
+// with an equivalent.
 #[tokio::test]
-async fn organization_create_get_list_delete_round_trips() {
+async fn organization_create_get_delete_round_trips() {
     let Some(pool) = support::pool().await else {
         return;
     };
@@ -44,11 +61,6 @@ async fn organization_create_get_list_delete_round_trips() {
         .expect("just created");
     assert_eq!(fetched.organization_id, org);
     assert_eq!(fetched.inbox_count, 0, "no inboxes yet");
-    assert!(organizations::list(&pool)
-        .await
-        .unwrap()
-        .iter()
-        .any(|o| o.organization_id == org));
 
     assert!(organizations::delete(&pool, &org).await.unwrap());
     assert!(organizations::get(&pool, &org).await.unwrap().is_none());
@@ -78,8 +90,8 @@ async fn pod_client_id_replay_returns_the_original_row_not_a_duplicate() {
         "replay must return the original pod, not a new one"
     );
 
-    let all = pods::list(&pool, &org).await.unwrap();
-    assert_eq!(all.len(), 1, "exactly one row must exist for the replayed client_id");
+    let all = pods::list(&pool, &org, no_cursor_asc(10)).await.unwrap();
+    assert_eq!(all.items.len(), 1, "exactly one row must exist for the replayed client_id");
 }
 
 /// The `client_id` replay `SELECT` in `pods::create`'s fallback path is itself organization-scoped
@@ -204,6 +216,53 @@ async fn pod_delete_is_scoped_to_its_organization() {
     assert!(pods::get(&pool, &org_a, pod_a).await.unwrap().is_none());
 }
 
+/// A pod id that was never created at all — distinct from `pod_delete_is_scoped_to_its_organization`
+/// above, which exercises a *real* pod under the wrong organization. Both are `Ok(false)`, but for
+/// different reasons, and neither must ever surface as `PodNotEmpty`: that variant means "a real
+/// row still references this pod", which cannot be true of a pod that never existed.
+#[tokio::test]
+async fn pod_delete_on_an_absent_pod_is_ok_false_never_pod_not_empty() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let never_created = PodId::new_random();
+
+    let result = pods::delete(&pool, &org, never_created).await;
+    assert!(
+        matches!(result, Ok(false)),
+        "an absent pod must be Ok(false), never PodNotEmpty or a database error: {result:?}"
+    );
+}
+
+/// Fixture 22's own scenario, the primary case decision 2 exists for: a pod that still owns an
+/// inbox refuses to delete. Asserted on the rows, not only the error — fixture 22's refusal is
+/// *total*, and a partial delete that then errors would pass an error-only assertion.
+#[tokio::test]
+async fn pod_delete_on_a_pod_owning_an_inbox_is_rejected_and_both_rows_survive() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let result = pods::delete(&pool, &org, pod).await;
+    assert!(
+        matches!(result, Err(StoreError::PodNotEmpty)),
+        "a pod owning an inbox must be refused: {result:?}"
+    );
+    assert!(
+        pods::get(&pool, &org, pod).await.unwrap().is_some(),
+        "the pod must survive the rejected delete"
+    );
+    assert!(
+        inboxes::get(&pool, &org, None, &inbox)
+            .await
+            .unwrap()
+            .is_some(),
+        "the inbox must survive the rejected delete too — the refusal is total"
+    );
+}
+
 #[tokio::test]
 async fn inbox_client_id_replay_returns_the_original_row_not_a_duplicate() {
     let Some(pool) = support::pool().await else {
@@ -226,9 +285,12 @@ async fn inbox_client_id_replay_returns_the_original_row_not_a_duplicate() {
     let second = inboxes::create(&pool, new()).await.unwrap();
     assert_eq!(first.inbox_id, second.inbox_id);
 
-    let all = inboxes::list(&pool, &org, None).await.unwrap();
+    let all = inboxes::list(&pool, &org, None, no_cursor_asc_inboxes(10))
+        .await
+        .unwrap();
     assert_eq!(
-        all.iter()
+        all.items
+            .iter()
             .filter(|i| i.client_id.as_deref() == Some(client_id.as_str()))
             .count(),
         1
@@ -363,8 +425,14 @@ async fn two_simultaneous_creates_of_the_same_username_collide_exactly_once() {
     assert_eq!(collisions, 1, "the other must get the collision error, not a generic DB error");
 
     let normalized = InboxId::new(username.to_lowercase());
-    let rows = inboxes::list(&pool, &org, None).await.unwrap();
-    let matching = rows.iter().filter(|i| i.inbox_id == normalized).count();
+    let rows = inboxes::list(&pool, &org, None, no_cursor_asc_inboxes(10))
+        .await
+        .unwrap();
+    let matching = rows
+        .items
+        .iter()
+        .filter(|i| i.inbox_id == normalized)
+        .count();
     assert_eq!(matching, 1, "the database must hold exactly one row for the normalized id");
 }
 
@@ -473,8 +541,10 @@ async fn inbox_list_returns_the_exact_set_for_its_organization() {
     let (org_a, _pod_a, inbox_a) = support::seed_org_pod_inbox(&pool).await;
     let (_org_b, _pod_b, _inbox_b) = support::seed_org_pod_inbox(&pool).await;
 
-    let list_a = inboxes::list(&pool, &org_a, None).await.unwrap();
-    let ids: Vec<_> = list_a.into_iter().map(|i| i.inbox_id).collect();
+    let list_a = inboxes::list(&pool, &org_a, None, no_cursor_asc_inboxes(10))
+        .await
+        .unwrap();
+    let ids: Vec<_> = list_a.items.into_iter().map(|i| i.inbox_id).collect();
     assert_eq!(
         ids,
         vec![inbox_a],
@@ -1427,4 +1497,291 @@ async fn api_keys_create_with_a_clean_name_succeeds() {
     .await
     .unwrap();
     assert_eq!(created.name, "A Clean Key Name");
+}
+
+// ---- pods::list / inboxes::list keyset pagination (`.claude/contracts/amk-store-http-prereqs.md`) --
+
+async fn walk_pods(pool: &PgPool, org: &OrganizationId, direction: SortDirection) -> Vec<PodId> {
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = pods::list(pool, org, ListPodsQuery { limit: 2, direction, cursor })
+            .await
+            .unwrap();
+        seen.extend(page.items.into_iter().map(|p| p.pod_id));
+        match page.next {
+            Some(token) => cursor = Some(PodCursor::decode(&token).unwrap()),
+            None => break,
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn pods_list_full_walk_ascending_sees_every_row_exactly_once() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let mut seeded = BTreeSet::new();
+    for _ in 0..5 {
+        seeded.insert(support::seed_pod(&pool, &org).await);
+    }
+
+    let seen = walk_pods(&pool, &org, SortDirection::Ascending).await;
+    assert_eq!(seen.len(), 5, "no duplicate and no omission: {seen:?}");
+    assert_eq!(seen.into_iter().collect::<BTreeSet<_>>(), seeded);
+}
+
+#[tokio::test]
+async fn pods_list_full_walk_descending_is_the_exact_reverse() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    for _ in 0..5 {
+        support::seed_pod(&pool, &org).await;
+    }
+
+    let ascending = walk_pods(&pool, &org, SortDirection::Ascending).await;
+    let mut descending = walk_pods(&pool, &org, SortDirection::Descending).await;
+    descending.reverse();
+    assert_eq!(ascending, descending);
+}
+
+#[tokio::test]
+async fn pods_list_with_limit_zero_returns_empty_and_runs_no_query() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    // A closed pool makes any real query fail: this proves the `limit == 0` early return happens
+    // before `pods::list` ever reaches `sqlx::query(...).fetch_all(pool)`, not merely that the
+    // eventual result happens to be empty.
+    pool.close().await;
+
+    let page = pods::list(&pool, &org, no_cursor_asc(0)).await.unwrap();
+    assert_eq!(page.items, Vec::new());
+    assert!(page.next.is_none());
+}
+
+#[tokio::test]
+async fn pods_list_with_u64_max_limit_returns_every_row_without_panicking() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    for _ in 0..3 {
+        support::seed_pod(&pool, &org).await;
+    }
+
+    let page = pods::list(
+        &pool,
+        &org,
+        ListPodsQuery { limit: u64::MAX, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 3);
+    assert!(page.next.is_none());
+}
+
+/// The test that fails if the primary-key tiebreak is dropped from `ORDER BY`: two pods sharing
+/// one `created_at` millisecond, seeded via raw SQL (`pods::create`'s own `INSERT` has no way to
+/// pin `created_at` — it is always `DEFAULT now()`) must both be seen exactly once across the
+/// walk.
+#[tokio::test]
+async fn pods_list_breaks_a_created_at_tie_by_pod_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let same_instant = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:00.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let pod_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO pods (pod_id, organization_id, name, created_at) VALUES ($1, $2, 'tie', $3)",
+        )
+        .bind(pod_id)
+        .bind(org.as_str())
+        .bind(same_instant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(PodId::from(pod_id));
+    }
+
+    let seen = walk_pods(&pool, &org, SortDirection::Ascending).await;
+    assert_eq!(seen.len(), 2, "both same-instant pods must be seen exactly once each: {seen:?}");
+    let mut seen_sorted = seen;
+    seen_sorted.sort();
+    let mut expected_sorted = ids;
+    expected_sorted.sort();
+    assert_eq!(seen_sorted, expected_sorted);
+}
+
+async fn walk_inboxes(
+    pool: &PgPool,
+    org: &OrganizationId,
+    pod: Option<PodId>,
+    direction: SortDirection,
+) -> Vec<InboxId> {
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = inboxes::list(pool, org, pod, ListInboxesQuery { limit: 2, direction, cursor })
+            .await
+            .unwrap();
+        seen.extend(page.items.into_iter().map(|i| i.inbox_id));
+        match page.next {
+            Some(token) => cursor = Some(InboxCursor::decode(&token, pod).unwrap()),
+            None => break,
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn inboxes_list_full_walk_ascending_sees_every_row_exactly_once() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let mut seeded = BTreeSet::new();
+    for i in 0..5 {
+        seeded.insert(support::seed_inbox(&pool, &org, pod, &format!("walk-{i}")).await);
+    }
+
+    let seen = walk_inboxes(&pool, &org, None, SortDirection::Ascending).await;
+    assert_eq!(seen.len(), 5, "no duplicate and no omission: {seen:?}");
+    assert_eq!(seen.into_iter().collect::<BTreeSet<_>>(), seeded);
+}
+
+#[tokio::test]
+async fn inboxes_list_full_walk_descending_is_the_exact_reverse() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    for i in 0..5 {
+        support::seed_inbox(&pool, &org, pod, &format!("walk-{i}")).await;
+    }
+
+    let ascending = walk_inboxes(&pool, &org, None, SortDirection::Ascending).await;
+    let mut descending = walk_inboxes(&pool, &org, None, SortDirection::Descending).await;
+    descending.reverse();
+    assert_eq!(ascending, descending);
+}
+
+#[tokio::test]
+async fn inboxes_list_with_limit_zero_returns_empty_and_runs_no_query() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    pool.close().await;
+
+    let page = inboxes::list(&pool, &org, None, no_cursor_asc_inboxes(0))
+        .await
+        .unwrap();
+    assert_eq!(page.items, Vec::new());
+    assert!(page.next.is_none());
+}
+
+#[tokio::test]
+async fn inboxes_list_with_u64_max_limit_returns_every_row_without_panicking() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    for i in 0..3 {
+        support::seed_inbox(&pool, &org, pod, &format!("max-{i}")).await;
+    }
+
+    let page = inboxes::list(
+        &pool,
+        &org,
+        None,
+        ListInboxesQuery { limit: u64::MAX, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 3);
+    assert!(page.next.is_none());
+}
+
+/// Sibling of [`pods_list_breaks_a_created_at_tie_by_pod_id`]: two inboxes sharing one `created_at`
+/// millisecond, seeded via raw SQL for the same reason (`inboxes::create` cannot pin `created_at`).
+#[tokio::test]
+async fn inboxes_list_breaks_a_created_at_tie_by_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let same_instant = chrono::DateTime::parse_from_rfc3339("2026-08-15T05:00:00.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let mut ids = Vec::new();
+    for i in 0..2 {
+        let inbox_id = format!("tie-{i}-{}@example.test", support::unique_suffix());
+        sqlx::query(
+            "INSERT INTO inboxes (inbox_id, organization_id, pod_id, created_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&inbox_id)
+        .bind(org.as_str())
+        .bind(pod.0)
+        .bind(same_instant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(InboxId::new(inbox_id));
+    }
+
+    let seen = walk_inboxes(&pool, &org, None, SortDirection::Ascending).await;
+    assert_eq!(
+        seen.len(),
+        2,
+        "both same-instant inboxes must be seen exactly once each: {seen:?}"
+    );
+    let mut seen_sorted: Vec<String> = seen.iter().map(|i| i.as_str().to_owned()).collect();
+    seen_sorted.sort();
+    let mut expected_sorted: Vec<String> = ids.iter().map(|i| i.as_str().to_owned()).collect();
+    expected_sorted.sort();
+    assert_eq!(seen_sorted, expected_sorted);
+}
+
+/// A page token minted at pod A must not resume the walk at pod B — a hand-decoded `InboxCursor`
+/// is asserted on the variant, not `is_err()`, exactly as the pure unit test in `pagination.rs`
+/// does; this is the same guarantee exercised through the actual `GET /v0/pods/{pod_id}/inboxes`
+/// shape (a real cursor minted by `inboxes::list` itself, not a hand-built one).
+#[tokio::test]
+async fn inboxes_list_a_pod_a_cursor_is_rejected_at_pod_b() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod_a = support::seed_pod(&pool, &org).await;
+    let pod_b = support::seed_pod(&pool, &org).await;
+    support::seed_inbox(&pool, &org, pod_a, "a1").await;
+    support::seed_inbox(&pool, &org, pod_a, "a2").await;
+
+    let page = inboxes::list(
+        &pool,
+        &org,
+        Some(pod_a),
+        ListInboxesQuery { limit: 1, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    let token = page.next.expect("one row remains on the second page");
+
+    assert_eq!(InboxCursor::decode(&token, Some(pod_b)), Err(PageTokenError::WrongScope));
 }

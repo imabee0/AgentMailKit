@@ -18,11 +18,12 @@
 //! not have to distinguish "malformed" from "the wrong page for this credential" from a database
 //! error.
 
-use amk_types::ids::{has_forbidden_byte, InboxId, MessageId, ThreadId};
+use amk_types::ids::{has_forbidden_byte, ApiKeyId, InboxId, MessageId, PodId, ThreadId};
 use amk_types::page::Cursor;
 use amk_types::Timestamp;
 use chrono::{DateTime, SecondsFormat, Utc};
 
+use crate::api_keys::{exact_api_key_uuid, KeyScope};
 use crate::error::PageTokenError;
 
 /// A fixed choice of ORDER BY / comparison direction.
@@ -179,6 +180,214 @@ impl ThreadCursor {
 impl From<(ThreadId, &InboxId, Timestamp)> for ThreadCursor {
     fn from((thread_id, inbox_id, timestamp): (ThreadId, &InboxId, Timestamp)) -> Self {
         Self { thread_id, inbox_id: inbox_id.clone(), timestamp: timestamp.into_inner() }
+    }
+}
+
+/// Reject a token whose own `pod_id` disagrees with a pinned request scope. Sibling of
+/// [`check_inbox_scope`], same shape, one level up: `pinned` is `None` for the organization mount
+/// (every token is in-scope by definition — the query itself still pins `organization_id`).
+fn check_pod_scope(token_pod: PodId, pinned: Option<PodId>) -> Result<(), PageTokenError> {
+    match pinned {
+        Some(p) if token_pod != p => Err(PageTokenError::WrongScope),
+        _ => Ok(()),
+    }
+}
+
+/// The keyset cursor for a pods page: `{created_at, pod_id}`. `pods::list` has exactly one mount
+/// (`GET /v0/pods`), so there is no scope to pin and [`PodCursor::decode`] takes no pinned
+/// argument — unlike [`InboxCursor`]/[`ApiKeyCursor`]. It also carries no free-text field: `pod_id`
+/// is a UUID column, so a NUL byte in it fails the `Uuid` parse below as [`PageTokenError::WrongType`]
+/// rather than needing its own [`has_forbidden_byte`] check. Both absences are decisions, not
+/// omissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PodCursor {
+    pub created_at: DateTime<Utc>,
+    pub pod_id: PodId,
+}
+
+impl PodCursor {
+    pub fn encode(&self) -> String {
+        Cursor::new()
+            .with("created_at", encode_timestamp(self.created_at))
+            .with("pod_id", self.pod_id.to_string())
+            .encode()
+    }
+
+    pub fn decode(token: &str) -> Result<Self, PageTokenError> {
+        let cursor = Cursor::decode(token)?;
+        let created_at_raw = cursor
+            .get_str("created_at")
+            .ok_or(PageTokenError::MissingField("created_at"))?;
+        let pod_id_raw = cursor
+            .get_str("pod_id")
+            .ok_or(PageTokenError::MissingField("pod_id"))?;
+        let created_at = decode_timestamp(created_at_raw, "created_at")?;
+        let pod_id = pod_id_raw
+            .parse::<uuid::Uuid>()
+            .map(PodId::from)
+            .map_err(|_| PageTokenError::WrongType("pod_id"))?;
+        Ok(Self { created_at, pod_id })
+    }
+}
+
+/// The keyset cursor for an inboxes page: `{created_at, inbox_id, pod_id}`. Two mounts —
+/// `GET /v0/inboxes` (organization-wide) and `GET /v0/pods/{pod_id}/inboxes` (pod-pinned) — so
+/// [`InboxCursor::decode`] takes `pinned: Option<PodId>`: `None` for the organization mount
+/// (accepts any token), `Some(p)` for the pod mount, requiring `cursor.pod_id == p`.
+/// `inboxes.pod_id` is `NOT NULL` (migration 0003), so the coordinate is always present on a real
+/// row. This is [`check_inbox_scope`]'s exact shape, one level up, via [`check_pod_scope`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxCursor {
+    pub created_at: DateTime<Utc>,
+    pub inbox_id: InboxId,
+    pub pod_id: PodId,
+}
+
+impl InboxCursor {
+    pub fn encode(&self) -> String {
+        Cursor::new()
+            .with("created_at", encode_timestamp(self.created_at))
+            .with("inbox_id", self.inbox_id.as_str())
+            .with("pod_id", self.pod_id.to_string())
+            .encode()
+    }
+
+    /// Decode and validate against the request's pinned pod, if any (see the struct doc for what
+    /// `pinned` means at each of the two mounts).
+    pub fn decode(token: &str, pinned: Option<PodId>) -> Result<Self, PageTokenError> {
+        let cursor = Cursor::decode(token)?;
+        let created_at_raw = cursor
+            .get_str("created_at")
+            .ok_or(PageTokenError::MissingField("created_at"))?;
+        let inbox_id_raw = cursor
+            .get_str("inbox_id")
+            .ok_or(PageTokenError::MissingField("inbox_id"))?;
+        let pod_id_raw = cursor
+            .get_str("pod_id")
+            .ok_or(PageTokenError::MissingField("pod_id"))?;
+        // `inbox_id` is this cursor's one free-text field — see the identical check (and the same
+        // reasoning: a NUL survives the JSON decode as valid UTF-8, then fails at Postgres
+        // parameter encoding, SQLSTATE 22021) in `MessageCursor::decode`.
+        if has_forbidden_byte(inbox_id_raw) {
+            return Err(PageTokenError::ForbiddenByte("inbox_id"));
+        }
+        let created_at = decode_timestamp(created_at_raw, "created_at")?;
+        let pod_id = pod_id_raw
+            .parse::<uuid::Uuid>()
+            .map(PodId::from)
+            .map_err(|_| PageTokenError::WrongType("pod_id"))?;
+        let inbox_id = InboxId::new(inbox_id_raw).normalized();
+        check_pod_scope(pod_id, pinned)?;
+        Ok(Self { created_at, inbox_id, pod_id })
+    }
+}
+
+/// Reject a token whose own mount coordinates disagree with the `KeyScope` this request is pinned
+/// to. Unlike [`check_inbox_scope`]/[`check_pod_scope`], the pinned side here is not a plain
+/// `Option<T>` but a [`KeyScope`] — because the *mount* a key list was walked at is not the same
+/// thing as an individual key's own scope (`KeyScope::Organization` lists pod- and inbox-scoped
+/// keys too; see `KeyScope`'s own doc). `pinned` is collapsed to the same `(Option<PodId>,
+/// Option<InboxId>)` pair [`crate::api_keys::scope_params`] already reduces a `KeyScope` to, and
+/// the token's own pair must equal it exactly — `Organization` is `(None, None)`, a real
+/// checkable value, not "no coordinate".
+fn check_key_scope(
+    token_pod: Option<PodId>,
+    token_inbox: Option<&InboxId>,
+    pinned: &KeyScope,
+) -> Result<(), PageTokenError> {
+    let (pinned_pod, pinned_inbox): (Option<PodId>, Option<&InboxId>) = match pinned {
+        KeyScope::Organization => (None, None),
+        KeyScope::Pod(p) => (Some(*p), None),
+        KeyScope::Inbox(i) => (None, Some(i)),
+    };
+    // The inbox half is compared with `eq_normalized`, never `==` — fixture 18: two differently
+    // cased renderings of the same address must agree.
+    let inbox_matches = match (token_inbox, pinned_inbox) {
+        (Some(a), Some(b)) => a.eq_normalized(b),
+        (None, None) => true,
+        _ => false,
+    };
+    if token_pod == pinned_pod && inbox_matches {
+        Ok(())
+    } else {
+        Err(PageTokenError::WrongScope)
+    }
+}
+
+/// The keyset cursor for an api-keys page: `{created_at, api_key_id, pod_id?, inbox_id?}`. Unlike
+/// [`MessageCursor`]/[`ThreadCursor`]/[`InboxCursor`], `pod_id`/`inbox_id` are each optional on
+/// the cursor itself and are omitted from the encoded token when absent (this crate's own
+/// optionals-are-omitted convention, not merely the wire's) — together they record the **mount**
+/// a page was walked at (`Organization` is `(None, None)`), not an extra tiebreak coordinate:
+/// `(created_at, api_key_id)` is already a total order, because `api_key_id` is the table's own
+/// primary key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyCursor {
+    pub created_at: DateTime<Utc>,
+    pub api_key_id: ApiKeyId,
+    pub pod_id: Option<PodId>,
+    pub inbox_id: Option<InboxId>,
+}
+
+impl ApiKeyCursor {
+    pub fn encode(&self) -> String {
+        let mut cursor = Cursor::new()
+            .with("created_at", encode_timestamp(self.created_at))
+            .with("api_key_id", self.api_key_id.as_str());
+        if let Some(p) = self.pod_id {
+            cursor = cursor.with("pod_id", p.to_string());
+        }
+        if let Some(i) = &self.inbox_id {
+            cursor = cursor.with("inbox_id", i.as_str());
+        }
+        cursor.encode()
+    }
+
+    /// Decode and validate against the mount this request is pinned to. `pinned` is the
+    /// [`KeyScope`] this call is mounted at — not the individual key's own scope, see
+    /// [`check_key_scope`].
+    pub fn decode(token: &str, pinned: &KeyScope) -> Result<Self, PageTokenError> {
+        let cursor = Cursor::decode(token)?;
+        let created_at_raw = cursor
+            .get_str("created_at")
+            .ok_or(PageTokenError::MissingField("created_at"))?;
+        let api_key_id_raw = cursor
+            .get_str("api_key_id")
+            .ok_or(PageTokenError::MissingField("api_key_id"))?;
+        let created_at = decode_timestamp(created_at_raw, "created_at")?;
+        let api_key_id = ApiKeyId::new(api_key_id_raw);
+        // `api_keys.api_key_id` is a `uuid` column, not `text` — unlike `message_id`/`thread_id`'s
+        // own columns — so the value this crate binds into the keyset comparison has to be a
+        // `Uuid`, and only the *canonical* rendering of one (see `exact_api_key_uuid`'s own long
+        // comment in api_keys.rs for why an alternate rendering must not resolve). Validating that
+        // here, at decode, rejects a malformed value uniformly as `WrongType` rather than leaving
+        // `api_keys::list` to reason about a cursor that silently binds SQL NULL into its keyset
+        // predicate. A NUL byte fails this the same way it fails `ThreadCursor`'s `thread_id`
+        // parse — no separate `has_forbidden_byte` check is needed for this field.
+        if exact_api_key_uuid(&api_key_id).is_none() {
+            return Err(PageTokenError::WrongType("api_key_id"));
+        }
+        let pod_id = match cursor.get_str("pod_id") {
+            Some(raw) => Some(
+                raw.parse::<uuid::Uuid>()
+                    .map(PodId::from)
+                    .map_err(|_| PageTokenError::WrongType("pod_id"))?,
+            ),
+            None => None,
+        };
+        let inbox_id = match cursor.get_str("inbox_id") {
+            Some(raw) => {
+                // Sibling of the identical check in `InboxCursor::decode`: the only free-text
+                // field either cursor carries.
+                if has_forbidden_byte(raw) {
+                    return Err(PageTokenError::ForbiddenByte("inbox_id"));
+                }
+                Some(InboxId::new(raw).normalized())
+            }
+            None => None,
+        };
+        check_key_scope(pod_id, inbox_id.as_ref(), pinned)?;
+        Ok(Self { created_at, api_key_id, pod_id, inbox_id })
     }
 }
 
@@ -401,5 +610,240 @@ mod tests {
 
         let other = InboxId::new("someone-else@agentmail.to");
         assert_eq!(ThreadCursor::decode(&token, Some(&other)), Err(PageTokenError::WrongScope));
+    }
+
+    // ---- PodCursor -----------------------------------------------------------------------
+
+    #[test]
+    fn pod_cursor_round_trips() {
+        let c = PodCursor { created_at: ts(), pod_id: PodId::new_random() };
+        let token = c.encode();
+        assert_eq!(PodCursor::decode(&token).unwrap(), c);
+    }
+
+    #[test]
+    fn pod_cursor_rejects_a_non_uuid_pod_id() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .with("pod_id", "not-a-uuid")
+            .encode();
+        assert_eq!(PodCursor::decode(&token), Err(PageTokenError::WrongType("pod_id")));
+    }
+
+    /// A NUL byte in `pod_id` has no dedicated `ForbiddenByte` check — see the struct doc — so
+    /// this pins that it is rejected as `WrongType` (via `Uuid`'s own parse) instead, not silently
+    /// accepted or reaching a query.
+    #[test]
+    fn pod_cursor_rejects_a_nul_byte_in_pod_id_as_wrong_type_not_forbidden_byte() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .with("pod_id", "abc\0def")
+            .encode();
+        assert_eq!(PodCursor::decode(&token), Err(PageTokenError::WrongType("pod_id")));
+    }
+
+    #[test]
+    fn pod_cursor_rejects_missing_fields() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .encode();
+        assert_eq!(PodCursor::decode(&token), Err(PageTokenError::MissingField("pod_id")));
+    }
+
+    // ---- InboxCursor ----------------------------------------------------------------------
+
+    #[test]
+    fn inbox_cursor_round_trips_and_accepts_a_matching_pinned_pod() {
+        let pod_id = PodId::new_random();
+        let c = InboxCursor {
+            created_at: ts(),
+            inbox_id: InboxId::new("amk-probe@agentmail.to"),
+            pod_id,
+        };
+        let token = c.encode();
+        assert_eq!(InboxCursor::decode(&token, None).unwrap(), c);
+        assert_eq!(InboxCursor::decode(&token, Some(pod_id)).unwrap(), c);
+    }
+
+    #[test]
+    fn inbox_cursor_rejects_a_foreign_pod_scope() {
+        let c = InboxCursor {
+            created_at: ts(),
+            inbox_id: InboxId::new("mine@agentmail.to"),
+            pod_id: PodId::new_random(),
+        };
+        let token = c.encode();
+        let other_pod = PodId::new_random();
+        assert_eq!(InboxCursor::decode(&token, Some(other_pod)), Err(PageTokenError::WrongScope));
+    }
+
+    #[test]
+    fn inbox_cursor_rejects_a_nul_byte_in_inbox_id() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .with("inbox_id", "abc\0def")
+            .with("pod_id", PodId::new_random().to_string())
+            .encode();
+        assert_eq!(
+            InboxCursor::decode(&token, None),
+            Err(PageTokenError::ForbiddenByte("inbox_id"))
+        );
+    }
+
+    #[test]
+    fn inbox_cursor_decode_normalizes_the_inbox_id() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .with("inbox_id", "MiXeD-Case@Example.Test")
+            .with("pod_id", PodId::new_random().to_string())
+            .encode();
+        let decoded = InboxCursor::decode(&token, None).unwrap();
+        assert_eq!(decoded.inbox_id.as_str(), "mixed-case@example.test");
+    }
+
+    #[test]
+    fn inbox_cursor_rejects_a_non_uuid_pod_id() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .with("inbox_id", "a@b.c")
+            .with("pod_id", "not-a-uuid")
+            .encode();
+        assert_eq!(InboxCursor::decode(&token, None), Err(PageTokenError::WrongType("pod_id")));
+    }
+
+    // ---- ApiKeyCursor ---------------------------------------------------------------------
+
+    fn valid_api_key_id() -> ApiKeyId {
+        ApiKeyId::new(uuid::Uuid::new_v4().to_string())
+    }
+
+    #[test]
+    fn api_key_cursor_round_trips_at_the_organization_mount() {
+        let c = ApiKeyCursor {
+            created_at: ts(),
+            api_key_id: valid_api_key_id(),
+            pod_id: None,
+            inbox_id: None,
+        };
+        let token = c.encode();
+        assert_eq!(ApiKeyCursor::decode(&token, &KeyScope::Organization).unwrap(), c);
+    }
+
+    #[test]
+    fn api_key_cursor_round_trips_at_the_pod_mount() {
+        let pod_id = PodId::new_random();
+        let c = ApiKeyCursor {
+            created_at: ts(),
+            api_key_id: valid_api_key_id(),
+            pod_id: Some(pod_id),
+            inbox_id: None,
+        };
+        let token = c.encode();
+        assert_eq!(ApiKeyCursor::decode(&token, &KeyScope::Pod(pod_id)).unwrap(), c);
+    }
+
+    #[test]
+    fn api_key_cursor_round_trips_at_the_inbox_mount_and_normalizes_it() {
+        let inbox_id = InboxId::new("Mixed-Case@Example.Test");
+        let c = ApiKeyCursor {
+            created_at: ts(),
+            api_key_id: valid_api_key_id(),
+            pod_id: None,
+            inbox_id: Some(inbox_id.clone()),
+        };
+        let token = c.encode();
+        let decoded = ApiKeyCursor::decode(&token, &KeyScope::Inbox(inbox_id)).unwrap();
+        assert_eq!(decoded.inbox_id.as_ref().unwrap().as_str(), "mixed-case@example.test");
+    }
+
+    /// The mount is not the key's own scope (see `check_key_scope`'s doc): a token minted at the
+    /// organization mount — `(None, None)` — must not resolve against a pod-pinned request, even
+    /// though `Organization` also *lists* pod-scoped keys.
+    #[test]
+    fn api_key_cursor_rejects_a_mismatched_mount() {
+        let c = ApiKeyCursor {
+            created_at: ts(),
+            api_key_id: valid_api_key_id(),
+            pod_id: None,
+            inbox_id: None,
+        };
+        let token = c.encode();
+        assert_eq!(
+            ApiKeyCursor::decode(&token, &KeyScope::Pod(PodId::new_random())),
+            Err(PageTokenError::WrongScope)
+        );
+    }
+
+    #[test]
+    fn api_key_cursor_rejects_a_pod_token_replayed_against_a_different_pod() {
+        let pod_a = PodId::new_random();
+        let pod_b = PodId::new_random();
+        let c = ApiKeyCursor {
+            created_at: ts(),
+            api_key_id: valid_api_key_id(),
+            pod_id: Some(pod_a),
+            inbox_id: None,
+        };
+        let token = c.encode();
+        assert_eq!(
+            ApiKeyCursor::decode(&token, &KeyScope::Pod(pod_b)),
+            Err(PageTokenError::WrongScope)
+        );
+    }
+
+    #[test]
+    fn api_key_cursor_rejects_a_nul_byte_in_inbox_id() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .with("api_key_id", valid_api_key_id().as_str())
+            .with("inbox_id", "abc\0def")
+            .encode();
+        assert_eq!(
+            ApiKeyCursor::decode(&token, &KeyScope::Organization),
+            Err(PageTokenError::ForbiddenByte("inbox_id"))
+        );
+    }
+
+    /// `api_key_id` binds into a `uuid` column (see the struct's own doc), so a non-UUID or
+    /// non-canonical rendering — including a NUL byte, which cannot appear in valid UUID text at
+    /// all — must be `WrongType`, never silently accepted only to bind `NULL` at query time.
+    #[test]
+    fn api_key_cursor_rejects_a_non_uuid_api_key_id() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .with("api_key_id", "not-a-uuid")
+            .encode();
+        assert_eq!(
+            ApiKeyCursor::decode(&token, &KeyScope::Organization),
+            Err(PageTokenError::WrongType("api_key_id"))
+        );
+    }
+
+    #[test]
+    fn api_key_cursor_rejects_a_non_canonical_rendering_of_api_key_id() {
+        let id = uuid::Uuid::new_v4();
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            // Uppercase is a valid UUID parse but not the canonical rendering this crate ever
+            // issues — see `exact_api_key_uuid`'s own doc for why only the canonical form resolves.
+            .with("api_key_id", id.to_string().to_uppercase())
+            .encode();
+        assert_eq!(
+            ApiKeyCursor::decode(&token, &KeyScope::Organization),
+            Err(PageTokenError::WrongType("api_key_id"))
+        );
+    }
+
+    #[test]
+    fn api_key_cursor_rejects_a_non_uuid_pod_id() {
+        let token = Cursor::new()
+            .with("created_at", "2026-08-15T05:44:16.768Z")
+            .with("api_key_id", valid_api_key_id().as_str())
+            .with("pod_id", "not-a-uuid")
+            .encode();
+        assert_eq!(
+            ApiKeyCursor::decode(&token, &KeyScope::Organization),
+            Err(PageTokenError::WrongType("pod_id"))
+        );
     }
 }

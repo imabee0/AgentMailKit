@@ -18,6 +18,14 @@ pub enum StoreError {
     #[error("inbox username already exists")]
     InboxAlreadyExists,
 
+    /// `pods::delete` was refused because a row still references the pod (an inbox, thread,
+    /// message or api-key foreign key naming it — `pods::is_pod_reference_violation` matches the
+    /// exact constraint name, never a bare SQLSTATE). Fixture 22: `cannot_delete` / HTTP 409, and
+    /// the refusal is total — neither the pod nor the referencing row is touched. This crate
+    /// exposes only the distinguishable variant; mapping it to a wire status is amk-http's job.
+    #[error("pod is not empty: a row still references it")]
+    PodNotEmpty,
+
     /// A page token failed validation before any query ran.
     #[error("invalid page token: {0}")]
     InvalidPageToken(#[from] PageTokenError),

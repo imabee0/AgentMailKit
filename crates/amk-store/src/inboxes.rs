@@ -12,7 +12,8 @@ use sqlx::types::Json;
 use sqlx::{PgPool, Row};
 use std::collections::BTreeMap;
 
-use crate::error::StoreError;
+use crate::error::{PageTokenError, StoreError};
+use crate::pagination::{InboxCursor, Page, SortDirection};
 
 /// Metadata is exposed through both its keys and its values — measured against the dev database,
 /// `'{"a\0b":"v"}'::jsonb` and `'{"k":"a\0b"}'::jsonb` both raise `54000 null character not
@@ -179,26 +180,113 @@ pub async fn get(
     row.as_ref().map(row_to_inbox).transpose()
 }
 
-/// List inboxes in an organization, optionally narrowed to one pod.
+/// One list request, already resolved to a concrete direction and a decoded (and scope-validated)
+/// cursor — same role as [`crate::messages::ListMessagesQuery`].
+pub struct ListInboxesQuery {
+    pub limit: u64,
+    pub direction: SortDirection,
+    pub cursor: Option<InboxCursor>,
+}
+
+const LIST_ASC_SQL: &str =
+    "SELECT inbox_id, organization_id, pod_id, client_id, display_name, metadata, created_at, updated_at \
+     FROM inboxes \
+     WHERE organization_id = $1 \
+       AND ($2::uuid IS NULL OR pod_id = $2) \
+       AND ($3::timestamptz IS NULL OR (created_at, inbox_id) > ($3, $4)) \
+     ORDER BY created_at ASC, inbox_id ASC \
+     LIMIT $5";
+
+const LIST_DESC_SQL: &str =
+    "SELECT inbox_id, organization_id, pod_id, client_id, display_name, metadata, created_at, updated_at \
+     FROM inboxes \
+     WHERE organization_id = $1 \
+       AND ($2::uuid IS NULL OR pod_id = $2) \
+       AND ($3::timestamptz IS NULL OR (created_at, inbox_id) < ($3, $4)) \
+     ORDER BY created_at DESC, inbox_id DESC \
+     LIMIT $5";
+
+/// List inboxes in an organization, optionally narrowed to one pod, paginated. `pod_id` is this
+/// query's own scope pin — see [`get`]'s doc for its meaning — and is what
+/// [`InboxCursor::decode`]'s `pinned` argument must have been checked against before the cursor
+/// reached here.
 pub async fn list(
     pool: &PgPool,
     organization_id: &OrganizationId,
     pod_id: Option<PodId>,
-) -> Result<Vec<Inbox>, StoreError> {
-    let rows = sqlx::query(
-        "SELECT inbox_id, organization_id, pod_id, client_id, display_name, metadata, created_at, updated_at \
-         FROM inboxes \
-         WHERE organization_id = $1 AND ($2::uuid IS NULL OR pod_id = $2) \
-         ORDER BY created_at ASC, inbox_id ASC",
-    )
-    .bind(organization_id.as_str())
-    .bind(pod_id.map(|p| p.0))
-    .fetch_all(pool)
-    .await?;
-    rows.iter().map(row_to_inbox).collect()
+    query: ListInboxesQuery,
+) -> Result<Page<Inbox>, StoreError> {
+    // See the identical guard in `messages::list`/`threads::list`: a zero-row page has no row to
+    // anchor a cursor on, so return it directly rather than run a query at all.
+    if query.limit == 0 {
+        return Ok(Page { items: Vec::new(), next: None });
+    }
+    // Sibling of the identical guard in `messages::list`/`threads::list`: `InboxCursor`'s fields
+    // are `pub`, so nothing at the type level guarantees a cursor reaching this function went
+    // through `InboxCursor::decode` first — defense in depth for the one free-text field it
+    // carries, ahead of any query.
+    if let Some(c) = &query.cursor {
+        if has_forbidden_byte(c.inbox_id.as_str()) {
+            return Err(StoreError::InvalidPageToken(PageTokenError::ForbiddenByte(
+                "cursor.inbox_id",
+            )));
+        }
+    }
+    let sql = match query.direction {
+        SortDirection::Ascending => LIST_ASC_SQL,
+        SortDirection::Descending => LIST_DESC_SQL,
+    };
+    let (cursor_ts, cursor_id) = match &query.cursor {
+        Some(c) => (Some(c.created_at), Some(c.inbox_id.as_str().to_owned())),
+        None => (None, None),
+    };
+    // See the identical comment in `messages::list`: `query.limit` is an unclamped `u64`, so
+    // `limit: u64::MAX` or `limit: i64::MAX as u64` must not overflow or wrap `fetch_limit`.
+    let fetch_limit = query.limit.saturating_add(1).min(i64::MAX as u64) as i64;
+
+    let rows = sqlx::query(sql)
+        .bind(organization_id.as_str())
+        .bind(pod_id.map(|p| p.0))
+        .bind(cursor_ts)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(pool)
+        .await?;
+
+    let has_more = rows.len() as u64 > query.limit;
+    let items: Vec<Inbox> = rows
+        .iter()
+        .take(query.limit as usize)
+        .map(row_to_inbox)
+        .collect::<Result<_, _>>()?;
+
+    let next = if has_more {
+        let last = items
+            .last()
+            .expect("has_more implies at least one item when limit > 0");
+        Some(
+            InboxCursor {
+                created_at: last.created_at.into_inner(),
+                inbox_id: last.inbox_id.clone(),
+                pod_id: last.pod_id,
+            }
+            .encode(),
+        )
+    } else {
+        None
+    };
+
+    Ok(Page { items, next })
 }
 
 /// See [`get`]'s doc for `pod_id`'s meaning.
+///
+/// Unconditional, per fixture 22 (`DELETE /v0/inboxes/{inbox_id}` returned 202 with no emptiness
+/// precondition of any kind): migration 0008 cascades every FK referencing `inboxes`
+/// (`threads`/`messages`/`api_keys`, plus `messages_thread_id_fkey`), so deleting an inbox that
+/// owns threads, messages and an inbox-scoped api key removes all of them in one statement.
+/// Contrast [`crate::pods::delete`], which refuses instead — see that function's own doc for why
+/// the two are deliberately opposite answers.
 pub async fn delete(
     pool: &PgPool,
     organization_id: &OrganizationId,
