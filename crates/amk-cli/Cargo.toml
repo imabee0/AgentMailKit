@@ -1,0 +1,49 @@
+[package]
+name = "amk-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The `amk` (init/migrate/doctor) and `amkd` (--role api|smtpd|worker|all) binaries. See .claude/contracts/amk-bins.md."
+
+[[bin]]
+name = "amk"
+path = "src/bin/amk.rs"
+
+[[bin]]
+name = "amkd"
+path = "src/bin/amkd.rs"
+
+[dependencies]
+amk-types = { path = "../amk-types" }
+amk-store = { path = "../amk-store" }
+amk-http = { path = "../amk-http" }
+# `PgConnectOptions` for `amk doctor`'s own parse-before-connect (see the dispatch contract's own
+# reasoning: `PgPoolOptions::connect` defers the parse, so a malformed DSN and an unreachable
+# database are indistinguishable without doing this parse ourselves), and `sqlx::Error`'s variants
+# for `redact.rs`'s classification. `.workspace = true` inherits the exact pin and feature set
+# every other crate in this workspace already uses — no new feature, no new dependency.
+sqlx.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+# `amkd --role api` binds a listener and calls `axum::serve` directly — `amk-http` hands back a
+# bare `axum::Router`, and binding/serving it needs the crate that type comes from. Already a
+# workspace-pinned dependency of `amk-http`; reused here, not added.
+axum.workspace = true
+thiserror.workspace = true
+
+# Deliberately absent, per the dispatch contract's "no new dependency" decision:
+#   clap             — the parser (`src/args.rs`) is hand-written: four subcommands and one flag.
+#   tracing / anyhow — not workspace-pinned; this crate's own error types use `thiserror`, already
+#                       pinned, matching every other crate's own-error-type idiom.
+#   mail-parser / mail-auth / mail-send / mail-builder / smtp-proto — stalwart-labs crates belong
+#                       to amk-ingest/amk-outbound, converted at that boundary. Nothing here has any
+#                       legitimate use for one.
+
+[dev-dependencies]
+# Drives `amk_http::router` in-process, exactly as `amk-http`'s own test suite does (its own
+# `lib.rs` doc: "Tests drive the router in-process via `tower::ServiceExt::oneshot`") — reusing
+# the established pattern and the already-pinned dependency, not introducing a new one.
+tower.workspace = true
+serde_json.workspace = true
