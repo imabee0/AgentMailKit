@@ -1552,6 +1552,40 @@ async fn api_keys_list_a_pod_a_cursor_is_rejected_at_pod_b() {
     );
 }
 
+/// `api_keys::list`'s own defense-in-depth check on `query.cursor` — distinct from
+/// `ApiKeyCursor::decode`'s identical-looking check, and tested independently of it for the same
+/// reason `inboxes_list_rejects_a_nul_byte_in_a_hand_built_cursor` is: `ApiKeyCursor`'s fields are
+/// `pub`, so a hand-built cursor bypasses `decode` entirely.
+#[tokio::test]
+async fn api_keys_list_rejects_a_nul_byte_in_a_hand_built_cursor() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+
+    let hostile = ApiKeyCursor {
+        created_at: chrono::Utc::now(),
+        api_key_id: ApiKeyId::new(Uuid::new_v4().to_string()),
+        pod_id: None,
+        inbox_id: Some(InboxId::new("abc\0def@x")),
+    };
+    let result = api_keys::list(
+        &pool,
+        &org,
+        &KeyScope::Organization,
+        ListApiKeysQuery { limit: 10, direction: SortDirection::Ascending, cursor: Some(hostile) },
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::InvalidPageToken(PageTokenError::ForbiddenByte("cursor.inbox_id")))
+        ),
+        "a hand-built cursor with a NUL-bearing inbox_id must be a typed error, not an empty page \
+         or a raw database error: {result:?}"
+    );
+}
+
 // ---- a NUL byte in `authenticate`'s presented credential ------------------------------------
 //
 // A different door from every test above: `candidate_prefix` slices the caller's raw credential

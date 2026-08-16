@@ -1785,3 +1785,37 @@ async fn inboxes_list_a_pod_a_cursor_is_rejected_at_pod_b() {
 
     assert_eq!(InboxCursor::decode(&token, Some(pod_b)), Err(PageTokenError::WrongScope));
 }
+
+/// `inboxes::list`'s own defense-in-depth check on `query.cursor` — distinct from
+/// `InboxCursor::decode`'s identical-looking check, and tested independently of it for the same
+/// reason `messages::list_rejects_a_nul_byte_in_a_hand_built_cursor` is: `InboxCursor`'s fields
+/// are `pub`, so a hand-built cursor bypasses `decode` entirely and nothing at the type level
+/// guarantees `list` only ever receives a decoded one.
+#[tokio::test]
+async fn inboxes_list_rejects_a_nul_byte_in_a_hand_built_cursor() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let hostile = InboxCursor {
+        created_at: chrono::Utc::now(),
+        inbox_id: InboxId::new("abc\0def@x"),
+        pod_id: pod,
+    };
+    let result = inboxes::list(
+        &pool,
+        &org,
+        None,
+        ListInboxesQuery { limit: 10, direction: SortDirection::Ascending, cursor: Some(hostile) },
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(StoreError::InvalidPageToken(PageTokenError::ForbiddenByte("cursor.inbox_id")))
+        ),
+        "a hand-built cursor with a NUL-bearing inbox_id must be a typed error, not an empty page \
+         or a raw database error: {result:?}"
+    );
+}
