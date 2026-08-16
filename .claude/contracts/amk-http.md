@@ -270,18 +270,64 @@ down, end state re-verified. Two of the answers contradict `openapi.json`.
   plural path — it is "the organization for the authenticated API key". Every other plural path in
   these 25 (`/v0/pods`, `/v0/inboxes`, `/v0/api-keys`) *is* a list envelope, so the pattern-match is
   wrong here specifically. **Call `amk_store::organizations::get` with the resolved identity's
-  `organization_id`. Never `organizations::list`** — that function takes no credential and returns
-  every organization in the deployment; reaching for it here is a cross-tenant disclosure, not a
-  shape bug.
+  `organization_id`.** `organizations::list` **no longer exists** — it took no credential and
+  returned every organization in the deployment, so reaching for it here would have been a
+  cross-tenant disclosure rather than a shape bug. `.claude/contracts/amk-store-http-prereqs.md`
+  decision 5 deleted it: a function that does not exist cannot be reached for, which is a stronger
+  guarantee than the prose prohibition that used to stand here.
+- **`POST /v0/inboxes` with an empty body must still produce an inbox** (fixture 23). Three
+  defaults fire, and only one of them is ours to copy:
+  - **The generated local part is adjective + noun + 3 digits, lowercase, no separator**
+    (`cleananimal661`). One sample, so the *shape* is evidence and the word lists are not —
+    reproduce the shape, the vocabulary is ours.
+  - **The domain is configuration, `[ASSUMED]`, and must fail closed when unset.** They default to
+    `agentmail.to`; AgentMailKit serves `appsynergy.io`, `imabee.com`, `imabee.ca`, `imabee.cloud`.
+    A deployment with no configured primary domain **STOPs** — it does not guess.
+  - **`display_name` defaults to a configured product name**, likewise `[ASSUMED]`. Theirs is
+    `"AgentMail"`; ours is the operator's, not theirs.
+- **The org mount's default pod must be *constructible*, not looked up by a field that does not
+  exist.** `POST /v0/inboxes` at the org mount resolves the pod whose `pod_id` equals the
+  `organization_id`. `amk init` mints the organization id as a UUID and creates the default pod
+  carrying that same UUID, so this crate parses `organization_id` as a `Uuid`, builds the `PodId`
+  from it, and **confirms it with `pods::get`**. A parse failure or a missing pod is an *internal
+  error* — never an invented `default_pod_id` field on `Organization`, and never a "pick the oldest
+  pod" fallback. Rule 3: if the shape is not in `amk-types` or a fixture, it does not get added.
+- **`DELETE /v0/api-keys/{api_key_id}` → `204`** (fixture 23). With pods at `204` and inboxes at
+  `202`, `openapi.json` is now **0 for 3** on DELETE statuses, all three documented `200`. Treat
+  every remaining documented DELETE status in the spec as unverified.
+- **There is no `GET /v0/api-keys/{api_key_id}`** — the live 404 body is *"Route not found"*, the
+  fallback, not a resource miss. The spec has list and delete and no get-by-id.
+  `amk_store::api_keys::get` therefore has **no wire route** in this dispatch; it exists for
+  `authenticate` and internal use. Do not add one.
 - **`billing_id`, `billing_type` and `billing_subscription_id` are omitted deliberately.**
   `type_organizations:Organization` carries all three. This is the no-billing-surface rule, the same
   decision already applied to `upgrade_url`, and the conformance diff must be told rather than
   "fixed". `authentication_id`/`authentication_type` are likewise absent from `amk_types`; both are
   optional and their omission is wire-legal, recorded here for whoever revisits `amk-types`.
 
-**`PATCH` on inboxes depends on work that is not merged yet.** `amk_store::inboxes` has no
-`update`; `.claude/contracts/amk-store-inbox-update.md` adds it, and this dispatch does not start
-until that is on `main`. The wire types already exist and are frozen —
+**Every `amk-store` dependency of these 25 operations is now on `main`.** Two prerequisite
+dispatches landed after this contract was first written, and what they changed is listed here so
+this contract describes the crate as it actually is:
+
+- `.claude/contracts/amk-store-inbox-update.md` (merged `3d3e1c9`) added `inboxes::update` and
+  pinned `inboxes::get`/`delete` to a pod, which they previously did not do — a cross-pod read and
+  a cross-pod delete. All three take `pod_id: Option<PodId>`; `None` is the org mount.
+- `.claude/contracts/amk-store-http-prereqs.md` (merged `8a14e63`) made `pods::list`,
+  `inboxes::list` and `api_keys::list` return `Page<T>` with a query struct, so the six paginated
+  GETs among these 25 have a persistence path; added `StoreError::PodNotEmpty`; cascaded inbox
+  deletion; corrected the minted-key constants; and deleted `organizations::list`.
+
+**Turning `Page<T>` into the wire envelope is this crate's job.** `amk-store` returns
+`Page { items, next }` and deliberately builds no envelope; `amk_types::page`'s macro produces
+`{count, limit?, next_page_token?, <resource>: []}`, and `next_page_token` is **omitted** on the
+last page, never `null` and never `""`. Resolving `ascending: Option<bool>` into a
+`SortDirection`, and `limit: Option<u64>` into a concrete limit, is likewise yours — the store
+takes resolved values.
+
+**`StoreError::PodNotEmpty` maps to `ErrorCode::CannotDelete`.** Do not re-derive its status;
+`ErrorCode::status()` returns `409` (commit `2318e9c`).
+
+The wire types already exist and are frozen —
 `amk_types::inbox::UpdateInboxRequest` with `MetadataUpdate`'s three states (absent / `null` /
 merge). **This crate owns the two validation rules the store deliberately does not**: an empty
 `metadata` object is rejected, and each update must carry at least one of `display_name` or

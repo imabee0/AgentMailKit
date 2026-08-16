@@ -12,9 +12,14 @@
 //! well-formed, never what it mints. [`PREFIX_TAG`] + [`SECRET_LEN`] below now match fixture 23
 //! exactly. A minted key never begins `am_eu_` — trivially true of a constant `am_us_` prefix,
 //! and asserted anyway (`a_minted_key_never_begins_am_eu`) so that changing the tag later cannot
-//! silently break it; the `am_eu_`/EU-routing note in the dispatch contract is `[UNVERIFIED]`
-//! (its source is not vendored under `reference/`), but never minting it is fail-closed and costs
-//! nothing regardless.
+//! silently break it. That assertion rests on two claims of different strength, and the
+//! distinction is worth keeping: the EU host **exists** — `reference/openapi.json`'s `servers`
+//! array carries `{"url":"https://api.agentmail.eu","description":"eu-prod"}`, vendored and
+//! hash-pinned, so `[SPEC:openapi]`. That an `am_eu_`-prefixed key **routes** a client there is
+//! `[UNVERIFIED]`: the plan cites the node SDK (`environments.ts`, `Client.ts:80`), read from a
+//! clone that was never vendored under `reference/`, so nothing in this repository can re-check
+//! it. Never minting the prefix is fail-closed under either reading and costs nothing, which is
+//! why the gap is recorded rather than closed.
 //!
 //! The random portion is 32 bytes of `rand::rngs::OsRng` output, hex-encoded lowercase by hand
 //! (`write!(s, "{b:02x}")`) rather than through a dependency — 256 bits exactly, with no
@@ -72,6 +77,14 @@ const SECRET_LEN: usize = 64;
 const VISIBLE_LEN: usize = 6;
 /// How many times [`create`] redraws a secret after a `prefix` collision on `api_keys_prefix_idx`
 /// before giving up and surfacing the underlying database error unmapped — see the module doc.
+///
+/// **Accepted, named gap: this constant's exact value is not pinned by a test.** Lowering it to
+/// `1` passes the whole suite; only `0` is caught, and incidentally (the loop never runs, so the
+/// `expect` below fires on essentially every `create`). Forcing a real collision through `create`
+/// would need an injectable RNG seam, and the failure mode that seam would guard is "redraws once
+/// instead of four times" at a per-mint collision probability with thirteen zeros after the
+/// decimal point. Recorded here, beside the constant, rather than fixed — a reader changing this
+/// number is the person who needs to know no test will stop them.
 const MINT_ATTEMPTS: u32 = 4;
 
 /// Which of the three mounts (`/v0/api-keys`, `/v0/pods/{pod_id}/api-keys`,

@@ -11,6 +11,11 @@
 # forgotten.
 .amk-scope
 .amk-task.md
+# The dispatch brief. Separate from .amk-task.md because it must NOT be written to a worktree's
+# CLAUDE.md: that path is the tracked project CLAUDE.md, so writing the brief there clobbers the
+# project rules for the very agent that needs them and leaves the worktree dirty on a tracked file.
+# Both happened on the store-http-prereqs dispatch.
+.amk-brief.md
 
 # Throwaway venv for the SDK phase gates; see conformance/requirements-gate.txt
 .venv-gate/

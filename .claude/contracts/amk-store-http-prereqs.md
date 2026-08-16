@@ -431,8 +431,14 @@ unless it says otherwise:
   — the test that fails if the primary-key tiebreak is dropped.
 - A cursor whose scope coordinate disagrees with the request's → `WrongScope`, asserted on the
   variant, not `is_err()`. For `InboxCursor`, specifically a pod-A token replayed against pod B.
-- A cursor carrying a NUL in `organization_id`, and (for `InboxCursor`) in `inbox_id` →
-  `ForbiddenByte(<that field>)`.
+- A cursor carrying a NUL in `inbox_id` → `ForbiddenByte("inbox_id")` — `InboxCursor` and
+  `ApiKeyCursor` only; `PodCursor` has no free-text field and needs no such test.
+  **CORRECTED after the dispatch returned.** This bullet read "a NUL in `organization_id`, and
+  (for `InboxCursor`) in `inbox_id`" — naming a field decision 1 of this same contract explicitly
+  forbids any cursor from carrying. The cursor decision was rewritten after the pre-dispatch review
+  and this list, which is derived from it, was not re-read against it. The implementer was right not
+  to invent the field. **The rule that follows: when a decision changes during contract revision,
+  every list derived from it is re-read, not assumed to still fit.**
 - A mixed-case `inbox_id` in an `InboxCursor` resolves the same inbox (fixture 18).
 - `api_keys::list` at each of the three `KeyScope` mounts paginates within that mount only — a
   pod-scoped walk never returns another pod's key on any page, including the last.
