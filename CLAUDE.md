@@ -43,16 +43,12 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0**, 352 tests green on `main`. `amk-types`, `amk-core` and `amk-store` merged
-and mutation-verified; Register C3 applied to `amk-core::threading`.
+Current phase: **P0**, 405 tests green on `main`. `amk-types`, `amk-core` and `amk-store` merged
+and mutation-verified across five store dispatches; Register C3 applied to `amk-core::threading`.
 
-**Next: `.claude/contracts/amk-store-http-prereqs.md`, then `.claude/contracts/amk-http.md`.**
-Checking the `amk-http` contract against `amk-store`'s real surface found four gaps for the third
-time: six of its 25 operations are paginated GETs behind `list` functions returning bare `Vec<T>`;
-`pods::delete` cannot express fixture 22's `cannot_delete`; an inbox holding an inbox-scoped api key
-cannot be deleted at all (`23503` on `api_keys_inbox_id_fkey` — reachable in P0, no mail required);
-and fixture 23 contradicts `SECRET_LEN`/`VISIBLE_LEN`. `amk-http` is 25 operations, scope generated
-from `openapi.json` and asserted total against all 130.
+**Next: `.claude/contracts/amk-http.md`** — 25 operations, scope generated from `openapi.json` and
+asserted total against all 130. Every `amk-store` dependency is now on `main`; that contract
+describes the crate as it actually is, so read it rather than re-deriving the store surface.
 
 **A mutating reviewer works on a private copy, never the dispatch worktree, and never concurrently
 with a reading one.** A test lens mutating in place while two lenses read the same tree produced a
@@ -72,7 +68,9 @@ through a sibling of the function its regression test guarded. Twenty *deletion*
 reported no survivors while a live one sat in `messages::insert`: widening `in_reply_to`'s guard to
 `is_some()` rejects every threaded reply and the suite stayed green, because only hostile-value
 tests touched that field. Delete *and* widen, before claiming a gate; a guard with no clean-path
-test is unpinned in the direction that breaks real traffic.
+test is unpinned in the direction that breaks real traffic. **And a test whose seed data is random
+is a test whose failure is random**: three keyset-tiebreak tests seeded rows with random ids, so a
+dropped `ORDER BY` tiebreak surfaced in about 3 runs of 10. Seed the order the assertion depends on.
 
 Still deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
 
