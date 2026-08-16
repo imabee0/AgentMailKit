@@ -1566,6 +1566,87 @@ async fn api_keys_list_pod_scoped_walk_never_returns_a_sibling_pods_key_on_any_p
     assert_eq!(seen.into_iter().collect::<std::collections::BTreeSet<_>>(), pod_a_keys);
 }
 
+/// Sibling of [`api_keys_list_pod_scoped_walk_never_returns_a_sibling_pods_key_on_any_page`] for
+/// the inbox mount. `listing_at_one_inbox_never_returns_a_sibling_inboxs_keys` pins the same
+/// `WHERE inbox_id = $n` fragment but only ever fetches one page (1 row each side, `no_cursor`),
+/// so it cannot distinguish "correctly excluded" from "never fetched" once a cursor is minted and
+/// the scope pin and the keyset predicate are evaluated together on a later page.
+#[tokio::test]
+async fn api_keys_list_inbox_scoped_walk_never_returns_a_sibling_inboxs_key_on_any_page() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let inbox_b = support::seed_inbox(&pool, &org, pod, "sibling").await;
+    let mut inbox_a_keys = std::collections::BTreeSet::new();
+    for i in 0..3 {
+        let created = api_keys::create(
+            &pool,
+            NewApiKey {
+                organization_id: org.clone(),
+                pod_id: None,
+                inbox_id: Some(inbox_a.clone()),
+                name: format!("inbox-a-{i}"),
+                permissions: None,
+            },
+        )
+        .await
+        .unwrap();
+        inbox_a_keys.insert(created.api_key_id);
+    }
+    for i in 0..3 {
+        api_keys::create(
+            &pool,
+            NewApiKey {
+                organization_id: org.clone(),
+                pod_id: None,
+                inbox_id: Some(inbox_b.clone()),
+                name: format!("inbox-b-{i}"),
+                permissions: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let seen =
+        walk_api_keys(&pool, &org, &KeyScope::Inbox(inbox_a), SortDirection::Ascending, 2).await;
+    assert_eq!(seen.len(), 3, "inbox_a's walk must see exactly its own three keys: {seen:?}");
+    assert_eq!(seen.into_iter().collect::<std::collections::BTreeSet<_>>(), inbox_a_keys);
+}
+
+/// Sibling of [`api_keys_list_pod_scoped_walk_never_returns_a_sibling_pods_key_on_any_page`] for
+/// the organization mount. `listing_at_org_scope_never_leaks_a_sibling_organizations_keys` pins
+/// the same `WHERE organization_id = $1` fragment but only ever fetches one page (1 row each
+/// side, `no_cursor`), so it cannot distinguish "correctly excluded" from "never fetched" once a
+/// cursor is minted and the scope pin and the keyset predicate are evaluated together on a later
+/// page.
+#[tokio::test]
+async fn api_keys_list_org_scoped_walk_never_returns_a_sibling_organizations_key_on_any_page() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org_a = support::seed_org(&pool).await;
+    let org_b = support::seed_org(&pool).await;
+    let mut org_a_keys = std::collections::BTreeSet::new();
+    for i in 0..3 {
+        let created = api_keys::create(&pool, org_key(&org_a, &format!("org-a-{i}")))
+            .await
+            .unwrap();
+        org_a_keys.insert(created.api_key_id);
+    }
+    for i in 0..3 {
+        api_keys::create(&pool, org_key(&org_b, &format!("org-b-{i}")))
+            .await
+            .unwrap();
+    }
+
+    let seen =
+        walk_api_keys(&pool, &org_a, &KeyScope::Organization, SortDirection::Ascending, 2).await;
+    assert_eq!(seen.len(), 3, "org_a's walk must see exactly its own three keys: {seen:?}");
+    assert_eq!(seen.into_iter().collect::<std::collections::BTreeSet<_>>(), org_a_keys);
+}
+
 /// A page token minted while walking pod A must not resume the walk at pod B — the same guarantee
 /// `inboxes_list_a_pod_a_cursor_is_rejected_at_pod_b` exercises for `InboxCursor`, here through a
 /// real `ApiKeyCursor` minted by `api_keys::list` itself, not a hand-built one.
