@@ -87,6 +87,34 @@ for c in "${PROTECTED[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------------------------
+echo
+echo "== 4. stalwart-labs types in the BOUNDARY crates' own public API =="
+# Sections 1-3 keep these crates out of amk-types/core/store/http entirely. This section is the
+# other half of the same rule, and it did not exist until amk-outbound was written: the boundary
+# crates MAY depend on mail-send/mail-builder/mail-auth/mail-parser/smtp-proto — that is their
+# sanctioned role — but they must CONVERT at their own edge, so none of those types may appear in
+# a public signature or re-export there either.
+#
+# Added because `crates/amk-outbound/src/lib.rs` and its dispatch contract both asserted that this
+# script checked exactly that, and it did not. A doc claiming a guarantee no check enforces is the
+# prompt-versus-hook distinction the plan is built on, pointed the wrong way.
+BOUNDARY_CRATES=(amk-outbound amk-ingest)
+for c in "${BOUNDARY_CRATES[@]}"; do
+  d="crates/$c/src"
+  if [ ! -d "$d" ]; then
+    note "$c: not written yet"
+    continue
+  fi
+  hits=$(grep -rnE "(pub (fn|struct|enum|type|const|use|mod)|impl).*$BOUNDARY" "$d" || true)
+  if [ -n "$hits" ]; then
+    bad "$c leaks a stalwart-labs type through its own public API (convert at this crate's edge):"
+    printf '%s\n' "$hits" | sed 's/^/    /'
+  else
+    note "$c: clean"
+  fi
+done
+
 echo
 if [ "$fail" -eq 0 ]; then
   echo "shape-provenance: PASS"
