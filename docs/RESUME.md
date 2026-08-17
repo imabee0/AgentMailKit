@@ -3,7 +3,7 @@
 Where the last session stopped, so a fresh one — on this workstation or in Claude's cloud sandbox —
 can continue without re-deriving it. Update this file in the commit that invalidates it.
 
-**Last updated:** 2026-08-17, after fixing the metadata round-trip defect.
+**Last updated:** 2026-08-17, after P1's Lane L went green and the first P2 slice landed.
 
 ## Verified state
 
@@ -12,10 +12,10 @@ $ ./scripts/check.sh
 check: PASS
 plan-ledger: PASS
 $ ./scripts/check.sh --fast   # summed test results
-total passed: 599
+total passed: 607
 ```
 
-The branch is green at 599 workspace tests with a live Postgres on 127.0.0.1:55432 (`main` was
+The branch is green at 607 workspace tests with a live Postgres on 127.0.0.1:55432 (`main` was
 570 before this session's two fixes). Without that
 database the same command still exits PASS having skipped every DB-backed test — see the sandbox
 section of `CLAUDE.md`.
@@ -63,16 +63,23 @@ unattended session keep going instead of stopping at each phase boundary.
 **P0: closed.** `amk-types`, `amk-core`, `amk-store`, `amk-http`, `amk-cli` merged, review-panelled
 and mutation-verified. Gate met (fixture 24).
 
-**P1: gate conjuncts recorded MET, with one known open divergence.** The ledger reads
-`p1-gate-conformance` MET (fixture 25) and `p1-gate-sdk-smoke` MET (fixture 26 — a clean run *and*
-a falsification proving failure propagates). `./scripts/p1-gate.sh` is the four-conjunct runner:
-dual-target conformance diff, Python SDK smoke, Node SDK smoke, schemathesis over the 25 mounted
-operations.
+**P1: Lane L is GREEN. Lane R is one check away.** All four conjuncts of `./scripts/p1-gate.sh`
+were run individually in the sandbox:
 
-`scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0`. Both defects that blocked the schemathesis
-conjunct are now fixed — the extractor escapes and the metadata round-trip below. **The remaining
-blocker is the dual-target conformance diff, which needs the read-only key** (item 1 under
-"Outstanding"). Local `check.sh` green is not the gate.
+| conjunct | lane | result |
+|---|---|---|
+| schemathesis over the mounted operations | L | **exit 0** — 2056 cases, Coverage 25/25, Fuzzing 25/25, Stateful 84/84 |
+| Python SDK smoke (`agentmail==0.5.9`) | L | **28 checks, 0 failed** |
+| Node SDK smoke (`agentmail@0.5.19`) | L | **26 checks, 0 failed** |
+| dual-target conformance diff | **R-key** | **not run — needs the read-only AgentMail key** |
+
+Both defects that had schemathesis red are fixed and one is merged: the extractor escapes
+(`main` @ `0d0631c`) and the metadata round-trip. `scripts/plan-ledger.sh` still reads
+`CURRENT_PHASE=P0` and **stays there until the conformance diff runs** — local green is not the
+gate, and advancing on Lane L alone is exactly the "gate its own evidence contradicts" trap.
+
+**P2: started.** The first slice — the message and thread LIST endpoints — is written, tested and
+mutation-verified on this branch. See "P2 progress" below.
 
 ## The extractor-rejection work item: DONE and MERGED (`main` @ 0d0631c), still ungated
 
@@ -215,6 +222,35 @@ claims nothing about the schema), and the **two-segment `path`** naming the offe
 **One live request settles all three** and should replace that block:
 `PATCH /v0/inboxes/{id}` with `{"metadata":{"a":1.7976931348623157e+308}}` against
 api.agentmail.to. That is R-key work — see item 1 below.
+
+## P2 progress
+
+Contract: `.claude/contracts/amk-http-message-thread-reads.md`.
+
+**Landed (unmerged):** `GET /v0/inboxes/{inbox_id}/messages` and `GET …/threads` at all three
+mounts — four operations over the `get`/`list` `amk-store` already had. Router reconciles clean at
+**29 operations**.
+
+**Deliberately not mounted: get-by-id for either resource.** Every get-by-id path in the spec
+carries GET, PATCH and DELETE, and `amk-store` has no update or delete for messages or threads.
+Serving only the GET leaves two described operations unserved on a mounted path, which
+`derive-implemented-paths.sh` reports — and the P1 gate's schemathesis scope is derived by PATH, so
+a half-served path would have the gate fuzzing operations this server does not implement and
+reporting absences as failures. The handlers are written and compiled; they mount in the same
+dispatch that gives their store the update and delete.
+
+**The next P2 step is therefore `amk-store`**, not `amk-http`: `messages::update`/`delete` and
+`threads::update`/`delete`, with fixture 19 (`19-message-label-patch-gate.txt`) as the evidence for
+the label-patch semantics. Then the six get-by-id/PATCH/DELETE mounts land together.
+
+After that, in write order: `amk-ingest` + `amk-outbound` (may fan out), then `amk-events` +
+`amk-jobs`. P2's gate has an **R-phys** half no key substitutes for — mail injected from the OVH box
+via `/root/amksend.py`, and an SDK send to a Gmail account showing DKIM+SPF pass.
+
+**One invented shape was caught by a test, worth remembering:** an earlier draft of the threads
+handler used a `thread_read` permission. There is no such flag — the vocabulary is the 38 names in
+`amk-types::api_key::WIRE_NAMES`, and `message_read`'s own field doc says "Also required to read
+threads". It refused every credential, including unrestricted ones' restricted siblings.
 
 ## Outstanding, needs the user
 
