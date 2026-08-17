@@ -1,0 +1,21 @@
+# Mirrors .claude/settings.json permissions.deny. Do not enable always-approve.
+[ui]
+permission_mode = "ask"
+yolo = false
+
+[permission]
+deny = [
+  "Read(./reference/fixtures/**/*.key)",
+  "Read(**/*.pem)",
+  "Read(**/id_rsa*)",
+  "Bash(sdxd get:*)",
+  "Bash(tea login:*)",
+  "Bash(gh auth token:*)",
+  "Bash(gh auth login --with-token:*)",
+  "Bash(git push --force:*)",
+  "Bash(git push -f:*)",
+  "Bash(git push --mirror:*)",
+  "Bash(git reset --hard:*)",
+  "Bash(git filter-branch:*)",
+  "Bash(sudo:*)",
+]
