@@ -20,4 +20,6 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+# Only to decode the embedded throwaway DER test key; not a runtime dependency.
+base64.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

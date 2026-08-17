@@ -21,6 +21,9 @@
 //! The live send is P2's R-phys gate half, run from the OVH box against a Gmail account, and it is
 //! deliberately not reachable from `cargo test`.
 
+pub mod assemble;
+pub mod signing;
+
 use std::sync::{Arc, Mutex};
 
 /// Everything that can go wrong on the way out, in this crate's own vocabulary.
