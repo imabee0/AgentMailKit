@@ -12,10 +12,10 @@ $ ./scripts/check.sh
 check: PASS
 plan-ledger: PASS
 $ ./scripts/check.sh --fast   # summed test results
-total passed: 619
+total passed: 639
 ```
 
-The branch is green at 619 workspace tests with a live Postgres on 127.0.0.1:55432. Without that
+The branch is green at 639 workspace tests with a live Postgres on 127.0.0.1:55432. Without that
 database the same command still exits PASS having skipped every DB-backed test — see the sandbox
 section of `CLAUDE.md`.
 
@@ -301,13 +301,40 @@ reproduced**, not as explained away.
 
 ### Where P2 goes next
 
-1. **`amk-ingest` + `amk-outbound`** — the write order allows these to fan out. Both are large and
-   neither is started.
-2. Deferred and still deferred: search (needs FTS), attachments and `raw` (need blobs and signed
-   URLs), the batch pair (parked under *Full parity*), drafts (P3).
-3. **P2's gate has an R-phys half no key substitutes for**: mail injected from the OVH box via
-   `/root/amksend.py` appearing with correct threading over a 3-message exchange, and an SDK send
-   to a Gmail account showing DKIM+SPF pass.
+**`amk-outbound` is real but not yet wired.** Contract: `.claude/contracts/amk-outbound.md`.
+Landed and mutation-verified:
+
+- `signing::Keyring` — DKIM signing that **fails closed**: a domain with no key is
+  `NoSigningKey`, never an unsigned send. Accepts DER in **either PKCS#8 or PKCS#1**, which the
+  test key forced: `openssl genpkey -outform DER` produced PKCS#1, `from_pkcs8_der` returned
+  `InvalidEncoding` on that exact 1191-byte file and `from_der` accepted it. PEM is still refused.
+  Holds DER bytes rather than a parsed `RsaKey` because `DkimSigner::from_key` takes its key by
+  value and `RsaKey` is not `Clone`; validation still runs at load. `Debug` is hand-written so key
+  material cannot reach a log line, with a test that asserts it.
+- `assemble::check_headers` — refuses a caller copy of any envelope-owned header, and CR/LF/NUL
+  anywhere in a name or value. Refused, not stripped.
+- `build::build_signed` — MIME assembly, bracketed linkage headers (register C3 / fixture 21 on the
+  send side), and the envelope.
+- `build::reply_all_recipients` — **`[INFERRED]`**, marked in the code. No fixture captures the
+  reference's derivation.
+
+**A real defect this caught:** `mail_builder`'s `.bcc()` writes a `Bcc:` header *into the message*,
+disclosing every blind recipient to every other recipient. Found by a test asserting the header was
+absent, not by reading the API. `bcc` now reaches the envelope and nothing else, and both halves are
+asserted — dropping it from delivery is wrong in a way the header assertion alone would not catch.
+
+**Not yet done in `amk-outbound`:** the SMTP delivery implementation (`mail-send`; only the
+`Transport` trait and `RecordingTransport` exist), and the four HTTP endpoints
+(`POST …/messages/send`, `…/reply`, `…/reply-all`, `…/forward`). Wiring those needs `AppState` to
+carry a `Keyring` and a `Transport`, plus threading through `amk-core::threading` and persistence
+through `amk-store::messages::insert` — all Lane L work, none of it started.
+
+After that, in write order: `amk-ingest`, then `amk-events` + `amk-jobs`, then `amk-dns` +
+`amk-mcp` + `reply-extract`, then `amk-import` (P6 only).
+
+**P2's gate has an R-phys half no key substitutes for**: mail injected from the OVH box via
+`/root/amksend.py` appearing with correct threading over a 3-message exchange, and an SDK send to a
+Gmail account showing DKIM+SPF pass.
 
 ## Outstanding, needs the user
 
