@@ -27,3 +27,8 @@ conformance/node_modules/
 # Python bytecode from importing the conformance harness as a module.
 __pycache__/
 *.pyc
+
+# The local dev Postgres cluster `scripts/dev-db.sh` creates when it is NOT running as root
+# (as root it lives in /var/lib/amk-dev-db, outside the repo entirely). Data directory, not an
+# artifact: `dev-db.sh down` removes it.
+.amk-dev-db/

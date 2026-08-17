@@ -19,16 +19,32 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 DB=amk_p1gate
-CTR=amk-dev-postgres
 PORT=55432
 BIND=127.0.0.1:8111
+
+# Talk to the dev cluster over TCP, not `docker exec`. `scripts/dev-db.sh` no longer runs Postgres
+# in a container (its own header carries why), so shelling into one made this whole gate
+# unrunnable wherever there is no Docker daemon — and unlike a skipped unit test, that failure
+# looked like "the gate is workstation-only" rather than "the gate has a container dependency it
+# never needed". `psql` reaches the same cluster from anywhere, container or not.
+MAINT_DSN="postgres://amk:amk-dev-local@127.0.0.1:${PORT}/postgres"
+find_psql() {
+  command -v psql 2>/dev/null && return 0
+  local d
+  for d in $(ls -d /usr/lib/postgresql/*/bin /usr/pgsql-*/bin \
+                   /opt/homebrew/opt/postgresql*/bin /usr/local/opt/postgresql*/bin 2>/dev/null \
+             | sort -Vr); do
+    [ -x "$d/psql" ] && { echo "$d/psql"; return 0; }
+  done
+  return 1
+}
+PSQL="$(find_psql)" || { echo "FATAL: no psql client found; run ./scripts/dev-db.sh up" >&2; exit 1; }
 
 cleanup() {
   [ -n "${AMKD_PID:-}" ] && kill "$AMKD_PID" 2>/dev/null
   rm -f "${CURLRC:-}"
   wait "${AMKD_PID:-}" 2>/dev/null
-  docker exec "$CTR" psql -U amk -d postgres -qc \
-    "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
+  "$PSQL" "$MAINT_DSN" -qc "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
   echo "teardown: amkd stopped, database $DB dropped"
 }
 trap cleanup EXIT
@@ -37,8 +53,10 @@ echo "== build =="
 cargo build -p amk-cli --bins 2>&1 | tail -2
 
 echo "== throwaway database =="
-docker exec "$CTR" psql -U amk -d postgres -qc "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
-docker exec "$CTR" psql -U amk -d postgres -qc "CREATE DATABASE \"$DB\"" || exit 1
+"$PSQL" "$MAINT_DSN" -qc "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
+"$PSQL" "$MAINT_DSN" -qc "CREATE DATABASE \"$DB\"" || {
+  echo "FATAL: cannot reach the dev cluster at 127.0.0.1:${PORT} — run ./scripts/dev-db.sh up" >&2
+  exit 1; }
 
 export AMK_DATABASE_URL="postgres://amk:amk-dev-local@127.0.0.1:${PORT}/${DB}"
 # The reference account serves agentmail.to; ours serves a domain we actually own. The diff
@@ -75,7 +93,7 @@ echo "== operator configuration (direct UPDATE — no endpoint sets these; that 
 # `clerk_organization_id` are deliberately NOT here — excluded by decision (dispatch contract,
 # divergence 1), pinned by a test in amk-types, and the one expected residual diff on this
 # endpoint that this gate cannot and must not close.
-docker exec "$CTR" psql -U amk -d "$DB" -qc \
+"$PSQL" "$AMK_DATABASE_URL" -qc \
   "UPDATE organizations SET inbox_limit=1000, domain_limit=10, daily_send_limit=5000, \
      five_minute_send_limit=100, first_day_recipient_limit=200, \
      first_week_recipient_limit=1000, tracking_allowed=true, \
