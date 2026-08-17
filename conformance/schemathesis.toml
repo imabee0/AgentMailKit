@@ -37,7 +37,15 @@
 [[operations]]
 include-method = "DELETE"
 
+# ALL FIVE, not the three the first attempt carved out. Missing `inbox_id` and `pod_id` left
+# `DELETE /v0/inboxes/{inbox_id}` and `DELETE /v0/pods/{pod_id}` pointed at the seeded rows, which
+# is the same self-destruction one level up — the seeded inbox owns the seeded thread and message,
+# so deleting it cascades them away too (0008's ON DELETE CASCADE). The partial carve-out moved the
+# 404 warning from 25 operations to 23; the cause was that the two ids that own everything else
+# were still live.
 [operations.parameters]
+"path.inbox_id" = "absent-by-design@appsynergy.io"
+"path.pod_id" = "00000000-0000-4000-8000-0000000000d0"
 "path.thread_id" = "00000000-0000-4000-8000-0000000000de"
 "path.message_id" = "<absent-by-design@appsynergy.io>"
 "path.api_key_id" = "00000000-0000-4000-8000-0000000000ad"

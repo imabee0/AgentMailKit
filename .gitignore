@@ -32,3 +32,9 @@ __pycache__/
 # (as root it lives in /var/lib/amk-dev-db, outside the repo entirely). Data directory, not an
 # artifact: `dev-db.sh down` removes it.
 .amk-dev-db/
+
+# Schemathesis' own run cache. Tool-generated, nothing reads it, and its manifest carries a
+# `created_at` that changes on every gate run — so tracking it left the tree dirty after each run
+# and made `git status` a poor signal for "is there work here". The evidence a gate run produces is
+# the transcript and the fixtures, not this. Swept in by a `git add -A` and untracked deliberately.
+.schemathesis/
