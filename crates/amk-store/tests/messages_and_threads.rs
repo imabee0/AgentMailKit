@@ -3611,3 +3611,269 @@ async fn inbox_delete_scope_miss_across_pods_cascades_nothing() {
         "the inbox-scoped api key must survive — a scope miss must never cascade"
     );
 }
+
+// ---- label mutation and delete -----------------------------------------------------------------
+// `[SPEC:.claude/contracts/amk-store-mail-mutations.md]`. The system-label gate is NOT tested here:
+// it is a request-boundary rule (`amk_core::labels::system_label_violations`), and this crate
+// deliberately applies whatever it is handed so the ingest pipeline can set its own labels.
+
+/// Seeds one thread and one message in it, returning both ids.
+async fn seed_one(
+    pool: &sqlx::PgPool,
+    org: &OrganizationId,
+    pod: PodId,
+    inbox: &InboxId,
+    labels: &[&str],
+) -> (ThreadId, MessageId) {
+    let thread_id = ThreadId::new_random();
+    let mid = format!("<mut-{}@example.test>", support::unique_suffix());
+    threads::insert(
+        pool,
+        new_thread(inbox, org, pod, thread_id, labels, "2026-08-15T06:00:00.000Z", &mid),
+    )
+    .await
+    .unwrap();
+    messages::insert(
+        pool,
+        new_message(inbox, org, pod, thread_id, &mid, labels, "2026-08-15T06:00:01.000Z"),
+    )
+    .await
+    .unwrap();
+    (thread_id, MessageId::new(mid))
+}
+
+/// Edge cases 1 and 2 together, because they are the two halves of `apply_mutation`'s contract:
+/// an already-present label is not duplicated and existing order is preserved, and a label named
+/// in BOTH `add` and `remove` ends up absent (`reference/fixtures/20-search-and-label-precedence.txt`
+/// C, `[TESTED]` live on a message).
+#[tokio::test]
+async fn a_message_label_mutation_dedupes_preserves_order_and_lets_remove_win() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let (_t, mid) = seed_one(&pool, &org, pod, &inbox, &["received", "unread"]).await;
+    let filter = org_filter(&org);
+
+    let after = messages::update(
+        &pool,
+        &filter,
+        &inbox,
+        &mid,
+        &["unread".to_string(), "tag".to_string()],
+        &[],
+    )
+    .await
+    .unwrap()
+    .expect("the row is in scope");
+    assert_eq!(
+        after,
+        vec![
+            "received".to_string(),
+            "unread".to_string(),
+            "tag".to_string()
+        ],
+        "an already-present label is not duplicated and existing order is preserved"
+    );
+
+    let conflicted = messages::update(
+        &pool,
+        &filter,
+        &inbox,
+        &mid,
+        &["both".to_string()],
+        &["both".to_string()],
+    )
+    .await
+    .unwrap()
+    .expect("still in scope");
+    assert!(
+        !conflicted.contains(&"both".to_string()),
+        "remove wins over add: {conflicted:?}"
+    );
+}
+
+/// Edge case 3: an empty mutation is a no-op that still reports the current labels.
+#[tokio::test]
+async fn an_empty_mutation_returns_the_current_labels_without_rewriting_them() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let (tid, mid) = seed_one(&pool, &org, pod, &inbox, &["received"]).await;
+    let filter = org_filter(&org);
+
+    let m = messages::update(&pool, &filter, &inbox, &mid, &[], &[])
+        .await
+        .unwrap();
+    assert_eq!(m, Some(vec!["received".to_string()]));
+    let t = threads::update(&pool, &filter, tid, &[], &[])
+        .await
+        .unwrap();
+    assert_eq!(t, Some(vec!["received".to_string()]));
+}
+
+/// Edge case 4, both halves. The return value alone proves nothing — a buggy implementation could
+/// return `None` and still have written the row, so the row is re-read afterwards.
+#[tokio::test]
+async fn a_row_outside_the_window_is_not_found_and_is_left_unchanged() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let other_pod = support::seed_pod(&pool, &org).await;
+    let (tid, mid) = seed_one(&pool, &org, pod, &inbox, &["received"]).await;
+    // A window pinned to a DIFFERENT pod: the row exists, but not in this window.
+    let foreign = pod_filter(&org, other_pod);
+
+    assert_eq!(
+        messages::update(&pool, &foreign, &inbox, &mid, &["x".to_string()], &[])
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        threads::update(&pool, &foreign, tid, &["x".to_string()], &[])
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(!messages::delete(&pool, &foreign, &inbox, &mid)
+        .await
+        .unwrap());
+    assert!(!threads::delete(&pool, &foreign, tid).await.unwrap());
+
+    // The half that matters: nothing was written, and nothing was deleted.
+    let visible = org_filter(&org);
+    assert_eq!(
+        messages::update(&pool, &visible, &inbox, &mid, &[], &[])
+            .await
+            .unwrap(),
+        Some(vec!["received".to_string()]),
+        "the out-of-window update must not have touched the row"
+    );
+    assert_eq!(
+        threads::update(&pool, &visible, tid, &[], &[])
+            .await
+            .unwrap(),
+        Some(vec!["received".to_string()]),
+    );
+}
+
+/// Edge case 5: three independent NUL guards, asserted separately. A single guard passes one of
+/// these and fails the other two — which is exactly why `messages::get`'s comment says so.
+#[tokio::test]
+async fn a_nul_byte_in_any_bound_value_masks_as_not_found() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let (_t, mid) = seed_one(&pool, &org, pod, &inbox, &["received"]).await;
+    let clean = org_filter(&org);
+
+    let nul_inbox = InboxId::new("bad\0@example.test");
+    assert_eq!(
+        messages::update(&pool, &clean, &nul_inbox, &mid, &[], &[])
+            .await
+            .unwrap(),
+        None,
+        "NUL in inbox_id"
+    );
+
+    let nul_message = MessageId::new("<bad\0@example.test>");
+    assert_eq!(
+        messages::update(&pool, &clean, &inbox, &nul_message, &[], &[])
+            .await
+            .unwrap(),
+        None,
+        "NUL in message_id"
+    );
+
+    let nul_pin = inbox_filter(&org, pod, &InboxId::new("pin\0@example.test"));
+    assert_eq!(
+        messages::update(&pool, &nul_pin, &inbox, &mid, &[], &[])
+            .await
+            .unwrap(),
+        None,
+        "NUL in the filter's own inbox pin"
+    );
+    assert!(!messages::delete(&pool, &nul_pin, &inbox, &mid)
+        .await
+        .unwrap());
+}
+
+/// Edge case 6.
+#[tokio::test]
+async fn delete_returns_true_once_and_false_afterwards() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let (_t, mid) = seed_one(&pool, &org, pod, &inbox, &["received"]).await;
+    let filter = org_filter(&org);
+
+    assert!(messages::delete(&pool, &filter, &inbox, &mid)
+        .await
+        .unwrap());
+    assert!(!messages::delete(&pool, &filter, &inbox, &mid)
+        .await
+        .unwrap());
+    assert_eq!(
+        messages::update(&pool, &filter, &inbox, &mid, &[], &[])
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+/// Edge case 7: deleting a thread takes its messages with it. This is the SCHEMA's answer —
+/// `messages_thread_id_fkey` is `ON DELETE CASCADE` per `0008_inbox_delete_cascades.sql` — so this
+/// records the observed behaviour rather than asserting a rule no fixture states.
+#[tokio::test]
+async fn deleting_a_thread_cascades_to_its_messages_rather_than_orphaning_them() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let (tid, mid) = seed_one(&pool, &org, pod, &inbox, &["received"]).await;
+    let filter = org_filter(&org);
+
+    assert!(threads::delete(&pool, &filter, tid).await.unwrap());
+    assert_eq!(
+        messages::update(&pool, &filter, &inbox, &mid, &[], &[])
+            .await
+            .unwrap(),
+        None,
+        "the message went with its thread — no orphan left readable"
+    );
+    assert!(!threads::delete(&pool, &filter, tid).await.unwrap());
+}
+
+/// Edge case 8: two concurrent PATCHes must both survive. Without the `FOR UPDATE` read inside a
+/// transaction, both tasks read the same starting labels and the second write erases the first —
+/// the lost update this implementation is shaped to prevent.
+#[tokio::test]
+async fn concurrent_label_additions_do_not_lose_one_another() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let (_t, mid) = seed_one(&pool, &org, pod, &inbox, &["received"]).await;
+    let filter = org_filter(&org);
+
+    let alpha = ["alpha".to_string()];
+    let beta = ["beta".to_string()];
+    let (a, b) = tokio::join!(
+        messages::update(&pool, &filter, &inbox, &mid, &alpha, &[]),
+        messages::update(&pool, &filter, &inbox, &mid, &beta, &[]),
+    );
+    a.unwrap().expect("in scope");
+    b.unwrap().expect("in scope");
+
+    let final_labels = messages::update(&pool, &filter, &inbox, &mid, &[], &[])
+        .await
+        .unwrap()
+        .expect("in scope");
+    assert!(final_labels.contains(&"alpha".to_string()), "lost update: {final_labels:?}");
+    assert!(final_labels.contains(&"beta".to_string()), "lost update: {final_labels:?}");
+}

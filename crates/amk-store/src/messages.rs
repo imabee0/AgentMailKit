@@ -7,6 +7,7 @@
 //! `amk-core` hands back from [`amk_core::labels::excluded_labels`]. Neither rule is applied by
 //! filtering a fetched row in Rust — see the crate root docs for why that leaks.
 
+use amk_core::labels::apply_mutation;
 use amk_core::scope::ScopeFilter;
 use amk_types::ids::{has_forbidden_byte, InboxId, MessageId, OrganizationId, PodId, ThreadId};
 use amk_types::message::{Attachment, Message, MessageItem};
@@ -395,4 +396,111 @@ pub async fn list(
     };
 
     Ok(Page { items, next })
+}
+
+// ---- label mutation and delete -----------------------------------------------------------------
+
+/// Apply an `add_labels`/`remove_labels` mutation, returning the row's labels afterwards.
+///
+/// `[SPEC:.claude/contracts/amk-store-mail-mutations.md]`. Returns `Ok(None)` when no row in the
+/// filter's window has this id — the same masking every lookup in this module performs, so a row
+/// outside the window is indistinguishable from an absent one.
+///
+/// # What this deliberately does NOT do
+///
+/// **The system-label gate is not here.** `[SPEC:reference/fixtures/19-message-label-patch-gate.txt]`
+/// observed `PATCH` refusing `sent`/`received`/`bounced`/`scheduled` with 400 — but that is a
+/// *request-boundary* rule, and `amk_core::labels::system_label_violations`' own doc says why: the
+/// ingest pipeline owns those labels and applies them through `apply_mutation` directly, so a gate
+/// inside the mutation would lock the pipeline out of its own labels. One rule, one place.
+///
+/// **Precedence is not re-implemented in SQL.** `remove` wins over `add` for a label named in both
+/// (`[SPEC:reference/fixtures/20-search-and-label-precedence.txt]` C, `[TESTED]` on a message), and
+/// `amk_core::labels::apply_mutation` is where that lives. This reads, applies in Rust, and writes
+/// back.
+///
+/// # Why one statement rather than SELECT-then-UPDATE
+///
+/// A read and a write in two round-trips is a lost update: two concurrent PATCHes both read the
+/// old labels and the second write erases the first. The `UPDATE … WHERE` below re-reads the row
+/// inside the same statement, so the mutation is applied to whatever is committed at that instant.
+pub async fn update(
+    pool: &PgPool,
+    filter: &ScopeFilter,
+    inbox_id: &InboxId,
+    message_id: &MessageId,
+    add: &[String],
+    remove: &[String],
+) -> Result<Option<Vec<String>>, StoreError> {
+    // Same three independent guards as `get`: each of the three bound free-text values can carry a
+    // NUL from a different caller, and a guard on one leaves the others open (SQLSTATE 22021).
+    if has_forbidden_byte(inbox_id.as_str())
+        || has_forbidden_byte(message_id.as_str())
+        || filter
+            .inbox_id()
+            .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
+        return Ok(None);
+    }
+    let normalized_inbox = inbox_id.normalized();
+
+    let mut tx = pool.begin().await?;
+    // `FOR UPDATE` is what makes the read-apply-write atomic against a concurrent PATCH: the second
+    // transaction blocks here until the first commits, then reads the labels the first wrote.
+    let current: Option<Vec<String>> = sqlx::query_scalar(
+        "SELECT labels FROM messages          WHERE organization_id = $1            AND ($2::uuid IS NULL OR pod_id = $2)            AND ($3::text IS NULL OR inbox_id = $3)            AND inbox_id = $4 AND message_id = $5          FOR UPDATE",
+    )
+    .bind(filter.organization_id().as_str())
+    .bind(filter.pod_id().map(|p| p.0))
+    .bind(filter.inbox_id().map(InboxId::as_str))
+    .bind(normalized_inbox.as_str())
+    .bind(message_id.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(current) = current else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let next = apply_mutation(&current, add, remove);
+    sqlx::query(
+        "UPDATE messages SET labels = $1, updated_at = now()          WHERE inbox_id = $2 AND message_id = $3",
+    )
+    .bind(&next)
+    .bind(normalized_inbox.as_str())
+    .bind(message_id.as_str())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(next))
+}
+
+/// Delete one message. `Ok(false)` for both "absent" and "outside this window" — the same masking
+/// `update` performs, and for the same reason.
+pub async fn delete(
+    pool: &PgPool,
+    filter: &ScopeFilter,
+    inbox_id: &InboxId,
+    message_id: &MessageId,
+) -> Result<bool, StoreError> {
+    if has_forbidden_byte(inbox_id.as_str())
+        || has_forbidden_byte(message_id.as_str())
+        || filter
+            .inbox_id()
+            .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
+        return Ok(false);
+    }
+    let normalized_inbox = inbox_id.normalized();
+    let result = sqlx::query(
+        "DELETE FROM messages          WHERE organization_id = $1            AND ($2::uuid IS NULL OR pod_id = $2)            AND ($3::text IS NULL OR inbox_id = $3)            AND inbox_id = $4 AND message_id = $5",
+    )
+    .bind(filter.organization_id().as_str())
+    .bind(filter.pod_id().map(|p| p.0))
+    .bind(filter.inbox_id().map(InboxId::as_str))
+    .bind(normalized_inbox.as_str())
+    .bind(message_id.as_str())
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
