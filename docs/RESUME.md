@@ -5,6 +5,12 @@ can continue without re-deriving it. Update this file in the commit that invalid
 
 **Last updated:** 2026-08-17, after the P2 message/thread surface landed.
 
+Grok now has a project harness on this tree: `AGENTS.md` (identity + commands, pointer here and
+to `docs/PLAN.md` / `docs/OPERATING-RULES.md`), `.grok/config.toml` in ask-mode with the deny
+list, `.grok/hooks/amk-harness.json` running `guard.sh` and `stop-gate.sh`, and `.grok/agents/`
+for the implementer and review lenses. `guard.sh` accepts Grok payloads and Grok worktrees.
+Phase position below is unchanged.
+
 ## Verified state
 
 ```

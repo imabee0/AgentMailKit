@@ -72,9 +72,16 @@ unmodified official `agentmail==0.5.9` calling `auth.me()` against `amkd --role 
 mints one UUID that is **both** the `organization_id` and the default pod's `pod_id` — the equality
 `amk-http` resolves `POST /v0/inboxes` by (fixture 22).
 
-**P1's control-plane gate is in flight**; `docs/RESUME.md` carries its exact state and the one open
-work item. `scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0` — advance it only when every P1
-conjunct is met. Deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
+**P1: Lane L is green; Lane R is not run.** Extractor-rejection work is merged (`main` @ `0d0631c`).
+Schemathesis and both SDK smokes passed locally; the dual-target conformance diff has **not run**
+(needs the read-only AgentMail key). `scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0` —
+advance it only when every P1 conjunct is met. Deferred by decision: blobs, FTS, signed URLs, jobs,
+idempotency.
+
+**P2: the message/thread surface has landed** (reads, label mutations and deletes at every mount;
+41 router operations). `amk-outbound` is partial: signing, assemble and build are mutation-verified;
+SMTP delivery and the four send/reply/forward HTTP endpoints are not wired. `amk-ingest` is not
+started. Exact state: `docs/RESUME.md`.
 
 ## Branching, dispatch and merge
 
