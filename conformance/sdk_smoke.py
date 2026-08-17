@@ -114,14 +114,20 @@ def main():
 
     # ---- pagination -----------------------------------------------------------------------------
     print("\npagination: walk a page boundary with the SDK's own token")
+    # This smoke creates exactly ONE inbox, so `limit=1` is the LAST page and correctly omits the
+    # token — the boundary this section walks has to be built, not assumed. It used to be assumed,
+    # and the check therefore passed only against a database carrying inboxes from an earlier run:
+    # a green that depended on leftover state, which is the same defect class as random seed data.
+    # Creating the second inbox here makes the assertion true by construction, on any database.
+    pager = client.inboxes.create(request=CreateInboxRequest(username=f"smokepage{tag}"))
     first = client.inboxes.list(limit=1)
     check("a bounded page returns one item", len(first.inboxes), 1)
+    check("two inboxes exist so a page boundary is present", first.next_page_token is not None, True)
     if first.next_page_token:
         second_page = client.inboxes.list(limit=1, page_token=first.next_page_token)
         check("the SDK's page_token advances to a different inbox",
               second_page.inboxes[0].inbox_id != first.inboxes[0].inbox_id, True)
-    else:
-        check("more than one inbox exists so a token was expected", "no next_page_token", None)
+    client.inboxes.delete(inbox_id=pager.inbox_id)
 
     # ---- teardown, which is itself the delete half of the cycle ---------------------------------
     print("\ndelete: the other half of the CRUD cycle")
