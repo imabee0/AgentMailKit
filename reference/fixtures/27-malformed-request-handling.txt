@@ -108,3 +108,41 @@ P-1 already applied to inboxes: read the request SCHEMA before calling a POST no
 permission layer and was handed to the user with the exact command; see the session transcript.
 The four-pod listing above under `?limit=101` is the state at probe time, so the record is honest
 about what was on the account when these captures were taken.
+
+--------------------------------------------------------------------------------------------
+5. BODY SIZE — added after a review lens found a rejection variant the derivation missed
+--------------------------------------------------------------------------------------------
+The site enumeration in `scripts/derive-request-extractors.sh` lists WHERE extractors are used; it
+does not enumerate the VARIANTS each can reject with. `JsonRejection` is
+`{JsonDataError, JsonSyntaxError, MissingJsonContentType, BytesRejection}`, and `BytesRejection`
+composites `FailedToBufferBody` -> `LengthLimitError`, which axum-core marks
+`#[status = PAYLOAD_TOO_LARGE]`:
+
+  $ grep -rn "DEFAULT_LIMIT" ~/.cargo/.../axum-core-0.5.6/src/ext_traits/request.rs
+  319:        const DEFAULT_LIMIT: usize = 2_097_152; // 2 mb
+  326:            None => self.map(|b| Body::new(http_body_util::Limited::new(b, DEFAULT_LIMIT))),
+  $ grep -rn "PAYLOAD_TOO_LARGE" ~/.cargo/.../axum-core-0.5.6/src/extract/rejection.rs
+  41:    #[status = PAYLOAD_TOO_LARGE]
+
+The 2 MB cap is unconditional — `Json::from_request` calls `Bytes::from_request`, which applies it
+whether or not a `DefaultBodyLimit` layer is installed, and amk-http installs none.
+
+OURS, 3 MB of invalid JSON to POST /v0/pods:
+  -> 413 text/plain; charset=utf-8   `Failed to buffer the request body: length limit exceeded`
+     413 is not in ErrorCode::status()'s range either — a third off-catalog status after 415 and 422.
+
+REFERENCE, byte-identical request:
+  -> HTTP/2 400  content-type: application/json
+     {"name":"ValidationError","code":"validation_error","message":"Request validation failed",
+      "errors":[{"code":"invalid_format","format":"json_string","path":[],"message":"Invalid JSON string"}],...}
+
+So the reference BUFFERS AND PARSES a 3 MB body and answers with the ordinary syntax error. This is
+a divergence in BEHAVIOUR, not only in error shape: a body between 2 MB and whatever the reference's
+real ceiling is succeeds there and 413s here.
+
+The probe stops at 3 MB deliberately. Finding the reference's true ceiling means pushing
+progressively larger payloads at someone else's production API, which is not a reasonable thing to
+do for a number we can choose safely. What is recorded is what was observed: 3 MB is accepted.
+
+Both probes used a body that is INVALID JSON, so neither could create a pod — this time by
+construction and verified, not by the reasoning that went wrong in section 4.

@@ -75,7 +75,12 @@ Three defects, in order of severity:
 - `crates/amk-http/src/handlers/inboxes.rs`
 - `crates/amk-http/src/handlers/pods.rs`
 - `crates/amk-http/tests/extractor_rejections.rs` — NEW. The tests.
-- `crates/amk-http/tests/support/**` — only if a helper genuinely needs extending; say so if you do.
+- `crates/amk-http/tests/support/mod.rs` — REQUIRED, not conditional. `TestResponse` carries only
+  `{status, json, body}` and cannot assert a content-type, which every edge case below demands; and
+  `send()` always sets `content-type: application/json` for any `Some(body)`, so it cannot express a
+  raw non-JSON body, a custom content-type, or a POST with no body and no header at all — cases 1,
+  4 and 5. Extend it; say in your report exactly what you added.
+- `crates/amk-http/src/config.rs` — the body-limit field only.
 
 Nothing else. In particular **not** `crates/amk-types/**` (frozen — the envelope already has
 everything needed; `ErrorEnvelope::new(ErrorCode::ValidationError, msg)` now routes `msg` into
@@ -114,6 +119,21 @@ Decisions already made — each now cites the capture that settles it, not a jud
 - **An unknown query parameter is IGNORED** (`?nosuchparam=1` -> 200), and `?limit=101` is
   **accepted**, echoing `"limit":101`. Do not add a cap; the `agentmail-cli` help text documenting
   one is not enforced by the API this clones.
+- **Body size: 413 is a third off-catalog status, and the limit itself diverges.** `JsonRejection`
+  composites `BytesRejection` -> `FailedToBufferBody` -> `LengthLimitError`, which axum-core marks
+  `#[status = PAYLOAD_TOO_LARGE]` against an unconditional 2 MB `DEFAULT_LIMIT` that applies whether
+  or not a `DefaultBodyLimit` layer is installed (this crate installs none). Ours answers a 3 MB
+  body with `413 text/plain`; the reference buffers and parses the same 3 MB body and returns the
+  ordinary 400 syntax error. So: install an explicit `DefaultBodyLimit` on the router, set it from
+  `AppConfig` with a default of **8 MiB**, and map the length-limit rejection to the same 400
+  envelope as every other variant, with `ValidationIssue::custom`. The 8 MiB default is
+  **`[INFERRED]`** — mark it so in the code — and here is the whole reasoning, because it is a
+  number nobody observed: the reference accepts 3 MB, its true ceiling was deliberately not probed
+  (finding it means firing progressively larger payloads at someone else's production API), and the
+  one size this project has actually measured is the ~5.95 MB inline attachment threshold
+  `[SPEC:repo agentmail-toolkit]`, which P2 bodies must clear. 8 MiB clears it with headroom and
+  still bounds the buffer. Do NOT remove the limit: unbounded body buffering is a denial-of-service
+  primitive on a public endpoint, and "match the reference exactly" is not worth that.
 - **Fix `?page_token`'s existing issue while you are there.** `crates/amk-http/src/error.rs`'s
   `with_issue` emits `custom` with a field path; the reference emits
   `invalid_format`/`format:"base64url"`/`path:["page_token"]`. Same fixture, same defect class.
@@ -140,14 +160,25 @@ the parsed envelope** — a test that checks only `code()` is what let this ship
 9. Every one of the 14 rewritten sites is reachable: one test per HTTP operation that takes a body
    or a query, at every mount, proving the wrapper is actually wired there and not just defined.
    A table-driven test is fine; 14 assertions are not optional.
-10. Two bodies differing only in a field NAME produce identical response bodies (the oracle test).
+10. A body naming a field that exists and one naming a field that does not: assert what each
+    returns. They may legitimately differ now — the reference is a schema oracle — so this test
+    records the behaviour rather than forbidding a difference.
+11. Body size: at the limit, one byte under, and one byte over (the boundary and one unit either
+    side, per the plan's testing rules). Over the limit is 400 with the envelope, never 413, never
+    `text/plain`. Use a body that is INVALID JSON so an oversized request that slips through the
+    limit still cannot create anything — the same construction fixture 27 §5 used.
 
 ## Prohibitions
 
 - No changes to `amk-types`. If the envelope cannot express something you need, **STOP and report**.
 - No `mail_parser::` / `mail_auth::` / `mail_send::` / `smtp_proto::` types anywhere.
 - No Stalwart or JMAP concept, field, or name.
-- No new dependency. `axum::extract::rejection::*` is already available.
+- No new dependency. `axum::extract::rejection::*` and `axum::extract::DefaultBodyLimit` are
+  already available.
+- Match `JsonRejection` and `QueryRejection` EXHAUSTIVELY — no `_ =>` arm. Both are
+  `#[non_exhaustive]`, so a catch-all is unavoidable at the end; write it as an explicit arm with a
+  comment naming that fact, never as a silent fallthrough, and make it produce the envelope too. The
+  413 variant reached production precisely because nobody enumerated the variants, only the sites.
 - Do not change handler logic, store calls, or any success path — EXCEPT that an absent or
   wrong-typed `Content-Type` must now reach the handler as `{}` rather than being rejected, which
   by design turns four previously-failing requests into successful creates. That is the reference's
