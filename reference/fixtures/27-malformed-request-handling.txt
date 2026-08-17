@@ -1,0 +1,110 @@
+MALFORMED REQUEST HANDLING — live probe of api.agentmail.to, 2026-08-17
+=======================================================================
+
+WHY THIS PROBE EXISTS. The P1 schemathesis run found that axum's own extractor rejections escape
+our JSON error contract: a `text/plain` body, statuses the error catalog has no code for (415), and
+serde's prose naming our internal Rust types. Writing the fix required knowing what the REFERENCE
+does for the same inputs, and no fixture covered it. A contract was drafted that INFERRED the
+answers; this probe was run to replace the inference, and it reversed two of that contract's
+decisions. It is the fifth time in this project that a live capture has beaten a reasoned reading.
+
+METHOD: curl against api.agentmail.to with the org key from `kv/agentmail`, presented through a
+0600 curl config file (never argv — see scripts/p1-gate.sh's CURLRC block). Query probes are pure
+GETs. Body probes use `POST /v0/pods`, chosen because a pod is the cheapest resource to create if a
+probe is wrong about being non-creating — and one was, see COLLATERAL below.
+
+THE HEADLINE: every malformed request is 400 + application/json + the full envelope, with EXACTLY
+ONE entry in `errors[]`. There is no 415, no 422, no plain text, anywhere in this surface.
+
+--------------------------------------------------------------------------------------------
+1. QUERY STRING
+--------------------------------------------------------------------------------------------
+GET /v0/pods?limit=abc          -> HTTP/2 400  content-type: application/json
+{"name":"ValidationError","code":"validation_error","message":"Request validation failed",
+ "errors":[{"expected":"number","code":"invalid_type","received":"NaN","path":["limit"],
+            "message":"Invalid input: expected number, received NaN"}],
+ "fix":"One or more request fields are invalid. Inspect the 'errors' array — each entry has a 'path' and 'message' — correct the offending fields and resend.",
+ "docs":"https://docs.agentmail.to/errors#validation_error"}
+
+GET /v0/pods?limit=-1           -> 400
+GET /v0/pods?limit=             -> 400   (identical body to limit=-1)
+GET /v0/pods?limit=0            -> 400   (identical body to limit=-1)
+ "errors":[{"origin":"number","code":"too_small","minimum":0,"inclusive":false,"path":["limit"],
+            "message":"Too small: expected number to be >0"}]
+
+GET /v0/pods?ascending=maybe    -> 400
+ "errors":[{"code":"invalid_value","expected":"stringbool",
+            "values":["true","1","yes","on","y","enabled","false","0","no","off","n","disabled"],
+            "path":["ascending"],
+            "message":"Invalid option: expected one of \"true\"|\"1\"|\"yes\"|\"on\"|\"y\"|\"enabled\"|\"false\"|\"0\"|\"no\"|\"off\"|\"n\"|\"disabled\""}]
+
+GET /v0/pods?page_token=%00     -> 400
+ "errors":[{"code":"invalid_format","format":"base64url","path":["page_token"],
+            "message":"Invalid base64url-encoded string"}]
+
+GET /v0/pods?nosuchparam=1      -> 200. An unknown query parameter is IGNORED, not rejected.
+GET /v0/pods?limit=101          -> 200, and the response echoes "limit":101.
+   NOTE: no upper cap is enforced. `agentmail-cli`'s help text says filtered list `limit` is capped
+   at 100 `[SPEC:repo agentmail-cli]`; the live API does not reject 101 on this endpoint. Recorded
+   because the plan's Gathered-evidence section carries the cap as though it were enforced.
+
+--------------------------------------------------------------------------------------------
+2. REQUEST BODY
+--------------------------------------------------------------------------------------------
+POST /v0/pods  -H 'Content-Type: application/json' -d 'not json'   -> HTTP/2 400  application/json
+ "errors":[{"code":"invalid_format","format":"json_string","path":[],
+            "message":"Invalid JSON string"}]
+   -> a SYNTAX failure is the one case with an empty `path`.
+
+POST /v0/pods  -H 'Content-Type: application/json' -d '{"name":123}'  -> HTTP/2 400  application/json
+ "errors":[{"expected":"string","code":"invalid_type","path":["name"],
+            "message":"Invalid input: expected string, received number"}]
+   -> a TYPE failure NAMES THE FIELD. The reference is deliberately a schema oracle here.
+
+POST /v0/pods  -H 'Content-Type: text/plain' -d '{}'   -> HTTP/2 200. The pod is CREATED.
+POST /v0/pods  (no body, no Content-Type at all)       -> HTTP/2 200. The pod is CREATED.
+   -> There is NO 415 and no content-type enforcement on this endpoint. `CreatePodRequest` has
+      all-optional fields, so an absent body is a valid create and the server treats it as `{}`.
+
+--------------------------------------------------------------------------------------------
+3. WHAT THIS OVERTURNS
+--------------------------------------------------------------------------------------------
+(a) `ValidationIssue` is a FLOOR, not a ceiling — the same discovery `ErrorEnvelope` already made
+    with `suggestions[]` / `resource`+`limit` (register B5). Entries carry kind-specific extras:
+      invalid_type   -> expected, received?          ("received" present for NaN, absent for 123)
+      too_small      -> origin, minimum, inclusive
+      invalid_value  -> expected, values[]
+      invalid_format -> format
+      custom         -> (no extras; fixture 05)
+    `amk-types::ValidationIssue` models exactly {code, path, message} and would drop every extra.
+
+(b) `path` is `["<field>"]` for a FIELD-level failure and `[]` only for a whole-body one. Fixture
+    05's `path:[]` is a whole-body rule ("to, cc, or bcc must be specified"), not the general case.
+
+(c) The draft contract's decision "the message must not distinguish a field that exists from one
+    that does not — that is a schema oracle" is WRONG as a conformance goal. The reference IS a
+    schema oracle: it returns `path:["name"]` and `expected:"string"`. A 1:1 clone that hides this
+    diverges on exactly the input a client debugging its own request will send. The disclosure
+    concern was real but misplaced: what must never be echoed is SERDE's message, which names our
+    Rust types (`untagged enum MetadataValue`) — not the request field the client itself sent us.
+
+(d) The draft contract's "Content-Type: text/plain -> 400, not 415" is also wrong. The answer is
+    200: the content-type is not enforced at all, and an absent body means `{}`.
+
+(e) Our own `?page_token=%00` handling, which the schemathesis triage called "the control that is
+    already correct", is correct only at envelope level. We emit
+    `{"code":"custom","path":[],"message":...}`; the reference emits
+    `{"code":"invalid_format","format":"base64url","path":["page_token"]}`.
+
+--------------------------------------------------------------------------------------------
+4. COLLATERAL — stated because a probe that changes the account must say so
+--------------------------------------------------------------------------------------------
+The two content-type probes each CREATED a pod on the live account (`083523ee-…`, `1c5a543a-…`,
+both named "My Pod", 2026-08-17T00:59:41Z). They were run on the reasoning that "no valid payload
+is present, so nothing can be created", which was wrong: `CreatePodRequest`'s fields are all
+optional, so an absent body IS a valid create. The rule this establishes, and it is the same rule
+P-1 already applied to inboxes: read the request SCHEMA before calling a POST non-creating —
+"malformed" is a property of the parse, not of the outcome. Deletion was blocked by the local
+permission layer and was handed to the user with the exact command; see the session transcript.
+The four-pod listing above under `?limit=101` is the state at probe time, so the record is honest
+about what was on the account when these captures were taken.

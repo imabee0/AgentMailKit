@@ -229,11 +229,13 @@ impl AppError {
     /// convenience — the full `errors[]` shape (mixed string/integer path) lives on
     /// `amk_types::ValidationIssue` directly for call sites that need more than one segment.
     fn with_issue(mut self, path: &str, message: &str) -> Self {
-        self.0.errors.push(amk_types::ValidationIssue {
-            code: "custom".into(),
-            path: vec![serde_json::Value::String(path.into())],
-            message: message.into(),
-        });
+        // Built through the constructor rather than as a struct literal: `ValidationIssue` now
+        // carries seven per-kind extras (`reference/fixtures/27-malformed-request-handling.txt`),
+        // and a literal here would have to name every one of them and would break again on the
+        // next kind the reference shows us.
+        let mut issue = amk_types::ValidationIssue::custom(message);
+        issue.path = vec![serde_json::Value::String(path.into())];
+        self.0.errors.push(issue);
         self
     }
 }

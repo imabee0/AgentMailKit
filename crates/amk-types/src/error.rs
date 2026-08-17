@@ -28,18 +28,141 @@ impl GatewayError {
     }
 }
 
-/// One entry of `validation_error`'s `errors` array. Observed shape: `{code, path[], message}`.
+/// One entry of `validation_error`'s `errors` array.
+///
+/// `{code, path[], message}` is the FLOOR, not the shape.
+/// `[SPEC:reference/fixtures/27-malformed-request-handling.txt]` probed five malformed requests
+/// against the live API and every entry carried extras keyed to its own `code` — the same
+/// discovery [`ErrorEnvelope`] already made with `suggestions[]` and `resource`/`limit`
+/// (register B5), one level further down:
+///
+/// | `code`           | extras observed                     |
+/// |------------------|-------------------------------------|
+/// | `custom`         | none (fixture 05)                   |
+/// | `invalid_type`   | `expected`, `received` (sometimes)  |
+/// | `too_small`      | `origin`, `minimum`, `inclusive`    |
+/// | `invalid_value`  | `expected`, `values[]`              |
+/// | `invalid_format` | `format`                            |
+///
+/// Modelled as explicit optional fields rather than a catch-all map, matching how [`ErrorEnvelope`]
+/// models its own per-code extras: a named field is checkable and a map is not. These are the kinds
+/// this server EMITS; the vocabulary is zod's and is larger, so a kind we have never produced has
+/// no field here and adding one is a fixture-backed change, not a completion of the pattern.
+///
+/// `received` is `Option` for a reason that is easy to get backwards: the live capture carries it
+/// for `?limit=abc` (`"received":"NaN"`) and OMITS it for `{"name":123}`. Both are `invalid_type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValidationIssue {
     pub code: String,
-    /// JSON-pointer-ish path as an array; observed empty for whole-body rules.
+    /// `["<field>"]` for a field-level failure; `[]` **only** for a whole-body rule. Fixture 05's
+    /// empty path is the whole-body case ("to, cc, or bcc must be specified"), not the general one
+    /// — reading it as general is what produced a first draft that never named a field.
     pub path: Vec<serde_json::Value>,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inclusive: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
 }
 
 impl ValidationIssue {
+    /// The bare kind, for a rule that spans the whole body and names no field.
+    /// `[SPEC:reference/fixtures/05-error-catalog.http]`
     pub fn custom(message: impl Into<String>) -> Self {
-        Self { code: "custom".into(), path: Vec::new(), message: message.into() }
+        Self {
+            code: "custom".into(),
+            path: Vec::new(),
+            message: message.into(),
+            expected: None,
+            received: None,
+            origin: None,
+            minimum: None,
+            inclusive: None,
+            format: None,
+            values: Vec::new(),
+        }
+    }
+
+    /// A value whose FORMAT is wrong: an unparseable body (`format: "json_string"`, empty path) or
+    /// a malformed `page_token` (`format: "base64url"`, `path: ["page_token"]`).
+    /// `[SPEC:reference/fixtures/27-malformed-request-handling.txt]`
+    pub fn invalid_format(format: &str, field: Option<&str>, message: impl Into<String>) -> Self {
+        Self {
+            code: "invalid_format".into(),
+            format: Some(format.to_owned()),
+            ..Self::at(field, message)
+        }
+    }
+
+    /// A value of the wrong JSON type. `expected` is the type the schema wanted; `received` is
+    /// what arrived, and is omitted when the reference omits it.
+    /// `[SPEC:reference/fixtures/27-malformed-request-handling.txt]`
+    pub fn invalid_type(
+        expected: &str,
+        received: Option<&str>,
+        field: Option<&str>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: "invalid_type".into(),
+            expected: Some(expected.to_owned()),
+            received: received.map(str::to_owned),
+            ..Self::at(field, message)
+        }
+    }
+
+    /// A number below its bound. `inclusive` is `false` in every capture: `?limit=0` is rejected,
+    /// so the bound is `> minimum`, not `>=`.
+    /// `[SPEC:reference/fixtures/27-malformed-request-handling.txt]`
+    pub fn too_small(
+        origin: &str,
+        minimum: i64,
+        inclusive: bool,
+        field: Option<&str>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: "too_small".into(),
+            origin: Some(origin.to_owned()),
+            minimum: Some(minimum),
+            inclusive: Some(inclusive),
+            ..Self::at(field, message)
+        }
+    }
+
+    /// A value outside a closed set, which the reference ENUMERATES back to the caller.
+    /// `[SPEC:reference/fixtures/27-malformed-request-handling.txt]`
+    pub fn invalid_value(
+        expected: &str,
+        values: Vec<String>,
+        field: Option<&str>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: "invalid_value".into(),
+            expected: Some(expected.to_owned()),
+            values,
+            ..Self::at(field, message)
+        }
+    }
+
+    /// Shared spine: code is overwritten by each constructor above, so this is private.
+    fn at(field: Option<&str>, message: impl Into<String>) -> Self {
+        let mut issue = Self::custom(message);
+        if let Some(name) = field {
+            issue.path = vec![serde_json::Value::String(name.to_owned())];
+        }
+        issue
     }
 }
 

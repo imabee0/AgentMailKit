@@ -271,6 +271,118 @@ fn validation_error_states_the_rule_in_errors_not_in_message_fixture_05() {
         .is_none());
 }
 
+/// Every `errors[]` entry the live API emits, reproduced by the constructor that claims to build
+/// it — extras and all. `[SPEC:reference/fixtures/27-malformed-request-handling.txt]`
+///
+/// The point is the EXTRAS. `ValidationIssue` modelled `{code, path, message}` and would have
+/// dropped `expected`/`received`/`origin`/`minimum`/`inclusive`/`format`/`values` silently, which
+/// is a structural diff against the reference on every malformed request. Comparing whole `Value`s
+/// rather than field-by-field is what makes that catchable: a dropped extra fails here.
+#[test]
+fn validation_issue_extras_match_fixture_27() {
+    let text = fixture("27-malformed-request-handling.txt");
+    // The capture is hand-wrapped for reading, so scan the whole text rather than per line.
+    let captured: Vec<Value> = text
+        .match_indices('{')
+        .filter_map(|(i, _)| {
+            serde_json::Deserializer::from_str(&text[i..])
+                .into_iter::<Value>()
+                .next()?
+                .ok()
+        })
+        .filter(|v| {
+            v.get("message").is_some() && v.get("path").is_some() && v.get("name").is_none()
+            // an envelope, not an issue
+        })
+        .collect();
+    assert!(
+        captured.len() >= 5,
+        "27 must still show every observed issue kind: {captured:?}"
+    );
+
+    let ours = |i: amk_types::ValidationIssue| serde_json::to_value(&i).unwrap();
+    let find = |code: &str, field: &str| -> Value {
+        captured
+            .iter()
+            .find(|v| {
+                v["code"] == code
+                    && v["path"]
+                        .as_array()
+                        .map(|p| p.first().and_then(Value::as_str).unwrap_or("") == field)
+                        == Some(true)
+            })
+            .unwrap_or_else(|| panic!("27 no longer carries a {code} issue at {field}"))
+            .clone()
+    };
+
+    assert_eq!(
+        ours(amk_types::ValidationIssue::invalid_type(
+            "number",
+            Some("NaN"),
+            Some("limit"),
+            "Invalid input: expected number, received NaN",
+        )),
+        find("invalid_type", "limit"),
+        "invalid_type must carry `expected` AND `received`"
+    );
+    assert_eq!(
+        ours(amk_types::ValidationIssue::too_small(
+            "number",
+            0,
+            false,
+            Some("limit"),
+            "Too small: expected number to be >0",
+        )),
+        find("too_small", "limit"),
+        "too_small must carry origin/minimum/inclusive; ?limit=0 is rejected so inclusive is false"
+    );
+    assert_eq!(
+        ours(amk_types::ValidationIssue::invalid_format(
+            "base64url",
+            Some("page_token"),
+            "Invalid base64url-encoded string",
+        )),
+        find("invalid_format", "page_token"),
+        "a malformed page_token names the field and its format"
+    );
+
+    // The whole-body case: `path` is empty ONLY here.
+    let syntax = captured
+        .iter()
+        .find(|v| v["code"] == "invalid_format" && v["format"] == "json_string")
+        .expect("27 no longer carries the unparseable-body issue")
+        .clone();
+    assert_eq!(
+        ours(amk_types::ValidationIssue::invalid_format(
+            "json_string",
+            None,
+            "Invalid JSON string",
+        )),
+        syntax,
+        "a body that is not JSON has no field to name, so path stays []"
+    );
+    assert!(syntax["path"].as_array().unwrap().is_empty());
+
+    // And the one that names a closed set back to the caller.
+    let boolean = find("invalid_value", "ascending");
+    let values: Vec<String> = boolean["values"]
+        .as_array()
+        .expect("invalid_value enumerates its accepted values")
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ours(amk_types::ValidationIssue::invalid_value(
+            "stringbool",
+            values,
+            Some("ascending"),
+            boolean["message"].as_str().unwrap(),
+        )),
+        boolean,
+        "invalid_value must carry `expected` and the full `values` list"
+    );
+}
+
 /// `errors[].code` is NOT an `ErrorCode`. The live capture carries `"code":"custom"`, a zod-style
 /// issue kind from the validation layer, which shares a field name with the envelope's code but
 /// nothing else. Typing it as `ErrorCode` would reject valid responses; this pins it open.
@@ -468,6 +580,7 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         "21-unbracketed-in-reply-to.txt",
         "22-org-mount-and-delete-semantics.txt",
         "23-inbox-defaults-and-key-shape.txt",
+        "27-malformed-request-handling.txt",
     ];
     // Deferred WITH a reason and the phase that closes it. Not a parking lot: each entry names the
     // crate that will assert it, and this list may only shrink.
