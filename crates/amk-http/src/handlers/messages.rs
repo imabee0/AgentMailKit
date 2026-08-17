@@ -7,20 +7,23 @@
 //! update or delete, which would invert the amk-store -> amk-http write order.
 
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::Json;
 
-use amk_core::labels::{excluded_labels, LabelAccess};
+use amk_core::labels::{excluded_labels, system_label_violations, LabelAccess};
 use amk_core::permissions;
 use amk_core::scope::ResourceKind;
 use amk_store::messages::{self, ListMessagesQuery};
 use amk_store::pagination::MessageCursor;
 use amk_store::StoreError;
 use amk_types::ids::{InboxId, MessageId};
-use amk_types::message::ListMessagesResponse;
-use amk_types::Message;
+use amk_types::message::{
+    Addresses, ListMessagesResponse, UpdateMessageRequest, UpdateMessageResponse,
+};
+use amk_types::{Message, ValidationIssue};
 
 use crate::auth::AuthContext;
-use crate::body::QueryParams;
+use crate::body::{validation_error_many, JsonBody, QueryParams};
 use crate::error::AppError;
 use crate::ids::decode_segment;
 use crate::pagination::ListMailQuery;
@@ -101,5 +104,80 @@ pub async fn get(
     match messages::get(&state.pool, &filter, &inbox_id, &message_id, &excluded).await? {
         Some(m) => Ok(Json(m)),
         None => Err(amk_core::scope::ScopeDenial::new(ResourceKind::Message).into()),
+    }
+}
+
+/// The system-label gate. `[SPEC:reference/fixtures/19-message-label-patch-gate.txt]`.
+///
+/// It lives here, at the request boundary, and not in `amk-store`: the ingest pipeline owns
+/// `sent`/`received`/`bounced`/`scheduled` and applies them through `apply_mutation` directly, so a
+/// gate inside the mutation would lock the pipeline out of its own labels.
+///
+/// Three things the fixture settles that the spec text gets wrong by omission:
+/// - the gate applies to **messages** as well as threads (the OpenAPI description mentions it only
+///   on `UpdateThreadRequest`, and that omission misled two reviewers and this project's own
+///   dispatch);
+/// - **restricted is not system** — a client MAY set `spam`/`trash`/`blocked`/`unauthenticated`.
+///   Restricted governs who may SEE a label; system governs who may SET one;
+/// - one bad label rejects the **whole** mutation, not the valid part, so this runs before any
+///   store call and nothing is written when it fires.
+pub(crate) fn reject_system_labels(add: &[String], remove: &[String]) -> Result<(), AppError> {
+    let violations = system_label_violations(add, remove);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    // `path` is `["add_labels", 0]` — field name THEN array index, a mixed string/integer JSON
+    // path, verbatim from the fixture's captured body. `code` is `custom`.
+    let issues = violations
+        .into_iter()
+        .map(|v| {
+            let mut issue = ValidationIssue::custom(v.message());
+            issue.path = vec![
+                serde_json::Value::String(v.field.as_field_name().to_owned()),
+                serde_json::Value::from(v.index),
+            ];
+            issue
+        })
+        .collect();
+    Err(validation_error_many(issues))
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path((raw_inbox_id, raw_message_id)): Path<(String, String)>,
+    JsonBody(req): JsonBody<UpdateMessageRequest>,
+) -> Result<Json<UpdateMessageResponse>, AppError> {
+    let (inbox_id, message_id) = ids_from_path(&raw_inbox_id, &raw_message_id)?;
+    let filter = settle_inbox_mount(&state.pool, &ctx.scope, &inbox_id).await?;
+    permissions::require(&ctx.grants, "message_update")?;
+
+    // `add_labels`/`remove_labels` are `Addresses` — the untagged "one string OR a list" shape the
+    // spec uses for every label field ("Label or labels to add to message"). Flatten once, here.
+    let add = req.add_labels.map(Addresses::into_vec).unwrap_or_default();
+    let remove = req
+        .remove_labels
+        .map(Addresses::into_vec)
+        .unwrap_or_default();
+    reject_system_labels(&add, &remove)?;
+
+    match messages::update(&state.pool, &filter, &inbox_id, &message_id, &add, &remove).await? {
+        Some(labels) => Ok(Json(UpdateMessageResponse { message_id, labels })),
+        None => Err(amk_core::scope::ScopeDenial::new(ResourceKind::Message).into()),
+    }
+}
+
+pub async fn delete(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path((raw_inbox_id, raw_message_id)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let (inbox_id, message_id) = ids_from_path(&raw_inbox_id, &raw_message_id)?;
+    let filter = settle_inbox_mount(&state.pool, &ctx.scope, &inbox_id).await?;
+    permissions::require(&ctx.grants, "message_delete")?;
+
+    match messages::delete(&state.pool, &filter, &inbox_id, &message_id).await? {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(amk_core::scope::ScopeDenial::new(ResourceKind::Message).into()),
     }
 }

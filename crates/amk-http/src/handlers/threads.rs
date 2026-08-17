@@ -11,6 +11,7 @@
 //! `settle_pod_mount` for the pod mount, `settle_inbox_mount` for the inbox mount.
 
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::Json;
 
 use amk_core::labels::{excluded_labels, LabelAccess};
@@ -20,11 +21,11 @@ use amk_store::pagination::ThreadCursor;
 use amk_store::threads::{self, ListThreadsQuery};
 use amk_store::StoreError;
 use amk_types::ids::{InboxId, ThreadId};
-use amk_types::thread::ListThreadsResponse;
+use amk_types::thread::{ListThreadsResponse, UpdateThreadRequest, UpdateThreadResponse};
 use amk_types::Thread;
 
 use crate::auth::AuthContext;
-use crate::body::QueryParams;
+use crate::body::{JsonBody, QueryParams};
 use crate::error::AppError;
 use crate::ids::{decode_segment, PathPodId, PathPodIdString};
 use crate::pagination::ListMailQuery;
@@ -39,6 +40,11 @@ use crate::AppState;
 /// `permissions::require` faithfully refused for every credential including an unrestricted one's
 /// restricted siblings. Non-negotiable 3: a flag that is not in `amk-types` does not get added.
 const THREAD_READ: &str = "message_read";
+
+/// Same reasoning as [`THREAD_READ`]: there is no `thread_update`/`thread_delete` flag. The field
+/// docs on `message_update` and `message_delete` say "Also required to update/delete threads".
+const THREAD_UPDATE: &str = "message_update";
+const THREAD_DELETE: &str = "message_delete";
 
 // ---- list ---------------------------------------------------------------------------------
 
@@ -178,5 +184,113 @@ async fn get_thread(
     match threads::get_with_messages(&state.pool, filter, thread_id, &access).await? {
         Some(t) => Ok(Json(t)),
         None => Err(amk_core::scope::ScopeDenial::new(ResourceKind::Thread).into()),
+    }
+}
+
+// ---- update and delete ---------------------------------------------------------------------
+//
+// Written once, mounted three times, exactly like the reads above. The system-label gate is
+// `handlers::messages::reject_system_labels` — one function for both resources, because fixture 19
+// observed the SAME four labels refused on a message PATCH as on a thread PATCH, and the spec text
+// that mentions the rule only on `UpdateThreadRequest` is the omission that misled two reviewers.
+
+pub async fn update_org(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    axum::extract::Path(raw_thread_id): axum::extract::Path<String>,
+    JsonBody(req): JsonBody<UpdateThreadRequest>,
+) -> Result<Json<UpdateThreadResponse>, AppError> {
+    let thread_id = thread_from_path(&raw_thread_id)?;
+    permissions::require(&ctx.grants, THREAD_UPDATE)?;
+    let filter = organization_window(&ctx.scope);
+    update_thread(&state, &filter, thread_id, req).await
+}
+
+pub async fn update_pod(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    PathPodIdString(pod_id, raw_thread_id): PathPodIdString,
+    JsonBody(req): JsonBody<UpdateThreadRequest>,
+) -> Result<Json<UpdateThreadResponse>, AppError> {
+    let thread_id = thread_from_path(&raw_thread_id)?;
+    let filter = crate::handlers::inboxes::window_for_pod_own_resource(&ctx.scope, pod_id)?;
+    permissions::require(&ctx.grants, THREAD_UPDATE)?;
+    update_thread(&state, &filter, thread_id, req).await
+}
+
+pub async fn update_inbox(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    axum::extract::Path((raw_inbox_id, raw_thread_id)): axum::extract::Path<(String, String)>,
+    JsonBody(req): JsonBody<UpdateThreadRequest>,
+) -> Result<Json<UpdateThreadResponse>, AppError> {
+    let inbox_id = inbox_from_path(&raw_inbox_id)?;
+    let thread_id = thread_from_path(&raw_thread_id)?;
+    let filter = settle_inbox_mount(&state.pool, &ctx.scope, &inbox_id).await?;
+    permissions::require(&ctx.grants, THREAD_UPDATE)?;
+    update_thread(&state, &filter, thread_id, req).await
+}
+
+pub async fn delete_org(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    axum::extract::Path(raw_thread_id): axum::extract::Path<String>,
+) -> Result<StatusCode, AppError> {
+    let thread_id = thread_from_path(&raw_thread_id)?;
+    permissions::require(&ctx.grants, THREAD_DELETE)?;
+    let filter = organization_window(&ctx.scope);
+    delete_thread(&state, &filter, thread_id).await
+}
+
+pub async fn delete_pod(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    PathPodIdString(pod_id, raw_thread_id): PathPodIdString,
+) -> Result<StatusCode, AppError> {
+    let thread_id = thread_from_path(&raw_thread_id)?;
+    let filter = crate::handlers::inboxes::window_for_pod_own_resource(&ctx.scope, pod_id)?;
+    permissions::require(&ctx.grants, THREAD_DELETE)?;
+    delete_thread(&state, &filter, thread_id).await
+}
+
+pub async fn delete_inbox(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    axum::extract::Path((raw_inbox_id, raw_thread_id)): axum::extract::Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let inbox_id = inbox_from_path(&raw_inbox_id)?;
+    let thread_id = thread_from_path(&raw_thread_id)?;
+    let filter = settle_inbox_mount(&state.pool, &ctx.scope, &inbox_id).await?;
+    permissions::require(&ctx.grants, THREAD_DELETE)?;
+    delete_thread(&state, &filter, thread_id).await
+}
+
+// ---- shared ----
+
+async fn update_thread(
+    state: &AppState,
+    filter: &ScopeFilter,
+    thread_id: ThreadId,
+    req: UpdateThreadRequest,
+) -> Result<Json<UpdateThreadResponse>, AppError> {
+    // Before any store call: fixture 19's gate rejects the WHOLE mutation, so nothing is written
+    // when it fires.
+    crate::handlers::messages::reject_system_labels(&req.add_labels, &req.remove_labels)?;
+    match threads::update(&state.pool, filter, thread_id, &req.add_labels, &req.remove_labels)
+        .await?
+    {
+        Some(labels) => Ok(Json(UpdateThreadResponse { thread_id, labels })),
+        None => Err(amk_core::scope::ScopeDenial::new(ResourceKind::Thread).into()),
+    }
+}
+
+async fn delete_thread(
+    state: &AppState,
+    filter: &ScopeFilter,
+    thread_id: ThreadId,
+) -> Result<StatusCode, AppError> {
+    match threads::delete(&state.pool, filter, thread_id).await? {
+        true => Ok(StatusCode::NO_CONTENT),
+        false => Err(amk_core::scope::ScopeDenial::new(ResourceKind::Thread).into()),
     }
 }

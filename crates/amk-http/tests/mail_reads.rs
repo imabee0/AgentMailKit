@@ -60,11 +60,8 @@ async fn restricted_mail_is_absent_from_the_list_and_present_by_id() {
         Some(&key),
     )
     .await;
-    // NOTE: get-by-id is written but not yet mounted (its path also carries PATCH and DELETE, which
-    // amk-store cannot serve). Until it is, the router answers the not-found envelope — asserted
-    // here so the day it is mounted, this test fails and must be updated deliberately.
-    assert_eq!(by_id.status, 404, "get-by-id is not mounted yet: {}", by_id.body);
-    assert_eq!(by_id.code(), Some("not_found"));
+    assert_eq!(by_id.status, 200, "restricted mail IS reachable by id: {}", by_id.body);
+    assert_eq!(by_id.json.unwrap()["labels"][0], "spam");
 }
 
 /// The flag alone is not enough, and the permission alone is not enough — `LabelAccess::list`
@@ -297,4 +294,221 @@ async fn a_credential_without_the_read_permission_is_refused_identically() {
     assert_eq!(messages.status, 403, "body: {}", messages.body);
     assert_eq!(threads.code(), Some("missing_permission"));
     assert_eq!(messages.code(), Some("missing_permission"));
+}
+
+// ---- fixture 19: the system-label gate on PATCH -------------------------------------------------
+
+/// `[SPEC:reference/fixtures/19-message-label-patch-gate.txt]`, asserted as the whole `errors[0]`.
+///
+/// Three things this pins that the OpenAPI text gets wrong by omission, and that misled two
+/// reviewers and this project's own orchestrator before the probe was run:
+/// - the gate applies to MESSAGES, not only threads;
+/// - restricted is not system — `spam` is accepted here while `sent` is refused;
+/// - `path` is `["add_labels", 0]`: field name THEN array index, a mixed string/integer path.
+#[tokio::test]
+async fn a_system_label_is_refused_on_a_message_patch_with_the_observed_body() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "sysgate").await;
+    let (_t, mid) =
+        support::seed_thread_with_message(&pool, &org, pod, &inbox, &["received"]).await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+    let path = format!(
+        "/v0/inboxes/{}/messages/{}",
+        inbox.to_path_segment(),
+        percent_encode(mid.as_str())
+    );
+
+    for label in ["sent", "received", "bounced", "scheduled"] {
+        let resp =
+            support::patch(&router, &path, Some(&key), serde_json::json!({"add_labels": [label]}))
+                .await;
+        assert_eq!(resp.status, 400, "{label} must be refused: {}", resp.body);
+        assert_eq!(
+            resp.first_error().unwrap(),
+            &serde_json::json!({
+                "code": "custom",
+                "path": ["add_labels", 0],
+                "message": format!("Cannot use system label: {label}"),
+            }),
+            "{label}: {}",
+            resp.body
+        );
+    }
+
+    // Restricted is NOT system: the fixture accepted every one of these.
+    for label in [
+        "unread",
+        "spam",
+        "trash",
+        "blocked",
+        "unauthenticated",
+        "arbitrary-tag",
+    ] {
+        let resp = support::patch(
+            &router,
+            &path,
+            Some(&key),
+            serde_json::json!({"add_labels": [label], "remove_labels": [label]}),
+        )
+        .await;
+        assert_eq!(resp.status, 200, "{label} must be accepted: {}", resp.body);
+    }
+}
+
+/// The fixture's own cleanup attempt: `{"remove_labels":["spam","bounced"]}` failed 400 as a UNIT.
+/// So the legal `spam` must not be applied — asserted by re-reading the row, not by the status.
+#[tokio::test]
+async fn one_system_label_rejects_the_whole_mutation_and_applies_nothing() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "whole").await;
+    let (_t, mid) =
+        support::seed_thread_with_message(&pool, &org, pod, &inbox, &["received", "spam"]).await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+    let path = format!(
+        "/v0/inboxes/{}/messages/{}",
+        inbox.to_path_segment(),
+        percent_encode(mid.as_str())
+    );
+
+    let resp = support::patch(
+        &router,
+        &path,
+        Some(&key),
+        serde_json::json!({"remove_labels": ["spam", "bounced"]}),
+    )
+    .await;
+    assert_eq!(resp.status, 400, "{}", resp.body);
+    assert_eq!(resp.first_error().unwrap()["path"], serde_json::json!(["remove_labels", 1]));
+
+    let after = support::get(&router, &path, Some(&key)).await;
+    let labels = after.json.unwrap()["labels"].clone();
+    assert!(
+        labels.as_array().unwrap().iter().any(|l| l == "spam"),
+        "the legal half must NOT have been applied: {labels}"
+    );
+}
+
+// ---- the newly mounted PATCH and DELETE ---------------------------------------------------------
+
+#[tokio::test]
+async fn a_message_patch_applies_labels_and_delete_removes_the_row() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "mut").await;
+    let (_t, mid) =
+        support::seed_thread_with_message(&pool, &org, pod, &inbox, &["received"]).await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+    let path = format!(
+        "/v0/inboxes/{}/messages/{}",
+        inbox.to_path_segment(),
+        percent_encode(mid.as_str())
+    );
+
+    let patched =
+        support::patch(&router, &path, Some(&key), serde_json::json!({"add_labels": "tagged"}))
+            .await;
+    assert_eq!(patched.status, 200, "a bare string is a valid label list: {}", patched.body);
+    let v = patched.json.unwrap();
+    assert_eq!(v["message_id"], mid.as_str());
+    assert_eq!(v["labels"], serde_json::json!(["received", "tagged"]));
+
+    let deleted = support::delete(&router, &path, Some(&key)).await;
+    assert_eq!(deleted.status, 204, "{}", deleted.body);
+    let gone = support::get(&router, &path, Some(&key)).await;
+    assert_eq!(gone.status, 404, "{}", gone.body);
+}
+
+/// The thread triple at every mount, and the cascade: deleting a thread takes its messages.
+#[tokio::test]
+async fn a_thread_patch_and_delete_work_at_every_mount_and_delete_cascades() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "tmut").await;
+    let key = support::org_key(&pool, &org).await;
+    let seg = inbox.to_path_segment();
+
+    let (t1, _m1) =
+        support::seed_thread_with_message(&pool, &org, pod, &inbox, &["received"]).await;
+    let (t2, _m2) =
+        support::seed_thread_with_message(&pool, &org, pod, &inbox, &["received"]).await;
+    let (t3, m3) = support::seed_thread_with_message(&pool, &org, pod, &inbox, &["received"]).await;
+    let router = support::test_router(pool);
+
+    for (label, path) in [
+        ("org mount", format!("/v0/threads/{t1}")),
+        ("pod mount", format!("/v0/pods/{pod}/threads/{t2}")),
+        ("inbox mount", format!("/v0/inboxes/{seg}/threads/{t3}")),
+    ] {
+        let resp =
+            support::patch(&router, &path, Some(&key), serde_json::json!({"add_labels": ["seen"]}))
+                .await;
+        assert_eq!(resp.status, 200, "{label}: {}", resp.body);
+        assert_eq!(
+            resp.json.unwrap()["labels"],
+            serde_json::json!(["received", "seen"]),
+            "{label}"
+        );
+    }
+
+    // Delete the inbox-mounted one and check the cascade through the HTTP surface.
+    let message_path = format!("/v0/inboxes/{seg}/messages/{}", percent_encode(m3.as_str()));
+    assert_eq!(
+        support::get(&router, &message_path, Some(&key))
+            .await
+            .status,
+        200
+    );
+    let deleted =
+        support::delete(&router, &format!("/v0/inboxes/{seg}/threads/{t3}"), Some(&key)).await;
+    assert_eq!(deleted.status, 204, "{}", deleted.body);
+    assert_eq!(
+        support::get(&router, &message_path, Some(&key))
+            .await
+            .status,
+        404,
+        "the thread's message went with it — 0008's ON DELETE CASCADE, through the API"
+    );
+}
+
+/// A system label is refused on a THREAD patch too — the half the spec text actually documents,
+/// asserted so the shared gate is proven at both call sites rather than assumed from one.
+#[tokio::test]
+async fn a_system_label_is_refused_on_a_thread_patch() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "tsys").await;
+    let (tid, _m) =
+        support::seed_thread_with_message(&pool, &org, pod, &inbox, &["received"]).await;
+    let key = support::org_key(&pool, &org).await;
+    let router = support::test_router(pool);
+
+    let resp = support::patch(
+        &router,
+        &format!("/v0/threads/{tid}"),
+        Some(&key),
+        serde_json::json!({"add_labels": ["bounced"]}),
+    )
+    .await;
+    assert_eq!(resp.status, 400, "{}", resp.body);
+    assert_eq!(resp.first_error().unwrap()["message"], "Cannot use system label: bounced");
 }
