@@ -110,15 +110,21 @@ check("the minted key authenticates", (await minted.auth.me()).organizationId, m
 
 // ---- pagination -------------------------------------------------------------------------------
 console.log("\npagination: walk a page boundary with the SDK's own token");
+// This smoke creates exactly ONE inbox, so `limit=1` is the LAST page and correctly omits the
+// token — the boundary this section walks has to be built, not assumed. It used to be assumed, and
+// the check therefore passed only against a database carrying inboxes from an earlier run: a green
+// that depended on leftover state, which is the same defect class as random seed data. Creating the
+// second inbox here makes the assertion true by construction, on any database.
+const pager = await client.inboxes.create({ username: `nodepage${tag}` });
 const page1 = await client.inboxes.list({ limit: 1 });
 check("a bounded page returns one item", page1.inboxes.length, 1);
+check("two inboxes exist so a page boundary is present", page1.nextPageToken != null, true);
 if (page1.nextPageToken) {
   const page2 = await client.inboxes.list({ limit: 1, pageToken: page1.nextPageToken });
   check("the token advances to a different inbox",
     page2.inboxes[0].inboxId !== page1.inboxes[0].inboxId, true);
-} else {
-  check("a next_page_token was expected", "absent", "present");
 }
+await client.inboxes.delete(pager.inboxId);
 
 // ---- delete -----------------------------------------------------------------------------------
 console.log("\ndelete: the other half of the CRUD cycle");
