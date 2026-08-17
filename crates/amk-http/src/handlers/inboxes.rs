@@ -14,11 +14,13 @@ use amk_store::pagination::InboxCursor;
 use amk_store::pods;
 use amk_store::{Page, StoreError};
 use amk_types::ids::{InboxId, OrganizationId, PodId};
-use amk_types::inbox::{ListInboxesResponse, MetadataUpdate};
-use amk_types::{CreateInboxRequest, ErrorCode, ErrorEnvelope, Inbox, UpdateInboxRequest};
+use amk_types::inbox::{ListInboxesResponse, Metadata, MetadataUpdate, MetadataValue};
+use amk_types::{
+    CreateInboxRequest, ErrorCode, ErrorEnvelope, Inbox, UpdateInboxRequest, ValidationIssue,
+};
 
 use crate::auth::AuthContext;
-use crate::body::{JsonBody, QueryParams};
+use crate::body::{validation_error, JsonBody, QueryParams};
 use crate::error::AppError;
 use crate::ids::{decode_segment, PathPodId, PathPodIdString};
 use crate::pagination::{ListQuery, Resolved};
@@ -230,6 +232,8 @@ async fn create_inbox(
     pod_id: PodId,
     req: CreateInboxRequest,
 ) -> Result<Json<Inbox>, AppError> {
+    // Before anything is generated or defaulted: a refused create must not consume a username.
+    validate_create_metadata(req.metadata.as_ref())?;
     let username = req.username.unwrap_or_else(words::generate_username);
     // Both defaults fail closed rather than guess (fixture 23's Q3): AgentMail's own defaults
     // (`agentmail.to`, `"AgentMail"`) name their deployment, not this one.
@@ -351,6 +355,50 @@ pub async fn update_pod(
     update_inbox(&state, &ctx, &window, &target, req).await
 }
 
+/// Refuses a metadata number that storage would accept and then fail to read back.
+///
+/// `[SPEC:.claude/contracts/amk-metadata-roundtrip.md]`. Without this, one `PATCH` writes a row
+/// that no later `GET`, `PATCH` or list can decode — the inbox is gone from the API and the
+/// response is a 500, not a refusal. `MetadataValue::survives_storage_round_trip` carries the
+/// mechanism; this is only where the refusal is shaped.
+///
+/// **`[INFERRED]` — all three of the choices below.** No fixture covers what the reference does
+/// with an out-of-range metadata number, and `conformance/manifest.json` is read-only so no
+/// existing capture can answer it. One live `PATCH` with `1.7976931348623157e+308` would settle
+/// all three at once; until then:
+/// - **400 `validation_error`**, matching fixture 27's shape for every other refused input. That
+///   half is not really a guess — 500 is wrong under any reading.
+/// - **issue kind `custom`**, chosen because it claims nothing about the schema. Every other kind
+///   carries kind-specific extras (`expected`, `minimum`, `values`, `format`) that would assert a
+///   vocabulary the reference has never shown us here. This deviates from the extractor contract's
+///   "custom is for whole-body rules only", deliberately: that rule described observed cases.
+/// - **`path` is two segments**, naming the offending key, because the reference is deliberately a
+///   schema oracle (fixture 27 §3(c)) and `["metadata"]` alone would hide which key to fix.
+fn reject_unstorable_metadata<'a>(
+    entries: impl Iterator<Item = (&'a String, &'a MetadataValue)>,
+) -> Result<(), AppError> {
+    for (key, value) in entries {
+        if !value.survives_storage_round_trip() {
+            let mut issue = ValidationIssue::custom(
+                "Metadata number is outside the range this API can store and return unchanged.",
+            );
+            issue.path = vec![
+                serde_json::Value::String("metadata".to_owned()),
+                serde_json::Value::String(key.clone()),
+            ];
+            return Err(validation_error(issue));
+        }
+    }
+    Ok(())
+}
+
+fn validate_create_metadata(metadata: Option<&Metadata>) -> Result<(), AppError> {
+    match metadata {
+        Some(m) => reject_unstorable_metadata(m.iter()),
+        None => Ok(()),
+    }
+}
+
 /// `[SPEC:openapi] type_inboxes:UpdateInboxRequest`: "Sending an empty object is rejected... Each
 /// update must include at least one of `display_name` or `metadata`." These two rules are
 /// amk-http's to own — `amk-store`'s own `inboxes::update` doc says so explicitly, and treats an
@@ -369,6 +417,9 @@ fn validate_update(req: &UpdateInboxRequest) -> Result<(), AppError> {
                 "metadata must not be an empty object; send null to clear all metadata.",
             ));
         }
+        // A `None` value is a deletion — it never reaches storage as a value, so it cannot be
+        // unstorable. Only the keys actually being written are checked.
+        reject_unstorable_metadata(m.iter().filter_map(|(k, v)| v.as_ref().map(|v| (k, v))))?;
     }
     Ok(())
 }
