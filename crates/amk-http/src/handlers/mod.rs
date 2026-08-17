@@ -4,4 +4,6 @@
 pub mod api_keys;
 pub mod identity;
 pub mod inboxes;
+pub mod messages;
 pub mod pods;
+pub mod threads;

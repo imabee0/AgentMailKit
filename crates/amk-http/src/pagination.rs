@@ -5,6 +5,7 @@
 //! (`/v0/pods/{pod_id}/api-keys`, `/v0/inboxes/{inbox_id}/api-keys`) do not carry `ascending`, so
 //! their query struct omits the field entirely rather than accepting-and-ignoring it.
 
+use amk_core::labels::IncludeFlags;
 use amk_store::SortDirection;
 use amk_types::ValidationIssue;
 use serde::Deserialize;
@@ -32,6 +33,54 @@ pub struct ListQuery {
 pub struct ListQueryNoDirection {
     pub limit: Option<String>,
     pub page_token: Option<String>,
+}
+
+/// [`ListQuery`] plus the four `include_*` flags, for the **four** paginated GETs that carry them:
+/// `/v0/threads`, `/v0/pods/{pod_id}/threads`, `/v0/inboxes/{inbox_id}/threads` and
+/// `/v0/inboxes/{inbox_id}/messages`.
+///
+/// Only those four — `amk_core::labels::LabelAccess::list`'s own doc is the authority, and it warns
+/// that routing any other paginated GET through the list rule gates it on a flag its caller has no
+/// way to set. Search and get-by-id take [`LabelAccess::search`]/[`LabelAccess::by_id`] instead.
+///
+/// A flat struct rather than `#[serde(flatten)]` over [`ListQuery`]: `serde_urlencoded` does not
+/// support flattened structs, so a flattened field would silently deserialize as absent — a page
+/// that quietly ignored `limit` rather than failing.
+///
+/// [`LabelAccess::search`]: amk_core::labels::LabelAccess::search
+/// [`LabelAccess::by_id`]: amk_core::labels::LabelAccess::by_id
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ListMailQuery {
+    pub limit: Option<String>,
+    pub page_token: Option<String>,
+    pub ascending: Option<bool>,
+    #[serde(default)]
+    pub include_spam: Option<bool>,
+    #[serde(default)]
+    pub include_blocked: Option<bool>,
+    #[serde(default)]
+    pub include_unauthenticated: Option<bool>,
+    #[serde(default)]
+    pub include_trash: Option<bool>,
+}
+
+impl ListMailQuery {
+    /// Resolves through the same [`parse_limit`] every other list endpoint uses — one
+    /// representation of the `limit` rules, not a second that can drift from it.
+    pub fn resolve(&self) -> Result<Resolved, AppError> {
+        resolve(self.limit.as_deref(), self.page_token.clone(), self.ascending)
+    }
+
+    /// The `include_*` flags as `amk-core` models them. An omitted flag is `false`: the caller did
+    /// not ask, and `LabelAccess::list` requires both the permission *and* the request.
+    pub fn include_flags(&self) -> IncludeFlags {
+        IncludeFlags::from_flags(
+            self.include_spam.unwrap_or(false),
+            self.include_blocked.unwrap_or(false),
+            self.include_unauthenticated.unwrap_or(false),
+            self.include_trash.unwrap_or(false),
+        )
+    }
 }
 
 /// A parsed query, resolved to a concrete limit and sort direction.
