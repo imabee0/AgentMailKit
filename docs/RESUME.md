@@ -45,9 +45,17 @@ to the cluster over TCP. That was worth fixing for more than the sandbox: a cont
 gate never needed presented as "this gate is workstation-only", which is a much more expensive
 belief than a missing client.
 
-What still genuinely needs the LAN: `sdxd`/`secd` and therefore the live AgentMail key, the live
-account, and the OVH box. Of `p1-gate.sh`'s four conjuncts, the dual-target conformance diff and
-both SDK smokes need that key; the schemathesis conjunct does not.
+**Correction, measured 2026-08-17: only ONE of `p1-gate.sh`'s four conjuncts needs the live key.**
+An earlier revision of this file said three did. Both SDK smokes point at
+`AMK_BASE=http://127.0.0.1:8111` — they drive *our* server, never the reference — and schemathesis
+is local too. Verified in the sandbox: `schemathesis==4.24.3` installs and selects 25 of 130
+operations; `agentmail==0.5.9` (Python) and `agentmail@0.5.19` (Node) both install pinned. The one
+credentialed check is the **dual-target conformance diff**, and its manifest is 18 GETs plus a
+single `DELETE /v0/auth/me` probe — **read-only against the reference account**.
+
+`docs/PLAN.md` now carries this as an explicit **Lane L / Lane R** split on every phase gate, with
+`code-complete` (Lane L green) separated from `gated` (Lane R green). That is what lets an
+unattended session keep going instead of stopping at each phase boundary.
 
 ## Phase position
 
@@ -137,12 +145,86 @@ against a locally-served `amkd --role api` and every row matches, including `?li
 
 ## Outstanding, needs the user
 
-**Two pods are still on the live AgentMail account** and should be deleted:
-`083523ee-276c-417a-85a3-8703d230c543` and `1c5a543a-5219-41fd-b4a1-289355162f2f`, both named
-"My Pod", created 2026-08-17T00:59:41Z. They were created by a probe that wrongly reasoned a
-body-less POST could not create anything — `CreatePodRequest`'s fields are all optional, so an
-absent body **is** a valid create. Recorded in fixture 27 §4. The local permission layer correctly
-blocked the agent from issuing the deletes.
+Ordered by how much each one unblocks. The first four are what stand between an unattended session
+and continuous execution; the rest are physical.
+
+### 1. A read-only AgentMail API key, reachable from the sandbox — the single biggest unblock
+
+Closes the one credentialed conjunct in every P1–P5 gate (the dual-target conformance diff). Without
+it, phases can only reach `code-complete`, never `gated`, and `CURRENT_PHASE` can never advance.
+
+- **Read-only is sufficient and is what should be used.** `conformance/manifest.json` is 18 GETs and
+  one `DELETE /v0/auth/me` probe; nothing is created on the reference account. The permission model
+  has 38 flags, so mint a key with read flags only rather than exposing the org root key.
+- Deliver it as an **environment variable on the Claude Code environment** (`AGENTMAIL_API_KEY`),
+  not in a file and not in a message. `sdxd`/`secd` are LAN-only and cannot reach here.
+- This needs a small amendment to the plan's secrets rule, which currently says "inject via
+  `sdxd run`" and has no sandbox clause. Say the word and I will write it.
+- **Judgement call that is yours, not mine:** a key in the sandbox environment is readable by
+  anything running here, including me. A read-only key on a personal account is a defensible
+  exposure; the org root key is not. If you would rather not, say so — the Lane L / Lane R split in
+  `docs/PLAN.md` is built to work without it, at the cost of finding conformance divergences later.
+
+### 2. Permission to dispatch subagents
+
+`docs/PLAN.md` mandates three read-only review lenses on every returned diff, and implementer
+fan-out from P2 onward. **This session is instructed not to use the Agent tool unless you ask for
+it**, so the extractor-rejection diff that just merged was written and reviewed by the same actor —
+which the plan explicitly forbids. Either grant it, or accept single-actor review and let me record
+that as a standing deviation rather than a per-diff surprise.
+
+### 3. A `.claude/settings.json` patch — I cannot apply this one myself
+
+The classifier blocks an agent editing its own permissions, correctly. Every approval prompt is a
+gap in this list (`CLAUDE.md`'s own rule), and each one stops an unattended run. Missing, from
+commands actually used this session:
+
+```jsonc
+// add to permissions.allow
+"Bash(./scripts/p1-gate.sh:*)", "Bash(./scripts/derive-request-extractors.sh:*)",
+"Bash(git cherry:*)", "Bash(git cherry-pick:*)", "Bash(git ls-remote:*)",
+"Bash(git stash:*)", "Bash(git reset --soft:*)", "Bash(git checkout:*)",
+"Bash(git push -u origin claude/:*)", "Bash(git push origin --delete:*)",
+"Bash(curl:*)", "Bash(psql:*)", "Bash(rm:*)", "Bash(chmod:*)", "Bash(chown:*)",
+"Bash(install:*)", "Bash(useradd:*)", "Bash(su amkpg:*)", "Bash(timeout:*)",
+"Bash(tee:*)", "Bash(awk:*)", "Bash(paste:*)", "Bash(bc:*)", "Bash(xargs:*)",
+"Bash(sort:*)", "Bash(npm:*)", "Bash(node:*)", "Bash(.venv-gate/bin/:*)",
+"Bash(.venv-schemathesis/bin/:*)"
+
+// REMOVE — stale or now dead
+"Bash(docker exec amk-dev-postgres:*)",   // dev-db.sh no longer uses Docker
+"Bash(docker ps:*)",                       // same
+"Bash(git -C /home/imma/projects/AgentMailKit push origin main:*)"  // workstation-only path
+```
+
+Note also that this file's migration section used to claim `.claude/settings.json` "still denies
+`Bash(gh:*)`". **It does not** — the deny list contains only `gh auth token` and
+`gh auth login --with-token`. That claim was wrong and is struck.
+
+### 4. Which branch policy wins
+
+`docs/PLAN.md` says one branch per crate per phase, `amk/<phase>/<crate>`. This session is
+instructed to develop and push only to `claude/next-steps-planning-u0nvud`. They conflict, and the
+merged PR used the session branch. Tell me which governs, or grant `git push origin amk/*` and I
+will follow the plan.
+
+### 5. Physical infrastructure — no key substitutes for these
+
+- **P2 gate:** mail injected from the OVH box via `/root/amksend.py` must appear with correct
+  threading over a 3-message exchange, and an SDK send to a Gmail test account must show DKIM+SPF
+  passing. Needs the box and a Gmail account.
+- **P5 gate:** one real domain verified end-to-end, and an induced bounce.
+- **P6:** the k3s cluster, the restore drill, the cutover.
+
+I can write and locally verify all of P2–P5's code without these; I cannot close their gates.
+
+### 6. Two live pods still on the AgentMail account
+
+`083523ee-276c-417a-85a3-8703d230c543` and `1c5a543a-5219-41fd-b4a1-289355162f2f`, both "My Pod",
+created 2026-08-17T00:59:41Z, by a probe that wrongly reasoned a body-less POST could not create
+anything — `CreatePodRequest`'s fields are all optional, so an absent body **is** a valid create.
+Recorded in fixture 27 §4. The local permission layer correctly blocked the agent from deleting
+live resources.
 
 ```bash
 # run this yourself; the classifier blocks an agent from deleting live resources
@@ -155,6 +237,12 @@ sdxd run --with agentmail=kv/agentmail -- bash -c '
 
 **The rule this bought:** read the request *schema* before calling a POST non-creating. "Malformed"
 is a property of the parse, not of the outcome.
+
+### 7. Housekeeping I could not finish
+
+`amk/p1/http-extractors` still exists on the remote. Its work is fully merged (`git cherry` reports
+it as already-applied), but this environment's git proxy hangs up on delete refspecs across four
+retries. Delete it from the workstation or the GitHub UI.
 
 ## Registers
 
@@ -181,6 +269,8 @@ is a property of the parse, not of the outcome.
   the moment anyone adds a PR template or an issue template — neither of which is CI, and both of
   which are ordinary on GitHub. Either retire it for real or re-key it on workflow directories
   alone; `ci-layer-local-only` already holds the no-CI decision that way.
-- **Pending, needs the user:** `.claude/settings.json` still denies `Bash(gh:*)`. The auto-mode
-  classifier correctly blocks an agent from editing its own permissions, so that patch is applied
-  by hand — see the migration commit message.
+- ~~`.claude/settings.json` still denies `Bash(gh:*)`~~ — **struck, this was wrong.** The deny list
+  contains only `gh auth token` and `gh auth login --with-token`; `gh pr`, `gh api`, `gh issue` and
+  `gh repo` are all allowed. The real permission gaps are listed under "Outstanding, needs the
+  user" above, and the reason they still need a human hand is unchanged: the classifier correctly
+  blocks an agent from editing its own permissions.

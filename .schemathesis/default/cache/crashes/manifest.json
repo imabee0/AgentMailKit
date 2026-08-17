@@ -2,6 +2,6 @@
   "format_version": 1,
   "schemathesis_version": "4.24.3",
   "schema_location": "reference/openapi.json",
-  "base_url": "http://127.0.0.1:8111",
-  "created_at": "2026-08-17T00:28:07.537013+00:00"
+  "base_url": "http://127.0.0.1:8113",
+  "created_at": "2026-08-17T08:30:02.133022+00:00"
 }
