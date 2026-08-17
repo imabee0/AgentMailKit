@@ -257,6 +257,35 @@ and the update/delete handlers wanted `thread_update`/`thread_delete`. None of t
 the vocabulary is the 38 names in `amk-types::api_key::WIRE_NAMES`, and `message_read`,
 `message_update` and `message_delete` carry threads too, per their own field docs.
 
+### The P1 gate's schemathesis half needed fixing to keep up
+
+Mounting 16 new operations made the fuzzer **stop reaching 13 of them**, and the only visible
+signal was a red exit that looked like a regression. The run reported **2548 generated, 2548
+passed — zero assertion failures** and still exited 1, on 8 `filter_too_much` health checks plus
+one network error. Schemathesis said it outright: 13 operations *"repeatedly returned 404,
+preventing tests from reaching your API's core logic"* — it was generating random UUIDs and
+Message-IDs for `{thread_id}`/`{message_id}` and never hitting a real row.
+
+The gate now seeds one real inbox, pod, api-key, thread and message and binds their ids through
+`conformance/schemathesis.toml`. Threads and messages are seeded with SQL because no endpoint
+creates them yet (send is P2's outbound half) — the same direct-write honesty the operator-
+configuration block already states rather than hides. A missing variable is a hard `ConfigError`,
+never a silent fall back to random generation.
+
+**Seeding alone made it worse, and the second reading is the useful one.** With ids pinned for
+*every* operation, the 404 warning grew from 13 operations to 25: ten DELETE operations are
+mounted, so a fuzzer handed a real `{thread_id}` reliably deletes the seeded thread and takes every
+later by-id operation down with it. Seeding plus a mounted DELETE on the same pinned id is a
+self-destroying fixture. DELETE now gets syntactically-valid, deliberately-absent ids — it still
+exercises decode → resolve mount → check scope → miss, and stops destroying the other 30
+operations' fixtures. Verifying a DELETE's success path is an integration test's job, and
+`crates/amk-http/tests/mail_reads.rs` does it against rows it seeds and owns.
+
+**The network error was not a server defect.** `POST /v0/inboxes/{inbox_id}/api-keys` reached with
+`-X QUERY`. Probed directly — QUERY, PROPFIND, FROBNICATE, PUT, TRACE, with and without a body, and
+20 repeats of the exact command — every one returns the ordinary 404 envelope. Recorded as **not
+reproduced**, not as explained away.
+
 ### Where P2 goes next
 
 1. **`amk-ingest` + `amk-outbound`** — the write order allows these to fan out. Both are large and
