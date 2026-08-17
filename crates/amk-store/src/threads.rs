@@ -15,6 +15,7 @@
 //! derived aggregate over member attachments, and the blob/attachment system is out of this
 //! dispatch's scope (see the crate root docs). Recorded here rather than guessed at.
 
+use amk_core::labels::apply_mutation;
 use amk_core::labels::{redact_thread, LabelAccess, ThreadRedaction};
 use amk_core::scope::ScopeFilter;
 use amk_types::ids::{has_forbidden_byte, InboxId, MessageId, OrganizationId, PodId, ThreadId};
@@ -296,4 +297,96 @@ pub async fn list(
     };
 
     Ok(Page { items, next })
+}
+
+// ---- label mutation and delete -----------------------------------------------------------------
+
+/// Apply an `add_labels`/`remove_labels` mutation to a thread, returning its labels afterwards.
+///
+/// `[SPEC:.claude/contracts/amk-store-mail-mutations.md]`. Sibling of `crate::messages::update` in
+/// every respect that matters — the system-label gate lives at the request boundary, precedence
+/// comes from `amk_core::labels::apply_mutation`, scope is a `WHERE` predicate so an out-of-window
+/// row masks as absent, and the read is taken `FOR UPDATE` so two concurrent PATCHes cannot lose
+/// one another's write.
+///
+/// **Register C2 is untouched here.** Whether a thread's labels are a strict union of its members'
+/// is unobserved — no fixture has a mixed-label thread — and this writes the thread's own `labels`
+/// column without recomputing anything from its messages. That is the same fail-closed shape
+/// `amk-core::labels` already carries, and this dispatch does not sharpen or settle the question.
+pub async fn update(
+    pool: &PgPool,
+    filter: &ScopeFilter,
+    thread_id: ThreadId,
+    add: &[String],
+    remove: &[String],
+) -> Result<Option<Vec<String>>, StoreError> {
+    // `thread_id` is a UUID and cannot carry a NUL; `filter.inbox_id()` is the only free-text bound
+    // value, and `InboxId::new` is infallible, so a NUL-bearing pin can reach here regardless of
+    // caller discipline. It can never match a real row — not-found, not a database error.
+    if filter
+        .inbox_id()
+        .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
+        return Ok(None);
+    }
+
+    let mut tx = pool.begin().await?;
+    let current: Option<Vec<String>> = sqlx::query_scalar(
+        "SELECT labels FROM threads \
+         WHERE organization_id = $1 \
+           AND ($2::uuid IS NULL OR pod_id = $2) \
+           AND ($3::text IS NULL OR inbox_id = $3) \
+           AND thread_id = $4 \
+         FOR UPDATE",
+    )
+    .bind(filter.organization_id().as_str())
+    .bind(filter.pod_id().map(|p| p.0))
+    .bind(filter.inbox_id().map(InboxId::as_str))
+    .bind(thread_id.0)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(current) = current else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let next = apply_mutation(&current, add, remove);
+    sqlx::query("UPDATE threads SET labels = $1, updated_at = now() WHERE thread_id = $2")
+        .bind(&next)
+        .bind(thread_id.0)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Some(next))
+}
+
+/// Delete one thread. Its messages go with it: `messages_thread_id_fkey` is `ON DELETE CASCADE`
+/// (`0008_inbox_delete_cascades.sql`, which made it so for the inbox-delete path and documents the
+/// `[TESTED]` transcript). So this is not an orphaning delete, and the cascade is the schema's
+/// answer rather than something this function arranges.
+pub async fn delete(
+    pool: &PgPool,
+    filter: &ScopeFilter,
+    thread_id: ThreadId,
+) -> Result<bool, StoreError> {
+    if filter
+        .inbox_id()
+        .is_some_and(|i| has_forbidden_byte(i.as_str()))
+    {
+        return Ok(false);
+    }
+    let result = sqlx::query(
+        "DELETE FROM threads \
+         WHERE organization_id = $1 \
+           AND ($2::uuid IS NULL OR pod_id = $2) \
+           AND ($3::text IS NULL OR inbox_id = $3) \
+           AND thread_id = $4",
+    )
+    .bind(filter.organization_id().as_str())
+    .bind(filter.pod_id().map(|p| p.0))
+    .bind(filter.inbox_id().map(InboxId::as_str))
+    .bind(thread_id.0)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
 }
