@@ -51,6 +51,12 @@ pub fn app_config() -> AppConfig {
     AppConfig {
         primary_domain: env::var(AMK_PRIMARY_DOMAIN).ok(),
         product_name: env::var(AMK_PRODUCT_NAME).ok(),
+        // `max_body_bytes` is deliberately NOT read from the environment: it is a safety bound
+        // this crate has no business widening per-deployment, and `amk_http::AppConfig`'s own
+        // default carries the reasoning for its value. Spread rather than named so a future field
+        // with a safe default does not break this call site again — the exhaustive literal that
+        // used to be here is exactly what failed to compile when `max_body_bytes` was added.
+        ..AppConfig::default()
     }
 }
 

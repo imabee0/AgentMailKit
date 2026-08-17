@@ -124,7 +124,11 @@ fn looks_like_json_content_type(headers: &HeaderMap) -> bool {
 }
 
 /// One `validation_error` envelope carrying exactly `issue` in `errors[]`.
-fn validation_error(issue: ValidationIssue) -> AppError {
+///
+/// `pub(crate)` for [`crate::pagination`], which classifies `limit` structurally rather than by
+/// matching a rejection's rendered text and so needs to raise an issue of its own through the same
+/// single constructor. One envelope shape, one place that builds it.
+pub(crate) fn validation_error(issue: ValidationIssue) -> AppError {
     // `ErrorEnvelope::new` special-cases `ValidationError` by boxing its `message` argument into a
     // synthesized `errors[0]` (`amk_types::error`'s own doc on `ErrorEnvelope::new`) — passed
     // through here only to be immediately replaced by `with_issues`, so the placeholder text below
@@ -345,23 +349,12 @@ fn query_deserialize_error_to_issue(rendered: &str) -> ValidationIssue {
     const PREFIX: &str = "Failed to deserialize query string: ";
     let inner = rendered.strip_prefix(PREFIX).unwrap_or(rendered);
     let (field, message) = split_field_prefix(inner);
-    if message == "invalid digit found in string"
-        || message == "cannot parse integer from empty string"
-    {
-        // `[SPEC:reference/fixtures/27-malformed-request-handling.txt]` §1: `?limit=abc` ->
-        // `invalid_type`/`received:"NaN"`. This crate's `limit: Option<u64>` cannot represent a
-        // negative number at all (`u64::from_str("-1")` fails identically to `"abc"` — both
-        // "invalid digit found in string"), so `?limit=-1`/`?limit=` are classified the same way
-        // here rather than as the reference's `too_small` (which requires a signed/coercing field
-        // type this dispatch does not have write access to — `crate::pagination` is out of scope;
-        // flagged in the dispatch report).
-        ValidationIssue::invalid_type(
-            "number",
-            Some("NaN"),
-            field,
-            "Invalid input: expected number, received NaN",
-        )
-    } else if message == "provided string was not `true` or `false`" {
+    // NOTE: there is deliberately no `ParseIntError` arm here. `limit` — the only numeric query
+    // parameter this crate has — is `Option<String>` and is classified structurally by
+    // `crate::pagination::parse_limit`, precisely because the reference splits `?limit=abc`
+    // (`invalid_type`/NaN) from `?limit=-1`/`?limit=`/`?limit=0` (`too_small`) and serde's integer
+    // impl renders all of those the same way. An arm here could only ever collapse them again.
+    if message == "provided string was not `true` or `false`" {
         ValidationIssue::invalid_value(
             "stringbool",
             STRINGBOOL_VALUES.iter().map(|s| (*s).to_owned()).collect(),

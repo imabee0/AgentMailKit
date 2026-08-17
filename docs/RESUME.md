@@ -3,7 +3,7 @@
 Where the last session stopped, so a fresh one — on this workstation or in Claude's cloud sandbox —
 can continue without re-deriving it. Update this file in the commit that invalidates it.
 
-**Last updated:** 2026-08-17, after a sandbox assessment of the open P1 branch.
+**Last updated:** 2026-08-17, after finishing the extractor-rejection work item.
 
 ## Verified state
 
@@ -22,28 +22,32 @@ section of `CLAUDE.md`.
 **Re-confirmed in the cloud sandbox, 2026-08-17: `cargo test --workspace` = 570 passed, 0 failed**,
 against a hand-started local Postgres (below). The 570 figure therefore holds on both PG17 and PG16.
 
-### DB-backed tests ARE runnable in the sandbox — `dev-db.sh` is not the only way
+### DB-backed tests need no Docker any more
 
-`./scripts/dev-db.sh up` needs a Docker daemon and correctly exits 1 without one (the sandbox has
-the `docker` client but no daemon). It is not the only route: the sandbox image carries PostgreSQL
-16 server binaries, and a throwaway instance on the port and DSN the tests already expect covers
-every DB-backed `amk-store`/`amk-http` test. Reproduced the full 570 exactly, so PG16 is a faithful
-stand-in for the containerised PG17 for this workload.
+`./scripts/dev-db.sh` used to `docker run postgres:17-alpine`, which made every DB-backed
+`amk-store`/`amk-http` integration test unrunnable wherever there is no Docker daemon — including
+this sandbox, which has the `docker` client and nothing behind it. `check.sh` then exited PASS
+having silently skipped that whole suite. It now drives `initdb`/`pg_ctl` directly, so the plain
+documented command works in both places and the suite actually runs:
 
 ```bash
-# sandbox only; initdb refuses to run as root, hence the unprivileged user
-export PATH=/usr/lib/postgresql/16/bin:$PATH
-useradd -m amkpg; install -d -o amkpg -m 700 /home/amkpg/pgdata
-su amkpg -c "PATH=$PATH initdb -D /home/amkpg/pgdata -U amk --auth=trust"
-su amkpg -c "PATH=$PATH pg_ctl -D /home/amkpg/pgdata \
-  -o '-p 55432 -k /tmp -c listen_addresses=127.0.0.1' -l /home/amkpg/pgdata/log start"
-psql postgres://amk@127.0.0.1:55432/postgres -c "create database amk owner amk"
-psql postgres://amk@127.0.0.1:55432/postgres -c "alter user amk password 'amk-dev-local'"
-export AMK_DATABASE_URL='postgres://amk:amk-dev-local@127.0.0.1:55432/amk' AMK_REQUIRE_DB=1
+./scripts/dev-db.sh up      # same port, DSN, role and database as before
 ```
 
-This narrows the sandbox's "cannot verify" list to what genuinely needs the LAN: `sdxd`/`secd`, the
-live AgentMail account, the OVH box. It does **not** make the P1 gate runnable — see below.
+It finds server binaries on `PATH`, under `/usr/lib/postgresql/*/bin`, `/usr/pgsql-*/bin` and the
+Homebrew prefixes, taking the highest version; as root it owns the cluster as an unprivileged user
+(`initdb` refuses to run as root) under `/var/lib/amk-dev-db`, otherwise under `.amk-dev-db/` in the
+repo. Verified on PostgreSQL 16 here against a baseline recorded on 17, reproducing the 570 exactly,
+so the two are interchangeable for this workload.
+
+`./scripts/p1-gate.sh` had the same dependency in three `docker exec ... psql` calls and now talks
+to the cluster over TCP. That was worth fixing for more than the sandbox: a container dependency the
+gate never needed presented as "this gate is workstation-only", which is a much more expensive
+belief than a missing client.
+
+What still genuinely needs the LAN: `sdxd`/`secd` and therefore the live AgentMail key, the live
+account, and the OVH box. Of `p1-gate.sh`'s four conjuncts, the dual-target conformance diff and
+both SDK smokes need that key; the schemathesis conjunct does not.
 
 ## Phase position
 
@@ -56,105 +60,80 @@ a falsification proving failure propagates). `./scripts/p1-gate.sh` is the four-
 dual-target conformance diff, Python SDK smoke, Node SDK smoke, schemathesis over the 25 mounted
 operations.
 
-`scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0`. **Do not advance it to P1 until the open
-item below is closed** — the schemathesis half is what found that divergence, so declaring P1 met
-while it stands would record a gate that its own evidence contradicts.
+`scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0`. The divergence that blocked it is now
+fixed (next section), but **advancing it still needs `./scripts/p1-gate.sh` to pass in full**, and
+three of that gate's four conjuncts need the live AgentMail key. Local green is not the gate.
 
-## The one open work item
+## The extractor-rejection work item: DONE, unmerged, ungated
 
-**axum extractor rejections escape our JSON error contract.** schemathesis found that malformed
-requests bypass `AppError` entirely and surface axum's own rejections: `text/plain` bodies, and
+**axum extractor rejections escaped our JSON error contract.** schemathesis found that malformed
+requests bypassed `AppError` entirely and surfaced axum's own rejections: `text/plain` bodies, and
 statuses the error catalog has no code for — **415**, **422**, and **413** (the last from an
 unconditional 2 MB `DEFAULT_LIMIT` inside `Bytes::from_request`, which applies whether or not a
-`DefaultBodyLimit` layer is installed; amk-http installs none).
+`DefaultBodyLimit` layer is installed; amk-http installed none).
 
-The reference's actual behaviour is captured in `reference/fixtures/27-malformed-request-handling.txt`:
-every malformed request is **400 + `application/json` + the full envelope with exactly one
-`errors[]` entry**. No 415, no 422, no plain text anywhere in that surface. It reverses two
-decisions an earlier inferred contract had made, and adds the 413 case a review lens found after
-the fact — site enumeration listed *where* extractors are used and could not see a rejection
-enum's *variant* list.
+The reference's behaviour is `reference/fixtures/27-malformed-request-handling.txt`: every malformed
+request is **400 + `application/json` + the full envelope with exactly one `errors[]` entry**.
 
-- Contract: `.claude/contracts/amk-http-extractor-rejections.md` (revised twice; reviewed by a
-  read-only lens before dispatch).
-- **Unreviewed work in progress on branch `amk/p1/http-extractors`, commit `631ddf2`** — 1052
-  insertions including `crates/amk-http/src/body.rs` (374 lines) and
-  `crates/amk-http/tests/extractor_rejections.rs` (519 lines). The dispatched implementer was
-  **terminated by the user mid-work**; its last reported line was "All matching. Now the body
-  probes." It has passed no review lens and no mutation pass.
+Contract: `.claude/contracts/amk-http-extractor-rejections.md`, now at **revision 3**.
 
-### Measured state of that branch (sandbox, 2026-08-17) — further along than assumed
+### What landed
 
-The branch is **pushed**: `origin/amk/p1/http-extractors` = `631ddf2`, 2 commits behind `main`.
-Nothing is stranded on the workstation. Measured by checking it out in a worktree with the local
-Postgres above:
+`JsonBody<T>` and `QueryParams<T>` in `crates/amk-http/src/body.rs` wrap axum's own extractors with
+`type Rejection = AppError`, mirroring `ids.rs`'s existing `PathPodId` pattern. Content-type is not
+enforced and an absent body is `{}` (fixture 27 §2). An explicit `DefaultBodyLimit` comes from
+`AppConfig::max_body_bytes`, default 8 MiB and marked `[INFERRED]`.
+
+**Revision 3 fixed two things the first dispatch could not.** Both were defects in the *contract*,
+not the work, and both are the same mistake in a third and fourth form — the contract enumerated
+extractor *sites* and mistook that for enumerating everything a mandated change reaches:
+
+1. It mandated `AppConfig::max_body_bytes` without making `AppConfig`'s other construction site
+   writable. `crates/amk-cli/src/config.rs` builds it with an exhaustive struct literal, so the
+   workspace did not compile — an added `impl Default` does not rescue an exhaustive literal.
+2. It mandated `limit` behaviour `crate::pagination`'s own types could not express, while leaving
+   `pagination.rs` unwritable. `ListQuery::limit` was `Option<u64>`, and fixture 27 §1 requires
+   `?limit=abc` (`invalid_type`/`received:"NaN"`) to split from `?limit=-1`, `?limit=` and
+   `?limit=0` (one *identical* `too_small` body). `u64::from_str` fails on `"-1"`, `""` and `"abc"`
+   the same way, and `"0"` parses and reaches no validator — so the split was unrepresentable and
+   the first dispatch pinned three divergences in tests instead. `MAX_LIMIT = 100` separately
+   clamped `?limit=101` to echo `100`, which is a value clients paginate against, not cosmetics.
+
+`limit` is now `Option<String>` classified structurally by `pagination::parse_limit`, which *deletes*
+the `limit` half of `body.rs`'s serde-message string matching rather than adding to it. The clamp
+and `MAX_LIMIT` are gone: fixture 27 §1 records that no cap is enforced. **No divergences remain.**
+
+### Evidence
 
 ```
-cargo test -p amk-http --test extractor_rejections   16 passed; 0 failed
-cargo test --workspace  (with the one-line fix below) 586 passed; 0 failed   # +16 vs main, no regressions
-cargo clippy --workspace --all-targets -- -D warnings  clean
-cargo fmt --all -- --check                             clean
-./scripts/shape-provenance.sh                          PASS
+./scripts/check.sh              check: PASS   shape-provenance: PASS   plan-ledger: PASS
+cargo test --workspace          587 passed; 0 failed        (main was 570)
 ```
 
-So the earlier "incomplete by its own account" reading understates it — the body half is written
-and tested. Two things are actually outstanding, and **one of them is a defect in the contract, not
-in the work**:
+Mutation pass, both directions, on a scratch copy outside the tree, since deleted:
 
-1. **The contract is unsatisfiable as written.** It mandates a `max_body_bytes` field on
-   `AppConfig` but its writable paths omit `crates/amk-cli/**`. `crates/amk-cli/src/config.rs:51`
-   builds `AppConfig` with an exhaustive struct literal, so the workspace does not compile:
-   `error[E0063]: missing field 'max_body_bytes' in initializer of 'AppConfig'`. The added
-   `impl Default` does not help an exhaustive literal. The fix is one line
-   (`..AppConfig::default()`), and all figures above were taken with it applied as a scratch edit.
-   This is the contract's own warned-about failure mode again — the derivation enumerated
-   *extractor* sites, never *`AppConfig` construction* sites. **Site enumeration is not variant
-   enumeration, and it is not construction-site enumeration either.**
-2. **Three divergences from the contract's edge cases**, all rooted in `crates/amk-http/src/
-   pagination.rs`, which is also outside the writable paths. The implementer marked each one
-   `[INFERRED]`/"documented divergence" in code *and* pinned it in a test, so nothing is hidden —
-   but the branch does not satisfy its contract, and #3 is a live conformance divergence against
-   fixture 27:
-   - `?limit=-1`, `?limit=` — contract edge case 6 wants `too_small`/`minimum:0`/`inclusive:false`;
-     emitted is `invalid_type`/`received:"NaN"`, because `ListQuery::limit` is `Option<u64>` and
-     cannot represent a negative at all (`"-1"` and `"abc"` fail identically).
-   - `?limit=0` — contract wants `too_small`; emitted is 200 with an empty page, because `u64`
-     parses `"0"` and `pagination::resolve` already treats a supplied 0 as "return nothing".
-   - `?limit=101` — contract edge case 7 says 200 **echoing `limit:101`**, and "do not add a cap".
-     `pagination` clamps to `MAX_LIMIT = 100` (itself marked `[ASSUMED]` on `main`) and echoes the
-     *applied* value, so the response says `100`.
+| mutation | kills |
+|---|---|
+| delete the empty-`limit` guard | `empty_negative_and_zero_limits_are_all_the_same_too_small_issue` |
+| widen: every rejection -> one `too_small` | `a_non_numeric_limit_is_invalid_type_nan_not_too_small` |
+| restore the `MAX_LIMIT` clamp | `a_limit_above_one_hundred_is_accepted_and_echoed_verbatim` **and** `a_limit_above_the_maximum_is_neither_clamped_nor_rejected` |
+| narrow `i128` -> `i64` | `a_negative_below_i64_min_is_still_too_small_not_nan` |
 
-### The decision this needs before re-dispatch
+`./scripts/derive-request-extractors.sh` re-run: sections 1–2 show **no** bare `Json<`/`Query<` left
+in argument position; section 4 lists both new wrappers. Fixture 27's probe table was replayed
+against a locally-served `amkd --role api` and every row matches, including `?limit=101` -> 200 with
+`"limit":101`, and the two content-type rows now returning 200 rather than 415. No 415, 422, 413 or
+`text/plain` anywhere in the surface.
 
-Amending the writable paths to include `crates/amk-cli/src/config.rs` is forced — the field change
-is mandated, so its call sites must be in scope. The open judgement call is the pagination three:
+### What is NOT done
 
-- **(A) Widen the contract to include `crates/amk-http/src/pagination.rs`** and make `limit` a
-  signed/coercing type so `too_small` and the un-clamped echo match fixture 27. Conformance-correct;
-  closes a real divergence; also retires the `[ASSUMED]` on `MAX_LIMIT`.
-- **(B) Accept the divergences**, record them in `amk-p1-divergences.md` with a register entry, ship.
-
-**Recommend (A)**, at minimum for `?limit=101`: that one is *directly observed* in fixture 27, and
-schemathesis — the conformance half that found this whole work item — is exactly what would catch
-it. Declaring P1 met over a known conformance divergence repeats the mistake this file already
-warns about one section up.
-
-### Then
-
-1. Amend the contract (orchestrator-only), re-run a read-only lens over it before dispatch.
-2. Rebase `amk/p1/http-extractors` onto `main`; re-dispatch against the amended contract, treating
-   `631ddf2` as a reference rather than a base.
-3. Missing report artifacts the dispatch never produced and which are required before merge: the
-   probe-table re-run, the `./scripts/derive-request-extractors.sh` re-run, and the **mutation pass
-   in both directions**. Plus the three review lenses.
-4. Re-run `./scripts/p1-gate.sh` in full and capture the schemathesis half as fixture evidence with
-   its own ledger check, then advance `CURRENT_PHASE` to P1.
-
-**Where each step can run.** Steps 1–3 are sandbox-capable now that DB-backed tests are. Of the
-gate's four conjuncts, the dual-target conformance diff and both SDK smokes shell out to `sdxd` for
-the live AgentMail key and are **workstation-only**; the schemathesis conjunct only needs a local
-`amkd`, `reference/openapi.json` and a pip venv, so it is *probably* sandbox-runnable — untested,
-so treat that as a lead, not a fact. Step 4 as a whole is workstation-only.
+- **The three review lenses have not run** on this diff. Contract-conformance, provenance and
+  test-adequacy are required before merge and none has been dispatched.
+- **`./scripts/p1-gate.sh` has not been re-run in full.** Three of its four conjuncts need the live
+  AgentMail key via `sdxd`, so this is workstation-only. Until it passes, `CURRENT_PHASE` stays at
+  `P0` — declaring P1 met on the strength of the local suite alone is exactly the "gate its own
+  evidence contradicts" this file warned about.
+- The schemathesis conjunct still needs its own fixture capture and ledger check.
 
 ## Outstanding, needs the user
 

@@ -43,7 +43,7 @@ pub async fn list_org(
 ) -> Result<Json<ListApiKeysResponse>, AppError> {
     permissions::require(&ctx.grants, "api_key_read")?;
     let filter = organization_window(&ctx.scope);
-    list_keys(&state, &filter, q.resolve()).await
+    list_keys(&state, &filter, q.resolve()?).await
 }
 
 /// `GET /v0/pods/{pod_id}/api-keys` — no `ascending` (contract's derived-from-`openapi.json`
@@ -56,7 +56,7 @@ pub async fn list_pod(
 ) -> Result<Json<ListApiKeysResponse>, AppError> {
     let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "api_key_read")?;
-    list_keys(&state, &filter, q.resolve()).await
+    list_keys(&state, &filter, q.resolve()?).await
 }
 
 /// `GET /v0/inboxes/{inbox_id}/api-keys` — likewise no `ascending`.
@@ -69,7 +69,7 @@ pub async fn list_inbox(
     let inbox_id = inbox_id_from_path(&raw_inbox_id)?;
     let filter = settle_inbox_mount(&state.pool, &ctx.scope, &inbox_id).await?;
     permissions::require(&ctx.grants, "api_key_read")?;
-    list_keys(&state, &filter, q.resolve()).await
+    list_keys(&state, &filter, q.resolve()?).await
 }
 
 async fn list_keys(

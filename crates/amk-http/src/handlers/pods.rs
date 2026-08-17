@@ -39,7 +39,7 @@ pub async fn list(
     // would require running the permission check after a lookup; check it first.
     permissions::require(&ctx.grants, "pod_read")?;
     let filter = organization_window(&ctx.scope);
-    let resolved = q.resolve();
+    let resolved = q.resolve()?;
 
     let page = match filter.pod_id() {
         // A pod- or inbox-scoped credential's window pins exactly one pod. `pods::list` has no

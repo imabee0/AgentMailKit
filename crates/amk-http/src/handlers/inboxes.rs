@@ -86,7 +86,7 @@ async fn list_inboxes(
     filter: &ScopeFilter,
     q: &ListQuery,
 ) -> Result<Json<ListInboxesResponse>, AppError> {
-    let resolved = q.resolve();
+    let resolved = q.resolve()?;
     let page = match filter.inbox_id() {
         // An inbox-scoped credential's window pins exactly one inbox; `inboxes::list` has no
         // single-inbox filter, so this degenerates rather than post-filtering an org/pod-wide
