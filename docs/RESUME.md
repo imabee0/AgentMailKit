@@ -272,13 +272,26 @@ creates them yet (send is P2's outbound half) — the same direct-write honesty 
 configuration block already states rather than hides. A missing variable is a hard `ConfigError`,
 never a silent fall back to random generation.
 
-**Seeding alone made it worse, and the second reading is the useful one.** With ids pinned for
-*every* operation, the 404 warning grew from 13 operations to 25: ten DELETE operations are
-mounted, so a fuzzer handed a real `{thread_id}` reliably deletes the seeded thread and takes every
-later by-id operation down with it. Seeding plus a mounted DELETE on the same pinned id is a
-self-destroying fixture. DELETE now gets syntactically-valid, deliberately-absent ids — it still
-exercises decode → resolve mount → check scope → miss, and stops destroying the other 30
-operations' fixtures. Verifying a DELETE's success path is an integration test's job, and
+**Seeding alone made it worse, and each number told you how wrong the fix was.** Ten DELETE
+operations are mounted, so a fuzzer handed a real `{thread_id}` deletes the seeded thread and takes
+every later by-id operation with it. Seeding plus a mounted DELETE on the same pinned id is a
+self-destroying fixture. The measured progression, which is the point:
+
+| DELETE carve-out | operations repeatedly 404ing | schema-validation mismatches |
+|---|---|---|
+| none — ids pinned for every operation | 25 | 11 |
+| three of five params | 23 | 10 |
+| **all five** | **10** | **4** |
+
+The three-param attempt moving 25 -> 23 was too small a change to be a fix working; it was a fix
+reaching three of five parameters. `inbox_id` and `pod_id` were still live, so
+`DELETE /v0/inboxes/{inbox_id}` and `DELETE /v0/pods/{pod_id}` kept destroying the seeds — and the
+seeded inbox *owns* the seeded thread and message, so deleting it cascaded those away too (0008's
+`ON DELETE CASCADE`). The two ids that own everything else were the ones left pointed at real rows.
+
+DELETE now gets syntactically-valid, deliberately-absent ids for all five. It still exercises
+decode -> resolve mount -> check scope -> miss, and stops destroying the other 30 operations'
+fixtures. Verifying a DELETE's success path is an integration test's job, and
 `crates/amk-http/tests/mail_reads.rs` does it against rows it seeds and owns.
 
 **The network error was not a server defect.** `POST /v0/inboxes/{inbox_id}/api-keys` reached with
