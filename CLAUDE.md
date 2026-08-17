@@ -67,17 +67,40 @@ A gate that cannot run in the sandbox is reported as **not run**, never as passe
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
 **P0 is closed.** `amk-types`, `amk-core`, `amk-store`, `amk-http` and `amk-cli` are merged and
-mutation-verified; Register C3 is applied to `amk-core::threading`. P0's SDK gate is MET —
-`reference/fixtures/24-p0-gate-sdk-authme.txt` captures the unmodified official `agentmail==0.5.9`
-Python SDK calling `auth.me()` against `amkd --role api` and getting an `Identity` back. `amk init`
-mints one UUID that is **both** the `organization_id` and the default pod's `pod_id`, which is the
-equality `amk-http` resolves `POST /v0/inboxes` by (fixture 22).
+mutation-verified; C3 is applied to `amk-core::threading`; the SDK gate is MET (fixture 24 — the
+unmodified official `agentmail==0.5.9` calling `auth.me()` against `amkd --role api`). `amk init`
+mints one UUID that is **both** the `organization_id` and the default pod's `pod_id` — the equality
+`amk-http` resolves `POST /v0/inboxes` by (fixture 22).
 
 **P1's control-plane gate is in flight**; `docs/RESUME.md` carries its exact state and the one open
-work item. `scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0` — move it to P1 only when every
-P1 gate conjunct is met, not before.
+work item. `scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0` — advance it only when every P1
+conjunct is met. Deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
 
-Still deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
+## Branching, dispatch and merge
+
+- **One branch per crate per phase, named `amk/<phase>/<crate>`** — `amk/p2/ingest`,
+  `amk/p1/http-extractors`. One worktree per branch under `.claude/worktrees/<name>/`. No branch
+  outlives its phase: one open across a phase boundary is a drift signal, so close it or restart it
+  from the new base.
+- **Commits conventional and atomic** — one logical change, tests in the same commit as the code
+  they cover, no `wip` commits on a branch that will be reviewed.
+- **Rebase onto `main` before review; never merge-commit into the branch.** The reviewed diff must
+  be the diff that lands. Merge order follows the crate write order — never merge a downstream
+  crate before its upstream is on `main`.
+- **After merge, delete the branch and remove the worktree.** Non-interactive runs never hit the
+  keep/remove prompt and leave worktrees behind (`git worktree remove --force` if dirty); the
+  ledger's `hygiene-worktrees-swept` fails when one is left with no dispatch in flight.
+- **Dispatch order is load-bearing**: write the contract into the worktree **first**, then
+  `.amk-scope`, then `touch .claude/fanout.lock`. `.amk-scope` existing is what arms the guard's
+  scope rule, so a contract written after it is blocked — and an exemption there is precisely what
+  an agent would use to rewrite its own contract. Remove the lock at merge or abandonment.
+- **The orchestrator writes no implementation code except `amk-types`.** It holds the plan,
+  dispatches, reviews returned diffs, runs gates, merges. Fan out only when the crates share no
+  files, neither depends on the other, both depend only on merged gate-passed crates, and
+  `amk-types` is frozen; ceiling 2–3 concurrent.
+- **Three read-only lenses on every returned diff** — contract-conformance, provenance,
+  test-adequacy — plus one on the *contract* before dispatch. Merge only when all three are clean.
+- PRs via `gh pr create`. Never `gh auth token`.
 
 ## Process rules that are load-bearing
 
@@ -95,12 +118,12 @@ Long form and the failures that bought each: `docs/OPERATING-RULES.md`.
 - **The live capture beats the spec text** — five instances so far. Check the fixture before
   trusting `openapi.json`, the SDKs, or existing code.
 - **An approval prompt is a defect signal, not friction** — it locates a gap in
-  `.claude/settings.json`'s allow-list; fix the list rather than approving past it. The exception
-  is a prompt guarding privilege escalation, which is the layer working as designed.
-- **Agent role definitions load only at session start.** `.claude/agents/*.md` is not hot-reloaded;
-  dispatching before a restart runs under default model/effort/tools and nothing inside the
-  dispatch can see that. `memory:` is deliberately absent (unverified key; an unsupported key
-  deregisters the agent silently).
+  `.claude/settings.json`'s allow-list; fix the list rather than approving past it. The exception is
+  a prompt guarding privilege escalation (an agent editing its own permissions), which is the layer
+  working as designed.
+- **Agent role definitions load only at session start.** `.claude/agents/*.md` is not hot-reloaded,
+  so dispatching before a restart runs under default model/effort/tools and nothing inside the
+  dispatch can see that. `memory:` is deliberately absent — an unsupported key deregisters silently.
 
 No CI: gating is `./scripts/check.sh` plus the hooks, on the machine running them — a user decision
 with its cost recorded in the plan. `scripts/plan-ledger.sh` asserts no workflow directory exists;
@@ -110,8 +133,7 @@ Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` block
 writing to `amk-types`, to `docs/PLAN.md`, outside its dispatched `.amk-scope`, or introducing a
 stalwart-labs type into the protected crates. Subagency is decided by path — inside
 `.claude/worktrees/` or not. `.claude/fanout.lock` freezes `amk-types`, the plan and
-`scripts/hooks/**` for **everyone including the orchestrator** while a dispatch is in flight; the
-orchestrator creates it at dispatch and removes it at merge or abandonment.
+`scripts/hooks/**` for **everyone including the orchestrator** while a dispatch is in flight.
 
 ## Contract facts that are easy to get wrong
 
@@ -172,7 +194,7 @@ say so plainly and rotate it.
 
 ## Forge
 
-**GitHub:** `https://github.com/Appsynergy-io/AgentMailKit` (private). Migrated from Gitea on
-2026-08-17 by explicit user instruction so the repo can be driven from Claude's cloud sandbox; this
+**GitHub:** `https://github.com/Appsynergy-io/AgentMailKit` (private). Migrated from Gitea
+2026-08-17 by user instruction so the repo can be driven from Claude's cloud sandbox — this
 supersedes the global "Gitea only, never GitHub" rule for this project. The Gitea remote was
-dropped and that copy is no longer maintained. `gh` is authorised here; `gh auth token` is not.
+dropped; that copy is unmaintained.
