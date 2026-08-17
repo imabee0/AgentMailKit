@@ -113,6 +113,53 @@ Everything below is `[PLANNED]`. Each phase ends at a **Gate**: a verification t
 - **P5 Domains** — CRUD, DNS record verification (hickory), re-verify job → `domain.verified`, zone-file export, DKIM keygen + import of existing keys, `feedback_enabled` DSN/ARF → bounce/complaint events. Gate: one real domain verified end-to-end; induced bounce produces `message.bounced`; AND **P5's domain types diff clean against `reference/fixtures/C1-domain-shape.txt`** — any field we emit not in that fixture, or any fixture field we omit, is a conformance failure, not a judgement call; dual-target conformance diff clean for this phase's endpoints against api.agentmail.to (domain endpoints diff against a real account's domain listing where D1 permits — read-only listing of their side, no domain creation on production domains).
 - **P6 Deploy + migrate + cutover** (details below). Gate: restore drill (step 3b) passed from backups alone; production traffic on `.64` served by AgentMailKit; Stalwart scaled to 0; dns-health checks green.
 
+### Gate lanes — what can run unattended, and what cannot (added 2026-08-17)
+
+Every gate above mixes checks that need nothing but this repository with checks that need the live
+AgentMail account or physical infrastructure. Stated as one undifferentiated "Gate:", a phase can
+only ever be *finished by a human*, so an unattended session must stop at every phase boundary even
+when all the work it could do is done. That is a presentation problem, not a real dependency: the
+conjuncts were always separable. They are now separated, and each phase gate reads as two lanes.
+
+**Lane L — local. Runs anywhere this repository is checked out, with no credential and no LAN.**
+`cargo build/test/clippy/fmt`; `./scripts/check.sh`; `shape-provenance.sh`; `plan-ledger.sh`;
+`guard.test.sh`; every DB-backed integration test (`./scripts/dev-db.sh` no longer needs Docker);
+the mutation pass; **schemathesis against localhost**; **both official SDK smokes against
+localhost** — the Python and Node smokes always pointed at `AMK_BASE=http://127.0.0.1:…`, never at
+the reference; and any probe table replayed against our own `amkd`.
+
+**Lane R — reference. Needs something outside the repository.** Two kinds, and the distinction
+matters because one is cheap to grant and the other is not:
+
+- **R-key — needs only an AgentMail API key.** Exactly one check: the **dual-target conformance
+  diff**. Its manifest is **18 GETs and one `DELETE /v0/auth/me` probe** — no resource is created
+  on the reference account, so a **read-only key is sufficient** and is what should be used. This
+  is the check that gates P1–P5, so a key is the single highest-value thing a human can supply.
+- **R-phys — needs hardware or a real identity no key substitutes for.** P2's mail injection from
+  the OVH box (`/root/amksend.py`) and the Gmail DKIM/SPF confirmation; P5's one real verified
+  domain and induced bounce; all of P6.
+
+**Measured, not assumed (2026-08-17, in the cloud sandbox):** `schemathesis==4.24.3` installs and
+selects 25 of 130 operations; `agentmail==0.5.9` (Python) and `agentmail@0.5.19` (Node) both
+install at their pinned versions; PostgreSQL server binaries are present so the DB suite runs.
+**Three of P1's four gate conjuncts are therefore Lane L**, which corrects an earlier claim in
+`docs/RESUME.md` that three of four needed the live key. Only the conformance diff does.
+
+**How a phase completes.** A phase is **code-complete** when Lane L passes in full, and **gated**
+when Lane R does. The next phase's *code* may begin at code-complete; no phase is called **done**,
+and `CURRENT_PHASE` never advances, until it is gated. Lane R results are batched rather than
+blocking: an unattended session drives phases to code-complete and appends each phase's outstanding
+Lane R conjuncts to the queue in `docs/RESUME.md`.
+
+**The cost of that, stated rather than implied.** Deferring Lane R means a conformance divergence is
+found later, after downstream code may already depend on the wrong shape. That risk is real and it
+is the reason this is a lane split and not a licence to skip: every divergence this project has
+actually hit was a *localised* shape or status error, cheap to correct in one place — six times so
+far a live capture has beaten a reasoned reading, and none of the six required rework beyond the
+module that got it wrong. If a Lane R failure ever does invalidate downstream work, that fact goes
+in Register A and this paragraph gets rewritten with the evidence. **R-key is cheap to grant and
+removes most of this exposure, so batching Lane R is the fallback, not the preference.**
+
 ## Full parity — parked until V1 ships (scope creep goes here, visibly)
 
 `[PLANNED]` in rough order: FTS search endpoints with highlights; allow/block list enforcement UI-parity (`send` direction 403 `message_rejected`); rspamd/clamd sidecars; Talon-port reply extraction (until then degraded); full 34-flag permission matrix + AgentID public keys; agent signup + OTP (config-gated, off by default); MCP server + stdio (Gate: Claude Code, ChatGPT, Grok connectors list tools and send mail; unmodified npm `agentmail-mcp` bridge works against our URL); SMTP submission :587/:465; `subdomains_enabled` wildcard-MX; batch endpoints not needed by v1 consumers; IMAP subset (last; mail-client access has a gap between Stalwart retirement and this phase — gap explicitly accepted by user); console/session auth path for a browser frontend — API-key-only ships in V1; the `Credential` enum leaves room for it without touching handlers; EU/x402 host aliases as no-op vhosts.
