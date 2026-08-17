@@ -13,8 +13,8 @@ repository.workspace = true
 # each carry the comment forbidding these same dependencies to themselves.
 [dependencies]
 amk-types = { path = "../amk-types" }
-mail-auth.workspace = true
 mail-builder.workspace = true
+mail-auth.workspace = true
 mail-send.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

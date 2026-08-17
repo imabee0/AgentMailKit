@@ -22,6 +22,7 @@
 //! deliberately not reachable from `cargo test`.
 
 pub mod assemble;
+pub mod build;
 pub mod signing;
 
 use std::sync::{Arc, Mutex};
