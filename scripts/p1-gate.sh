@@ -130,4 +130,40 @@ AGENTMAIL_API_KEY='sdxd:agentmail' CAND_KEY="$CAND_KEY" sdxd run -- bash -c '
     python3 conformance/dual_target.py conformance/manifest.json'
 GATE_EXIT=$?
 echo "dual_target.py exit: $GATE_EXIT"
-exit "$GATE_EXIT"
+
+echo
+echo "== P1 gate, second half: the unmodified official Python SDK against the same server =="
+# The diff proves our responses have the reference's SHAPE. This proves the official client can
+# actually USE them — deserialize into its own typed models, page, round-trip a full CRUD cycle.
+# A response can be structurally identical and still break a typed client (a pydantic validator, a
+# required field the model insists on), so neither half subsumes the other.
+if [ ! -x .venv-gate/bin/python ]; then
+  python3 -m venv .venv-gate
+  .venv-gate/bin/pip install -q -r conformance/requirements-gate.txt
+fi
+AMK_BASE="http://${BIND}" AMK_KEY="$CAND_KEY" .venv-gate/bin/python conformance/sdk_smoke.py
+SMOKE_EXIT=$?
+echo "sdk_smoke.py exit: $SMOKE_EXIT"
+
+echo
+echo "== P1 gate, third half: the unmodified official NODE SDK against the same server =="
+# The plan's P1 gate says "Python+Node SDK smoke", and the two clients are generated from one spec
+# but not from one codebase. What the Node client does differently, verified by probing its own
+# serialization layer rather than assumed: it maps the wire's snake_case to camelCase (a field we
+# misspell arrives as `undefined`, not as an error), it coerces RFC 3339 strings to real `Date`
+# objects, and it routes an `am_eu_`-prefixed key to AgentMail's EU host — the one SDK behaviour
+# that could take a client off our base URL entirely. What it does NOT do, contrary to the obvious
+# guess: reject a response missing a field its model marks required. Every resource client parses
+# with `skipValidation: true, unrecognizedObjectKeys: "passthrough"`, so a missing required field is
+# accepted as `undefined` and our extra live fields (`organization_id`, `smtp_id`) pass through
+# un-mapped. The typed-client-rejects-bad-shapes check the plan wants therefore has to be written as
+# assertions here; it is not something the SDK performs for us.
+[ -d conformance/node_modules ] || npm install --prefix conformance --silent
+AMK_BASE="http://${BIND}" AMK_KEY="$CAND_KEY" node conformance/sdk_smoke.mjs
+NODE_EXIT=$?
+echo "sdk_smoke.mjs exit: $NODE_EXIT"
+
+# All three must pass. Reporting only the diff's verdict would let a broken client ship behind a
+# clean diff, which is the exact gap the SDK halves exist to close.
+[ "$GATE_EXIT" -eq 0 ] && [ "$SMOKE_EXIT" -eq 0 ] && [ "$NODE_EXIT" -eq 0 ]
+exit $?

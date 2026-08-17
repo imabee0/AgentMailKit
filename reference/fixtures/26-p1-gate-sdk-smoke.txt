@@ -1,0 +1,220 @@
+P1 GATE — SDK SMOKE (Python + Node), captured 2026-08-16
+========================================================
+
+The plan's P1 gate reads: "Python+Node SDK smoke (create/list/delete across scopes) +
+schemathesis over implemented paths; dual-target conformance diff clean for all endpoints
+implemented in this phase". This fixture captures the SDK-smoke half of that, both clients.
+(The conformance-diff half is fixture 25; schemathesis is not yet run and the ledger says so.)
+
+WHAT IS BEING PROVEN, and why it is not the same thing fixture 25 proves.
+Fixture 25's diff shows our responses have the reference API's SHAPE. It says nothing about
+whether an official client can USE them: a response can be structurally identical to the
+reference's and still break a typed client on deserialization, on a required-field model, or
+on the client's own base-URL routing. This runs both official clients, unmodified, against
+`amkd --role api` on localhost with nothing changed but the base URL — the entire V1
+acceptance criterion — and drives a full create/list/get/update/delete cycle across all three
+resources the P1 control plane implements.
+
+WHAT EACH CLIENT COVERS THAT THE OTHER DOES NOT.
+  Python `agentmail==0.5.9` — pydantic models. A response missing a required field, or
+  carrying one of the wrong type, raises at construction. It is the strict one.
+  Node `agentmail@0.5.19` — camelCase mapping over the wire's snake_case, RFC 3339 strings
+  coerced to real `Date` objects, and the `am_eu_` prefix routing a key to
+  `api.agentmail.eu` [SPEC:sdk environments.ts, Client.ts:80] — the one client behaviour
+  that could take a caller off our base URL entirely, which is why the smoke mints a key and
+  asserts the prefix rather than trusting the constant.
+  What the Node client does NOT do, probed rather than assumed: reject a response missing a
+  required field. Every generated resource client parses with
+  `skipValidation: true, unrecognizedObjectKeys: "passthrough"`, so a missing field arrives
+  as `undefined` and our extra live fields (`organization_id`, `smtp_id`) pass through
+  un-mapped. A first draft of this fixture claimed the opposite; the probe below is what
+  corrected it, and the claim is recorded here with its evidence so the next reader does not
+  have to re-derive it.
+
+  $ node -e '... serialization.pods.Pod.parse(<body missing required `name`>, <client opts>)'
+  missing required `name`, client options -> ACCEPTED
+    value: {"podId":"p","updatedAt":"...","createdAt":"...","organization_id":"o"}
+  bad timestamp -> ACCEPTED, createdAt is [object Date], updatedAt is not-a-timestamp
+
+  The second line is why the Node smoke asserts `instanceof Date` on every timestamp it sees:
+  a value the SDK could not parse is passed through as the raw string, so the Date assertion
+  is the thing that separates "RFC 3339, three fractional digits, Z" from anything else.
+
+VERSIONS ARE PINNED EXACTLY: `conformance/requirements-gate.txt` (agentmail==0.5.9) and
+`conformance/package.json` + `package-lock.json` (agentmail 0.5.19). Both are the versions
+P-1 surveyed. A gate that passes against a newer client than the plan read is not this gate.
+
+SECRETS: `amk init` prints the root key once; p1-gate.sh captures it into a shell variable and
+prints the line as `<redacted>`. No key value appears in this file. The minted-key checks
+assert a prefix predicate and an authentication outcome, never a value.
+
+REPRODUCE: ./scripts/p1-gate.sh   (stands up a throwaway `amk_p1gate` database, migrates,
+inits, serves on 127.0.0.1:8111, seeds state parity, runs the conformance diff, then both SDK
+smokes; drops the database and stops the server on exit. All three halves must pass.)
+
+--------------------------------------------------------------------------------------------
+RUN — ./scripts/p1-gate.sh, exit 0
+--------------------------------------------------------------------------------------------
+== build ==
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+== throwaway database ==
+== migrate ==
+Applied 9 of 9 migrations (current).
+== init (root key captured, never printed) ==
+Initialized a new deployment.
+  organization_id: 9d9d22f6-0226-4711-8111-747ddd6b7912
+  pod_id:          9d9d22f6-0226-4711-8111-747ddd6b7912
+  root api key:    <redacted>
+This key will not be shown again -- store it now.
+== operator configuration (direct UPDATE — no endpoint sets these; that is the honest state
+     the divergence-1 contract itself names) ==
+== serve ==
+curl: (7) Failed to connect to 127.0.0.1:8111 after 0 ms: Could not connect to server
+amkd: serving --role api on 127.0.0.1:8111
+== seed the candidate to match the reference's STATE, not just its schema ==
+  inbox: p1gate-b@appsynergy.io
+  pods      2
+  inboxes   2
+  api-keys  2
+
+== dual-target conformance diff: api.agentmail.to vs localhost ==
+resolved placeholders: ['inbox_id', 'pod_id'] (ref: 2/2 found, cand: 2/2 found)
+
+[PASS] GET /v0/auth/me
+  = $.billing_plan_id: EXPECTED — no billing surface (project non-negotiable) — nothing truthful to put here, and an invented value would be worse than omitting it. Pinned by a test in amk-types::pod.
+  = $.clerk_organization_id: EXPECTED — AgentMail authenticates through Clerk; this deployment does not. Same reasoning as billing_plan_id.
+[PASS] GET /v0/organizations
+[PASS] GET /v0/pods
+[PASS] GET /v0/pods?limit=1
+[PASS] GET /v0/pods/{pod_id}
+[PASS] GET /v0/inboxes
+[PASS] GET /v0/inboxes?limit=1
+[PASS] GET /v0/inboxes/{inbox_id}
+[PASS] GET /v0/pods/{pod_id}/inboxes
+[PASS] GET /v0/pods/{pod_id}/inboxes?limit=1
+[PASS] GET /v0/pods/{pod_id}/inboxes/{inbox_id}
+[PASS] GET /v0/api-keys
+[PASS] GET /v0/pods/{pod_id}/api-keys
+[PASS] GET /v0/inboxes/{inbox_id}/api-keys
+[PASS] GET /v0/auth/me
+[PASS] GET /v0/pods/00000000-0000-4000-8000-000000000000
+[PASS] GET /v0/pods/not-a-uuid
+[PASS] GET /v0/no-such-route
+[PASS] DELETE /v0/auth/me
+
+19 requests, 19 compared, 0 skipped, 0 with structural diffs.
+dual_target.py exit: 0
+
+== P1 gate, second half: the unmodified official Python SDK against the same server ==
+official agentmail SDK -> http://127.0.0.1:8111
+
+auth.me / organizations.get
+  [PASS] auth.me returns an Identity
+  [PASS] scope_id == organization_id for an org-scoped key
+  [PASS] organizations.get returns an Organization
+  [PASS] organization_id agrees with the identity
+  [PASS] the SDK model exposes inbox_count
+
+pods: create -> list -> get -> delete
+  [PASS] pods.create returns a Pod
+  [PASS] the pod carries the client_id we sent
+  [PASS] client_id replay is idempotent (same pod_id, no duplicate)
+  [PASS] pods.list includes it
+  [PASS] pods.list reports a count
+  [PASS] pods.get round-trips the id
+
+inboxes: create -> list -> get -> update -> delete
+  [PASS] inboxes.create returns an Inbox
+  [PASS] inbox_id IS the email address
+  [PASS] inboxes.get round-trips the id
+  [PASS] inboxes.get resolves a differently-cased id
+  [PASS] inboxes.update sets display_name
+  [PASS] inboxes.list includes it
+
+api-keys: create -> list -> delete
+  [PASS] api_keys.create returns the plaintext once
+  [PASS] the returned prefix is the key's first characters
+  [PASS] a minted key never begins am_eu_ (it would leave our base URL)
+  [PASS] api_keys.list includes it
+  [PASS] the minted key authenticates
+
+pagination: walk a page boundary with the SDK's own token
+  [PASS] a bounded page returns one item
+  [PASS] the SDK's page_token advances to a different inbox
+
+delete: the other half of the CRUD cycle
+  [PASS] the deleted key is gone from the listing
+  [PASS] the deleted inbox is gone from the listing
+  [PASS] the deleted pod is gone from the listing
+
+27 checks, 0 failed
+sdk_smoke.py exit: 0
+
+== P1 gate, third half: the unmodified official NODE SDK against the same server ==
+official agentmail Node SDK -> http://127.0.0.1:8111
+
+auth.me / organizations.get
+  [PASS] auth.me returns an identity with an organization_id
+  [PASS] scope_id == organization_id for an org-scoped key
+  [PASS] organizations.get agrees with the identity
+  [PASS] inbox_count survives the SDK's camelCase mapping
+  [PASS] the organization's timestamps parsed into Date
+
+pods: create -> list -> get -> delete
+  [PASS] pods.create round-trips client_id through camelCase
+  [PASS] client_id replay is idempotent
+  [PASS] pods.list includes it
+  [PASS] pods.get round-trips the id
+  [PASS] the pod's timestamps parsed into Date
+
+inboxes: create -> get -> update -> list -> delete
+  [PASS] inbox_id IS the email address
+  [PASS] inboxes.get round-trips the id
+  [PASS] the inbox's timestamps parsed into Date
+  [PASS] inboxes.get resolves a differently-cased id
+  [PASS] inboxes.update sets display_name
+  [PASS] inboxes.list includes it
+
+api-keys: create -> list -> authenticate -> delete
+  [PASS] api_keys.create returns the plaintext once
+  [PASS] the returned prefix is the key's first characters
+  [PASS] a minted key never begins am_eu_
+  [PASS] the minted key authenticates
+
+pagination: walk a page boundary with the SDK's own token
+  [PASS] a bounded page returns one item
+  [PASS] the token advances to a different inbox
+
+delete: the other half of the CRUD cycle
+  [PASS] the deleted key is gone
+  [PASS] the deleted inbox is gone
+  [PASS] the deleted pod is gone
+
+25 checks, 0 failed
+sdk_smoke.mjs exit: 0
+teardown: amkd stopped, database amk_p1gate dropped
+p1-gate.sh exit: 0
+
+--------------------------------------------------------------------------------------------
+FALSIFICATION — the Node half proven able to FAIL, and to fail the gate
+--------------------------------------------------------------------------------------------
+A gate that has only ever passed is not evidence that it can fail; the plan says so about
+tests and it is true of gates. Before this fixture was written, one expectation in
+sdk_smoke.mjs was inverted in place — `a minted key never begins am_eu_` was flipped from
+`false` to `true`, so a correct server must now fail it — and the whole gate re-run. The
+poison was reverted immediately afterwards and the file re-verified (`grep -c POISONED` -> 0).
+
+What this pins, and it is three separate things, each of which has silently failed in some
+check in this project before: the assertion actually compares (it reported the mismatch with
+both sides), the script's exit code follows its failures rather than its last statement, and
+p1-gate.sh's three-way conjunction propagates a third-half failure to the gate's own exit.
+
+124:  [FAIL] POISONED: a minted key never begins am_eu_
+125-         expected true, got false
+126-  [PASS] the minted key authenticates
+
+25 checks, 1 failed
+  FAILED: POISONED: a minted key never begins am_eu_
+sdk_smoke.mjs exit: 1
+teardown: amkd stopped, database amk_p1gate dropped
+p1-gate.sh exit: 1

@@ -1,0 +1,10 @@
+{
+  "name": "agentmailkit-conformance",
+  "private": true,
+  "type": "module",
+  "description": "Node half of the SDK phase gates. Exists only so `import 'agentmail'` in sdk_smoke.mjs resolves from a manifest that pins the version the plan surveyed; nothing here is published or imported by the Rust workspace.",
+  "comment": "0.5.19 is the agentmail-node version read during P-1. Pinned EXACTLY, for the same reason requirements-gate.txt pins the Python client exactly: a gate that passes against a newer client than the plan surveyed is not the gate the plan specifies. Bumping it is an upstream-drift decision, not maintenance.",
+  "dependencies": {
+    "agentmail": "0.5.19"
+  }
+}

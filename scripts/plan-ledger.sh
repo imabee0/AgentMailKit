@@ -150,6 +150,7 @@ DEFERRALS=$(cat <<'EOF'
 20-search-and-label-precedence.txt|amk-core label access modes, P1
 24-p0-gate-sdk-authme.txt|P0 gate transcript, asserted by plan-ledger
 25-p1-gate-conformance.txt|P1 gate diff, asserted by the conformance run
+26-p1-gate-sdk-smoke.txt|P1 gate SDK smoke, asserted by plan-ledger
 C1-domain-shape.txt|amk-types domain shapes, P5
 EOF
 )
@@ -301,7 +302,31 @@ check p1-gate-conformance no "P1 gate: dual-target conformance diff clean for P1
     [ -f "$f" ] || exit 1
     grep -q "0 skipped, 0 with structural diffs" "$f" &&
     grep -q "THIRD RUN — CLEAN" "$f" &&
-    grep -q "dual_target.py exit: 0" "$f"' 
+    grep -q "dual_target.py exit: 0" "$f"'
+# The OTHER half of P1's gate wording: "Python+Node SDK smoke (create/list/delete across scopes)".
+# Both clients, unmodified, driving a live server with nothing changed but the base URL.
+#
+# Three things are asserted rather than one, because each has failed silently somewhere in this
+# project already. (1) The clean run: all three halves of p1-gate.sh exited 0. (2) The
+# FALSIFICATION: the same fixture records a poisoned run where the Node half failed and the gate's
+# exit followed it — a gate that has only ever passed is not evidence it can fail, and the plan says
+# so about tests. (3) The captured client versions are still the versions pinned on disk, so bumping
+# a pin without re-running the gate fails here instead of leaving a transcript that describes a run
+# against a client nobody uses any more.
+check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pinned, falsified" \
+  bash -c '
+    f=reference/fixtures/26-p1-gate-sdk-smoke.txt
+    [ -f "$f" ] || exit 1
+    grep -q "^sdk_smoke.py exit: 0" "$f" &&
+    grep -q "^sdk_smoke.mjs exit: 0" "$f" &&
+    grep -q "^p1-gate.sh exit: 0" "$f" &&
+    grep -q "^sdk_smoke.mjs exit: 1" "$f" &&
+    grep -q "^p1-gate.sh exit: 1" "$f" &&
+    py=$(sed -n "s/^agentmail==//p" conformance/requirements-gate.txt) &&
+    nd=$(tr -d " \",;" < conformance/package.json | sed -n "s/^agentmail://p") &&
+    [ -n "$py" ] && [ -n "$nd" ] &&
+    grep -q "agentmail==$py" "$f" &&
+    grep -q "agentmail@$nd" "$f"'
 pend p6-restore-drill        "P6: restore drill passes from backups alone, before any cutover step"
 
 # ---------------------------------------------------------------- cannot be machine-checked
@@ -315,12 +340,32 @@ attest evidence-not-assert   "every completion claim in the last report carried 
 # nothing. Verify the key in a fresh session, then add it to harness-agent-frontmatter's allowlist
 # and to the reviewer files — in that order, so the allowlist can never be the thing that lags.
 attest mem-subagent-memory   "subagent memory split: DECIDED in the plan, NOT bound — memory: key unverified on 2.1.233"
-# The plan says reference/ holds "vendored openapi.json + SDK extracts". openapi.json,
-# endpoints.txt and types_dump.txt are there; the node SDK's environments.ts/Client.ts are not, so
-# the am_eu_ host-routing claim cannot be checked from this repository. Found by the review panel,
-# which caught the api-keys contract citing it as [SPEC:sdk] when nothing here can verify it.
-# Non-blocking by construction: the rule it produces (never mint an am_eu_ key) is fail-closed.
-attest evidence-sdk-routing  "node SDK host-routing source not vendored — am_eu_ claim is [UNVERIFIED] from this repo"
+# WAS AN ATTEST, IS NOW A CHECK — and reading the source narrowed the claim.
+#
+# The review panel caught the api-keys contract citing the am_eu_ host-routing as [SPEC:sdk] when
+# nothing in this repository could verify it: reference/ vendors openapi.json and the SDK type
+# extracts, but not the node client's own source. P1's Node SDK smoke changed that — the client is
+# now pinned in conformance/package.json and installed at gate time, so the claim is checkable
+# where it actually lives instead of being carried as an unverifiable citation.
+#
+# What the source says, which is narrower than the claim was: the prefix is consulted ONLY when the
+# caller passes neither `environment` nor `baseUrl` (wrapper/Client.js), in which case an am_eu_ key
+# selects AgentMailEnvironment.EuProd -> https://api.agentmail.eu. A caller who sets either one —
+# as both our SDK smokes do — is never re-routed. So minting an am_eu_ key would not break the
+# gate; it would break the caller who configures nothing and relies on AGENTMAIL_API_KEY, which is
+# the default path the official docs show. The rule stands unchanged and is still fail-closed;
+# only its reason is now exact.
+#
+# Skipped rather than failed when the tree is absent: conformance/node_modules is gitignored and
+# installed by the gate, so a clean checkout must not report a violation it cannot see.
+check evidence-sdk-routing no "node SDK routes am_eu_ to the EU host when no environment/baseUrl is set" \
+  bash -c '
+    c=conformance/node_modules/agentmail/dist/cjs/wrapper/Client.js
+    e=conformance/node_modules/agentmail/dist/cjs/environments.js
+    [ -f "$c" ] && [ -f "$e" ] || exit 1
+    grep -q "startsWith(\"am_eu_\")" "$c" &&
+    grep -q "!fernOptions.environment && !fernOptions.baseUrl" "$c" &&
+    grep -q "https://api.agentmail.eu" "$e"'
 
 echo
 # THE LEDGER CHECKS ITSELF FOR THE ONE FAILURE MODE IT CANNOT OTHERWISE SEE: a line that stops

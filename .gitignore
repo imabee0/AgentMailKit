@@ -20,6 +20,10 @@
 # Throwaway venv for the SDK phase gates; see conformance/requirements-gate.txt
 .venv-gate/
 
+# The Node half of the same gates. conformance/package.json and its lockfile ARE tracked — the
+# pin is the gate — but the installed tree is not.
+conformance/node_modules/
+
 # Python bytecode from importing the conformance harness as a module.
 __pycache__/
 *.pyc
