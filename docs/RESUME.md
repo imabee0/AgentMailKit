@@ -270,9 +270,8 @@ commands actually used this session:
 "Bash(git -C /home/imma/projects/AgentMailKit push origin main:*)"  // workstation-only path
 ```
 
-Note also that this file's migration section used to claim `.claude/settings.json` "still denies
-`Bash(gh:*)`". **It does not** — the deny list contains only `gh auth token` and
-`gh auth login --with-token`. That claim was wrong and is struck.
+Note this file also, briefly, claimed `.claude/settings.json` denies `Bash(gh:*)`. It does not —
+the deny list holds only `gh auth token` and `gh auth login --with-token`.
 
 ### 4. Which branch policy wins
 
@@ -336,12 +335,15 @@ retries. Delete it from the workstation or the GitHub UI.
   `guard.test.sh` covers the new one in both directions (falsified: removing the glob makes the
   blocking test fail).
 - Machine-local operating rules were copied into `docs/OPERATING-RULES.md` for the same reason.
-- `harness-no-github` was **not** in fact retired from the ledger, contrary to what this file said
-  until 2026-08-17: `scripts/plan-ledger.sh:94` still asserts it, still described as "no .github/
-  (Gitea only)". It currently reads MET only because no `.github/` directory exists. It will fire
-  the moment anyone adds a PR template or an issue template — neither of which is CI, and both of
-  which are ordinary on GitHub. Either retire it for real or re-key it on workflow directories
-  alone; `ci-layer-local-only` already holds the no-CI decision that way.
+- `harness-no-github` was retired from the ledger at the migration commit (`8e9cdb5`) — its premise
+  was "we are not on GitHub". `ci-layer-local-only` still holds the no-CI decision, keyed on
+  `.gitea/workflows` and `.github/workflows` rather than on the whole `.github/` directory, so
+  non-CI GitHub metadata (issue templates, CODEOWNERS) is allowed and a workflow is not.
+  **A revision of this file dated 2026-08-17 claimed the retirement never happened. That claim was
+  wrong and is withdrawn** — it came from reading a ledger run inside the `amk/p1/http-extractors`
+  worktree, which sat two commits behind `main` and therefore predated the retirement. The lesson
+  is worth more than the correction: a ledger result is only about the tree it ran in, and this
+  session had two trees at different commits at the same moment.
 - ~~`.claude/settings.json` still denies `Bash(gh:*)`~~ — **struck, this was wrong.** The deny list
   contains only `gh auth token` and `gh auth login --with-token`; `gh pr`, `gh api`, `gh issue` and
   `gh repo` are all allowed. The real permission gaps are listed under "Outstanding, needs the
