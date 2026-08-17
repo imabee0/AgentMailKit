@@ -42,7 +42,10 @@ fn inbox_id_from_path(raw: &str) -> Result<InboxId, amk_core::scope::ScopeDenial
 /// The pod mount's *own resource, fetched by id* does not need `settle_pod_mount`'s probe — the
 /// lookup that follows is itself the proof (see `crate::scope_ext`'s module doc), so this takes
 /// `Resolved::window()` directly.
-fn window_for_pod_own_resource(scope: &Scope, pod_id: PodId) -> Result<ScopeFilter, AppError> {
+pub(crate) fn window_for_pod_own_resource(
+    scope: &Scope,
+    pod_id: PodId,
+) -> Result<ScopeFilter, AppError> {
     match scope.resolve(&Mount::Pod(pod_id)) {
         Ok(resolved) => Ok(resolved.window().clone()),
         Err(denial) => Err(denial.into()),

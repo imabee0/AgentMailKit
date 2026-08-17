@@ -82,6 +82,18 @@ page filtered after fetch discloses how many rows were hidden, which is the leak
 - `crates/amk-http/tests/threads.rs` — NEW.
 - `crates/amk-http/tests/support/mod.rs` — only if a seed helper for messages/threads is missing;
   say exactly what you added.
+- `crates/amk-http/src/pagination.rs` — **for one addition only**: a `ListMailQuery` carrying the
+  four `include_*` flags alongside the existing `limit`/`page_token`/`ascending`. Four of the eight
+  operations here take those flags (`amk-core::labels::LabelAccess::list`'s own doc names exactly
+  which four), and `ListQuery` cannot express them. It must **reuse `parse_limit`** rather than
+  re-derive the `limit` rules — two representations of one rule is the `ApiKeyPermissions`
+  collision the plan already records. Change nothing else in the file; `ListQuery`,
+  `ListQueryNoDirection`, `DEFAULT_LIMIT` and `direction_for` stay exactly as they are.
+
+  *Added in revision 2, before dispatch.* The first draft omitted it while mandating endpoints that
+  cannot be written without it — the same defect that made the extractor contract unsatisfiable
+  twice. Recording it here rather than quietly widening the list: a contract that mandates a
+  parameter must make the type that carries it writable.
 
 Nothing else. In particular **not** `crates/amk-types/**` (frozen), **not** `crates/amk-store/**`
 (its `get`/`list` are the contract, not something to extend here), not `crates/amk-core/**`, not

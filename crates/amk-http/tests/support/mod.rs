@@ -11,10 +11,13 @@
 use amk_http::{router, AppConfig, AppState};
 use amk_store::api_keys::{self, NewApiKey};
 use amk_store::inboxes::{self, NewInbox};
+use amk_store::messages::{self, NewMessage};
 use amk_store::organizations::{self, NewOrganization};
 use amk_store::pods::{self, NewPod};
+use amk_store::threads::{self, NewThread};
 use amk_types::api_key::ApiKeyPermissions;
-use amk_types::ids::{InboxId, OrganizationId, PodId};
+use amk_types::ids::{InboxId, MessageId, OrganizationId, PodId, ThreadId};
+use amk_types::Timestamp;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
@@ -302,4 +305,77 @@ pub async fn patch(router: &Router, uri: &str, bearer: Option<&str>, body: Value
 }
 pub async fn delete(router: &Router, uri: &str, bearer: Option<&str>) -> TestResponse {
     send(router, "DELETE", uri, bearer, None).await
+}
+
+/// Seeds one thread and one message in it, with the labels the caller names.
+///
+/// Added for the message/thread read dispatch: every earlier suite seeded only pods, inboxes and
+/// keys. Returns both ids so a test can assert the get-by-id and list paths against the SAME row —
+/// a restricted-label test that seeds one row for the list assertion and another for the by-id
+/// assertion proves nothing about the asymmetry it claims to test.
+pub async fn seed_thread_with_message(
+    pool: &PgPool,
+    org: &OrganizationId,
+    pod: PodId,
+    inbox: &InboxId,
+    labels: &[&str],
+) -> (ThreadId, MessageId) {
+    let thread_id = ThreadId::from(Uuid::new_v4());
+    let message_id = MessageId::new(format!("<{}@example.test>", unique_suffix()));
+    let now = Timestamp::now();
+    let labels: Vec<String> = labels.iter().map(|l| (*l).to_owned()).collect();
+    threads::insert(
+        pool,
+        NewThread {
+            thread_id,
+            organization_id: org.clone(),
+            pod_id: pod,
+            inbox_id: inbox.clone(),
+            labels: labels.clone(),
+            timestamp: now,
+            received_timestamp: Some(now),
+            sent_timestamp: None,
+            senders: vec!["sender@example.test".into()],
+            recipients: vec![inbox.as_str().to_owned()],
+            subject: Some("seeded".into()),
+            preview: Some("seeded preview".into()),
+            last_message_id: message_id.clone(),
+            message_count: 1,
+            size: 42,
+        },
+    )
+    .await
+    .expect("seed thread");
+    messages::insert(
+        pool,
+        NewMessage {
+            inbox_id: inbox.clone(),
+            message_id: message_id.clone(),
+            organization_id: org.clone(),
+            pod_id: pod,
+            thread_id,
+            labels,
+            timestamp: now,
+            from: "sender@example.test".into(),
+            to: vec![inbox.as_str().to_owned()],
+            cc: None,
+            bcc: None,
+            subject: Some("seeded".into()),
+            preview: Some("seeded preview".into()),
+            attachments: None,
+            in_reply_to: None,
+            references: None,
+            headers: None,
+            smtp_id: None,
+            size: 42,
+            reply_to: None,
+            text: Some("body".into()),
+            html: None,
+            extracted_text: None,
+            extracted_html: None,
+        },
+    )
+    .await
+    .expect("seed message");
+    (thread_id, message_id)
 }
