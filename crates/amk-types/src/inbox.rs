@@ -16,6 +16,80 @@ pub enum MetadataValue {
     Bool(bool),
 }
 
+impl MetadataValue {
+    /// Whether this value can be written to storage and read back as itself.
+    ///
+    /// # The defect this exists to close
+    ///
+    /// `PATCH /v0/inboxes/{id}` with `{"metadata":{"a":1.7976931348623157e+308}}` used to return
+    /// **500**, and — worse — leave the inbox permanently unreadable: the row was written, and
+    /// every later `GET`/`PATCH`/list touching it failed the same way. Found by the P1 gate's
+    /// schemathesis conjunct (`not_a_server_error`), root-caused as a disagreement between the
+    /// write path and the read path about one number:
+    ///
+    /// 1. serde_json accepts `1.7976931348623157e308` in **exponent form** on the way in.
+    /// 2. Postgres `jsonb` normalises it to `numeric` and renders it back with **no exponent** —
+    ///    `17976931348623157` followed by 292 zeros, a 309-digit integer literal.
+    /// 3. serde_json parses that literal through its *long-integer* path, which is stricter than
+    ///    its float path, and fails with `number out of range` — even though the value is below
+    ///    [`f64::MAX`].
+    ///
+    /// | literal | parses as f64? |
+    /// |---|---|
+    /// | `1.7976931348623157e308` (what the client sends) | ok |
+    /// | `1` + 308 zeros | ok |
+    /// | `17976931348623157` + 292 zeros (**what jsonb emits**) | ERR |
+    /// | `1` + 309 zeros | ERR |
+    ///
+    /// # Why this is derived and not a constant
+    ///
+    /// The failing boundary is a property of serde_json's long-integer parser, not a round number —
+    /// note that `1e308` survives while the *smaller* `1.7976931348623157e308` does not. A
+    /// hard-coded threshold would be wrong the day either side changes. So the check reconstructs
+    /// jsonb's own rendering and asks serde_json directly.
+    pub fn survives_storage_round_trip(&self) -> bool {
+        match self {
+            // Neither can be mangled by `numeric` normalisation: strings are stored verbatim and
+            // booleans have two values. A string that merely LOOKS like a huge number is still a
+            // string on both sides.
+            Self::String(_) | Self::Bool(_) => true,
+            Self::Number(v) => {
+                // JSON cannot carry NaN/Infinity, so serde refuses these before they reach here.
+                // Checked anyway: this guard must not depend on a caller upstream of it.
+                v.is_finite() && serde_json::from_str::<f64>(&as_postgres_renders(*v)).is_ok()
+            }
+        }
+    }
+}
+
+/// Renders `v` the way `jsonb` will hand it back: shortest round-trip decimal (Rust's `{}`, the
+/// same digits Postgres keeps when it parses the literal into `numeric`) with any exponent
+/// expanded into plain notation, because `numeric` output never uses an exponent.
+fn as_postgres_renders(v: f64) -> String {
+    let shortest = format!("{v}");
+    let Some((mantissa, exp)) = shortest.split_once(['e', 'E']) else {
+        return shortest;
+    };
+    let Ok(exp) = exp.parse::<i32>() else {
+        return shortest;
+    };
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let (int_part, frac_part) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{int_part}{frac_part}");
+    // Where the decimal point lands once the exponent is applied.
+    let point = int_part.len() as i32 + exp;
+    if point <= 0 {
+        format!("{sign}0.{}{digits}", "0".repeat((-point) as usize))
+    } else if (point as usize) >= digits.len() {
+        format!("{sign}{digits}{}", "0".repeat(point as usize - digits.len()))
+    } else {
+        format!("{sign}{}.{}", &digits[..point as usize], &digits[point as usize..])
+    }
+}
+
 pub type Metadata = BTreeMap<String, MetadataValue>;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -213,5 +287,88 @@ mod tests {
         assert!(matches!(m["s"], MetadataValue::String(_)));
         assert!(matches!(m["n"], MetadataValue::Number(_)));
         assert!(matches!(m["b"], MetadataValue::Bool(_)));
+    }
+
+    // ---- metadata numbers must survive the storage round-trip ----------------------------------
+    // `[SPEC:.claude/contracts/amk-metadata-roundtrip.md]`. The table in
+    // `MetadataValue::survives_storage_round_trip`'s own doc is the specification; these are it.
+
+    /// The exact value schemathesis found. `f64::MAX`'s shortest form — below `f64::MAX`, and
+    /// still unreadable once `jsonb` has expanded it.
+    #[test]
+    fn the_value_that_bricked_an_inbox_is_refused() {
+        assert!(!MetadataValue::Number(1.7976931348623157e308).survives_storage_round_trip());
+    }
+
+    /// The case that proves the guard is not a blunt magnitude cap: `1e308` is LARGER in exponent
+    /// than the refused value's leading digit suggests, yet it round-trips, because `jsonb` renders
+    /// it as `1` followed by 308 zeros and serde_json parses that. A `v.abs() >= 1e308` check would
+    /// wrongly refuse this one — which is why the guard reconstructs the rendering instead.
+    #[test]
+    fn one_e_308_is_accepted_even_though_a_smaller_value_is_not() {
+        assert!(MetadataValue::Number(1e308).survives_storage_round_trip());
+        assert!(!MetadataValue::Number(1.7976931348623157e308).survives_storage_round_trip());
+    }
+
+    #[test]
+    fn ordinary_and_extreme_but_representable_numbers_are_accepted() {
+        for v in [
+            0.0,
+            -0.0,
+            1.0,
+            -10_000_000.0,
+            1e307,
+            -1e307,
+            2.0974644638236597e-254,
+            f64::MIN_POSITIVE,
+        ] {
+            assert!(
+                MetadataValue::Number(v).survives_storage_round_trip(),
+                "{v:e} must be accepted"
+            );
+        }
+    }
+
+    /// The negative is asserted, not inferred from the positive — `f64::MIN` is `-f64::MAX`, and a
+    /// sign-losing renderer would pass the positive case and corrupt this one.
+    #[test]
+    fn both_signs_of_the_out_of_range_value_are_refused() {
+        assert!(!MetadataValue::Number(f64::MAX).survives_storage_round_trip());
+        assert!(!MetadataValue::Number(f64::MIN).survives_storage_round_trip());
+    }
+
+    #[test]
+    fn non_finite_numbers_are_refused_even_though_json_cannot_carry_them() {
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!MetadataValue::Number(v).survives_storage_round_trip());
+        }
+    }
+
+    #[test]
+    fn strings_and_bools_always_round_trip_including_a_string_that_looks_like_a_huge_number() {
+        assert!(MetadataValue::Bool(true).survives_storage_round_trip());
+        assert!(MetadataValue::String("x".into()).survives_storage_round_trip());
+        assert!(
+            MetadataValue::String("1.7976931348623157e308".into()).survives_storage_round_trip()
+        );
+    }
+
+    /// Pins the renderer itself against what Postgres actually emitted for these inputs — verified
+    /// with `select '{"a": ...}'::jsonb` on the dev cluster. Without this, a renderer bug could
+    /// make the guard agree with itself while disagreeing with storage.
+    #[test]
+    fn the_renderer_reproduces_what_jsonb_emits() {
+        assert_eq!(
+            as_postgres_renders(1.7976931348623157e308),
+            format!("17976931348623157{}", "0".repeat(292))
+        );
+        assert_eq!(as_postgres_renders(1e308), format!("1{}", "0".repeat(308)));
+        assert_eq!(as_postgres_renders(-1e21), format!("-1{}", "0".repeat(21)));
+        assert_eq!(as_postgres_renders(1.5e3), "1500");
+        assert_eq!(as_postgres_renders(1e-7), "0.0000001");
+        assert_eq!(as_postgres_renders(-1.25e-3), "-0.00125");
+        // No exponent in the shortest form: passed through untouched.
+        assert_eq!(as_postgres_renders(1.5), "1.5");
+        assert_eq!(as_postgres_renders(-42.0), "-42");
     }
 }

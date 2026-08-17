@@ -3,7 +3,7 @@
 Where the last session stopped, so a fresh one — on this workstation or in Claude's cloud sandbox —
 can continue without re-deriving it. Update this file in the commit that invalidates it.
 
-**Last updated:** 2026-08-17, after finishing the extractor-rejection work item.
+**Last updated:** 2026-08-17, after fixing the metadata round-trip defect.
 
 ## Verified state
 
@@ -12,10 +12,11 @@ $ ./scripts/check.sh
 check: PASS
 plan-ledger: PASS
 $ ./scripts/check.sh --fast   # summed test results
-total passed: 570
+total passed: 599
 ```
 
-`main` is green at 570 workspace tests with a live Postgres on 127.0.0.1:55432. Without that
+The branch is green at 599 workspace tests with a live Postgres on 127.0.0.1:55432 (`main` was
+570 before this session's two fixes). Without that
 database the same command still exits PASS having skipped every DB-backed test — see the sandbox
 section of `CLAUDE.md`.
 
@@ -68,10 +69,10 @@ a falsification proving failure propagates). `./scripts/p1-gate.sh` is the four-
 dual-target conformance diff, Python SDK smoke, Node SDK smoke, schemathesis over the 25 mounted
 operations.
 
-`scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0`, and **must stay there**. The extractor
-divergence that blocked it is fixed and merged, but the schemathesis conjunct now fails on a
-different, newly-found defect (next section), and the conformance conjunct needs the live key.
-Local `check.sh` green is not the gate.
+`scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0`. Both defects that blocked the schemathesis
+conjunct are now fixed — the extractor escapes and the metadata round-trip below. **The remaining
+blocker is the dual-target conformance diff, which needs the read-only key** (item 1 under
+"Outstanding"). Local `check.sh` green is not the gate.
 
 ## The extractor-rejection work item: DONE and MERGED (`main` @ 0d0631c), still ungated
 
@@ -146,84 +147,74 @@ against a locally-served `amkd --role api` and every row matches, including `?li
   evidence contradicts" this file warned about.
 - The schemathesis conjunct still needs its own fixture capture and ledger check.
 
-## NEW P1 DEFECT — a single PATCH permanently bricks an inbox (found 2026-08-17)
+## The metadata round-trip defect: FIXED (2026-08-17)
 
-Found by running the P1 gate's schemathesis conjunct locally after the extractor merge — the first
-time that conjunct has run in the sandbox. It is **unrelated to the extractor work**; it is a
-pre-existing `amk-store`/`amk-types` defect that the fuzzer reached because the extractor fix let it
-get past the request layer at all.
+Found by the P1 gate's schemathesis conjunct, the first time it ran in the sandbox.
+`PATCH /v0/inboxes/{id}` with `{"metadata":{"a":1.7976931348623157e+308}}` returned **500** and left
+the inbox **permanently unreadable** — the row was written, and every later `GET`, `PATCH` or list
+touching it failed the same way. One accepted request removed an inbox from the API.
 
-```
-❌  Fuzzing:  24 passed, 1 failed        1959 test cases, 1 unique failure
-_________________________ PATCH /v0/inboxes/{inbox_id} _________________________
-[500] Internal Server Error: {"name":"InternalError","code":"internal_error",...}
-```
+Contract: `.claude/contracts/amk-metadata-roundtrip.md`.
 
-Coverage (25/25), Stateful (84/84) and the other 24 fuzzed operations all pass. **`schemathesis
-exit: 1`, so the P1 gate's fourth conjunct does NOT pass.**
+### Root cause
 
-### Reproduction, minimised
-
-```
-PATCH /v0/inboxes/{id}   {"metadata": {"a": 1.7976931348623157e+308}}   -> 500
-```
-
-One value does it. Bisected against a fresh inbox per case: `null` deletes, empty-string keys,
-control characters in keys, surrogate-pair keys, booleans, negatives and `2.09e-254` all return
-200. Only the max-magnitude float fails.
-
-### Root cause — the write path and the read path disagree about the same number
-
-`amk-http`'s server log names it exactly:
-
-```
-amk-http: internal error: error occurred while decoding column "metadata": number out of range
-```
-
-1. `MetadataValue::Number(f64)` accepts `1.7976931348623157e308` — serde_json parses the **exponent
-   form** fine.
-2. Postgres `jsonb` normalises it to `numeric` and renders it back with **no exponent**: the digits
-   `17976931348623157` followed by 292 zeros, a 309-digit integer literal.
-3. Reading the row, `serde_json` parses that integer literal through its long-integer path and
-   fails with `number out of range` — even though the value is **less than `f64::MAX`**.
-
-Measured, because the boundary is not where reasoning suggests:
+The write path and the read path disagreed about one number. serde_json accepts
+`1.7976931348623157e308` in exponent form; Postgres `jsonb` normalises it to `numeric` and renders
+it back with **no exponent** as a 309-digit integer; serde_json's *long-integer* path — stricter
+than its float path — then refuses that literal with `number out of range`, **even though the value
+is below `f64::MAX`**.
 
 | literal | parses as f64? |
 |---|---|
-| `1.7976931348623157e308` (exponent form, what the client sends) | ok |
-| `1` + 308 zeros (`1e308` as a 309-digit integer) | ok |
-| `17976931348623157` + 292 zeros (what Postgres renders) | **ERR number out of range** |
-| `1` + 309 zeros | ERR number out of range |
+| `1.7976931348623157e308` (what the client sends) | ok |
+| `1` + 308 zeros | ok |
+| `17976931348623157` + 292 zeros (**what jsonb emits**) | ERR |
 
-So serde_json's long-integer path is stricter than its float path, and jsonb's normalisation is what
-moves the value from one to the other. The row is written successfully and then cannot be read.
+Note `1e308` survives while the *smaller* `1.7976931348623157e308` does not — so a magnitude cap
+would have been the wrong fix.
 
-### Severity: this is data corruption, not just a 500
+### The fix
 
-The inbox stays broken. Every later `GET`, `PATCH` or `list` that touches the row hits the same
-decode and 500s — confirmed, the poisoned inbox failed every subsequent request in the first
-bisect run. One accepted PATCH permanently removes an inbox from the API.
+`MetadataValue::survives_storage_round_trip()` in `amk-types` reconstructs jsonb's own rendering
+(shortest round-trip decimal, exponent expanded to plain notation) and asks serde_json whether it
+parses back. **No hard-coded threshold**: the boundary is a property of serde_json's parser, so
+deriving it by construction is the point. `amk-http`'s inbox create and `validate_update` refuse a
+failing value at the write boundary, so nothing unstorable ever reaches a row.
 
-### Why this is NOT fixed here
+### Evidence
 
-Non-negotiable 3: *if a needed status or behaviour is not in `amk-types` or a fixture, STOP and
-report.* **No fixture covers what the reference does with an out-of-range metadata number**, and the
-manifest is read-only so the existing captures cannot answer it. Two candidate behaviours, and they
-are externally different:
+```
+./scripts/check.sh        check: PASS   shape-provenance: PASS   plan-ledger: PASS
+cargo test --workspace    599 passed; 0 failed        (was 587)
+```
 
-- reject at write with `validation_error` / `path:["metadata"]` — fail-closed, no corruption; or
-- accept and store losslessly, which means not round-tripping the value through `f64` at all.
+Repro replayed against the fixed build — the corruption half, not just the status:
 
-**Recommended fix, for whoever dispatches it:** validate at the write boundary by rendering the
-number the way jsonb will (shortest round-trip repr, exponent expanded to a plain integer) and
-rejecting if that rendering does not parse back. That needs no invented threshold — it is exact by
-construction and cannot drift when serde_json changes. The externally-visible status still needs a
-decision, and a probe against the live reference (`PATCH` with `1.7976931348623157e308`) would
-settle it in one request — **that probe is R-key work and needs the key in item 1 below.**
+```
+PATCH f64::MAX   -> 400 {"code":"validation_error","errors":[{"code":"custom","path":["metadata","a"],...}]}
+GET after        -> 200      <- was 500 forever, before
+PATCH 1e308      -> 200      <- still accepted; not a blunt cap
+GET after 1e308  -> 200
+```
 
-Register entry and a contract are owed before any dispatch. Nothing has been changed in response to
-this finding.
+Mutation pass, both directions, scratch copy outside the tree since deleted:
+
+| mutation | kills |
+|---|---|
+| delete the guard (everything round-trips) | 5 tests, incl. `a_patch_..._leaves_the_inbox_readable` |
+| widen it to refuse every number | `one_e_308_is_stored_while_the_smaller_f64_max_is_refused` |
+
+### `[INFERRED]`, and how to close it
+
+No fixture covers what the reference does with an out-of-range metadata number, and
+`conformance/manifest.json` is read-only so no existing capture can answer it. Three choices are
+marked `[INFERRED]` in `reject_unstorable_metadata`: the **400 `validation_error`** status (not
+really a guess — 500 is wrong under any reading), the **`custom` issue kind** (chosen because it
+claims nothing about the schema), and the **two-segment `path`** naming the offending key.
+
+**One live request settles all three** and should replace that block:
+`PATCH /v0/inboxes/{id}` with `{"metadata":{"a":1.7976931348623157e+308}}` against
+api.agentmail.to. That is R-key work — see item 1 below.
 
 ## Outstanding, needs the user
 

@@ -471,3 +471,181 @@ async fn org_mount_create_is_an_internal_error_when_no_default_pod_exists() {
     assert_eq!(resp.status, 500, "body: {}", resp.body);
     assert_eq!(resp.code(), Some("internal_error"));
 }
+
+// ---- metadata numbers that storage cannot return unchanged --------------------------------------
+// `[SPEC:.claude/contracts/amk-metadata-roundtrip.md]`. Found by the P1 gate's schemathesis
+// conjunct: `PATCH` with this value returned 500 AND left the inbox permanently unreadable.
+// `1.7976931348623157e308` is `f64::MAX`'s shortest form -- Postgres `jsonb` re-renders it as a
+// 309-digit integer that serde_json then refuses, so the row was written and could never be read.
+
+const UNSTORABLE: f64 = 1.7976931348623157e308;
+
+/// The whole `errors[0]`, not just its code -- the `path` naming the offending key is the half a
+/// client needs, and asserting only the code is what let the extractor defects ship.
+fn assert_metadata_rejected(resp: &support::TestResponse, key: &str, label: &str) {
+    assert_eq!(resp.status, 400, "{label}: must be a refusal, never a 500: {}", resp.body);
+    assert_eq!(
+        resp.content_type.as_deref(),
+        Some("application/json"),
+        "{label}: {:?}",
+        resp.content_type
+    );
+    assert_eq!(resp.code(), Some("validation_error"), "{label}: {}", resp.body);
+    assert_eq!(
+        resp.first_error().unwrap(),
+        &serde_json::json!({
+            "code": "custom",
+            "path": ["metadata", key],
+            "message":
+                "Metadata number is outside the range this API can store and return unchanged.",
+        }),
+        "{label}: {}",
+        resp.body
+    );
+}
+
+#[tokio::test]
+async fn a_patch_with_an_unstorable_metadata_number_is_refused_and_leaves_the_inbox_readable() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "md").await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+    let path = format!("/v0/inboxes/{}", inbox.to_path_segment());
+
+    let resp = support::patch(
+        &router,
+        &path,
+        Some(&key),
+        serde_json::json!({"metadata": {"a": UNSTORABLE}}),
+    )
+    .await;
+    assert_metadata_rejected(&resp, "a", "PATCH f64::MAX");
+
+    // THE assertion that encodes the bug: before the guard, this GET was a 500 forever after.
+    let after = support::get(&router, &path, Some(&key)).await;
+    assert_eq!(after.status, 200, "the inbox must still be readable: {}", after.body);
+    assert!(
+        after.json.unwrap().get("metadata").is_none(),
+        "a refused update must not have written anything"
+    );
+}
+
+#[tokio::test]
+async fn a_create_with_an_unstorable_metadata_number_is_refused_and_creates_nothing() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+    let username = format!("nope-{}", support::unique_suffix());
+
+    let resp = support::post(
+        &router,
+        "/v0/inboxes",
+        Some(&key),
+        serde_json::json!({"username": username, "metadata": {"big": UNSTORABLE}}),
+    )
+    .await;
+    assert_metadata_rejected(&resp, "big", "POST f64::MAX");
+
+    let listed = support::get(&router, "/v0/inboxes", Some(&key)).await;
+    assert_eq!(listed.json.unwrap()["count"], 0, "a refused create must create nothing");
+}
+
+/// Boundary and one unit either side, per the plan's testing rules -- and the pair that proves the
+/// guard is not a blunt magnitude cap: `1e308` is accepted while the smaller
+/// `1.7976931348623157e308` is not, because what matters is how `jsonb` renders each one.
+#[tokio::test]
+async fn one_e_308_is_stored_while_the_smaller_f64_max_is_refused() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "edge").await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+    let path = format!("/v0/inboxes/{}", inbox.to_path_segment());
+
+    let ok =
+        support::patch(&router, &path, Some(&key), serde_json::json!({"metadata": {"a": 1e308}}))
+            .await;
+    assert_eq!(ok.status, 200, "1e308 round-trips and must be accepted: {}", ok.body);
+    let reread = support::get(&router, &path, Some(&key)).await;
+    assert_eq!(reread.status, 200, "and must still be readable: {}", reread.body);
+    assert_eq!(reread.json.unwrap()["metadata"]["a"], 1e308);
+
+    let bad = support::patch(
+        &router,
+        &path,
+        Some(&key),
+        serde_json::json!({"metadata": {"a": UNSTORABLE}}),
+    )
+    .await;
+    assert_metadata_rejected(&bad, "a", "PATCH f64::MAX after a good write");
+}
+
+/// A good key beside a bad one: the refusal must name the BAD key, and must not partially apply.
+#[tokio::test]
+async fn a_mixed_metadata_object_names_the_offending_key_and_writes_neither() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "mixed").await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+    let path = format!("/v0/inboxes/{}", inbox.to_path_segment());
+
+    let resp = support::patch(
+        &router,
+        &path,
+        Some(&key),
+        serde_json::json!({"metadata": {"good": "kept", "zbad": UNSTORABLE}}),
+    )
+    .await;
+    assert_metadata_rejected(&resp, "zbad", "mixed good/bad");
+
+    let after = support::get(&router, &path, Some(&key)).await;
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert!(
+        after.json.unwrap().get("metadata").is_none(),
+        "the good key must not have been written either -- the update is refused whole"
+    );
+}
+
+/// The exact body schemathesis generated, from its crash report. It mixes the out-of-range float
+/// with null deletions, control-character keys, surrogate-pair keys and an empty key -- all of
+/// which are individually fine, which is why the minimised case above is the one that isolates the
+/// cause. Written with JSON escapes rather than literal bytes so the source stays ASCII.
+#[tokio::test]
+async fn the_schemathesis_crash_payload_is_a_refusal_not_a_server_error() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "fuzz").await;
+    let key = support::pod_key(&pool, &org, pod).await;
+    let router = support::test_router(pool);
+    let path = format!("/v0/inboxes/{}", inbox.to_path_segment());
+
+    let body: serde_json::Value = serde_json::from_str(
+        "{\"display_name\": \"0\", \"metadata\": {\"n\\u00a7\\u000e\\u00f6\": null, \"\\u0084\\u00da\\u00bd$\": true, \"\\u008d\\u00df\\u00b1$\\u0003\\u00e0\": -10000000.0, \"\\u00fc\\u0006\": null, \"\\u0013\\u009b\\u00a4\\udbc7\\udce8\": false, \"\\u00e2\": true, \"\": 2.0974644638236597e-254, \"{\\u9cdd\\uda01\\udf2ck\": 1.7976931348623157e+308}, \"\": [[false], []]}",
+    )
+    .expect("the crash payload is valid JSON");
+
+    let resp = support::patch(&router, &path, Some(&key), body).await;
+    assert_eq!(resp.status, 400, "must be a refusal, never a 500: {}", resp.body);
+    assert_eq!(resp.code(), Some("validation_error"), "{}", resp.body);
+
+    let after = support::get(&router, &path, Some(&key)).await;
+    assert_eq!(after.status, 200, "the inbox survives the fuzzer: {}", after.body);
+}
