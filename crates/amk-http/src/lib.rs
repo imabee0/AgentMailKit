@@ -15,6 +15,7 @@
 //! public interface — no SQL in this crate. Nothing here may model a Stalwart or JMAP concept.
 
 pub mod auth;
+pub mod body;
 pub mod config;
 pub mod error;
 pub mod handlers;
@@ -23,6 +24,7 @@ pub mod pagination;
 pub mod scope_ext;
 mod words;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get};
 use axum::Router;
 use sqlx::PgPool;
@@ -50,6 +52,13 @@ impl AppState {
 /// same shared inner function, so the routing table below is the only place mount and path are
 /// spelled out.
 pub fn router(state: AppState) -> Router {
+    // Read before `state` moves into `.with_state` below. `DefaultBodyLimit` is a request-level
+    // extension (`axum_core::extract::default_body_limit`'s own doc), inserted by this `.layer()`
+    // on every request BEFORE routing, which is what makes `body::JsonBody`'s
+    // `Bytes::from_request` (and hence `body::JsonBody` at all 8 body sites) see the CONFIGURED
+    // limit instead of axum's own unconditional 2 MB `DEFAULT_LIMIT` —
+    // `reference/fixtures/27-malformed-request-handling.txt` §5.
+    let max_body_bytes = state.config.max_body_bytes;
     Router::new()
         // ---- identity + organization (2) ----
         .route("/v0/auth/me", get(handlers::identity::auth_me))
@@ -105,6 +114,7 @@ pub fn router(state: AppState) -> Router {
         // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
         // default 405 — the dispatch contract is explicit: "There is no 405."
         .method_not_allowed_fallback(not_found_fallback)
+        .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(state)
 }
 

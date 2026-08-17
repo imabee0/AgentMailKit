@@ -225,17 +225,43 @@ impl AppError {
         Self::internal(&e.to_string())
     }
 
-    /// Attach one `validation_error` issue naming `path` as a single string segment. Small
-    /// convenience — the full `errors[]` shape (mixed string/integer path) lives on
-    /// `amk_types::ValidationIssue` directly for call sites that need more than one segment.
+    /// Attach one `validation_error` issue naming `path` as a single string segment, REPLACING
+    /// whatever `errors[]` already holds. Small convenience — the full `errors[]` shape (mixed
+    /// string/integer path) lives on `amk_types::ValidationIssue` directly for call sites that
+    /// need more than one segment.
+    ///
+    /// Both callers construct through `Self::new(ErrorCode::ValidationError, ...)` first, which
+    /// (`ErrorEnvelope::new`'s own doc) already auto-synthesizes a one-item placeholder `errors`
+    /// entry from that constructor's `message` argument — so replacing is the fix, not merely a
+    /// style choice: `.push`ing onto that placeholder is a real defect this dispatch's own edge
+    /// case 8 test caught (a `page_token` failure carried BOTH the placeholder `custom` entry and
+    /// this function's own `invalid_format` one, `errors` length 2 against the reference's exactly
+    /// 1), predating this dispatch and equally present on `StoreError::InvalidValue`'s call site.
+    ///
+    /// `page_token`'s own kind is special-cased HERE, rather than at its call site
+    /// (`StoreError::InvalidPageToken`'s mapping), per the dispatch contract's writable-paths
+    /// list, which grants this function alone: `reference/fixtures/27-malformed-request-handling
+    /// .txt` §3(e) — the reference emits `{"code":"invalid_format","format":"base64url",
+    /// "path":["page_token"]}`, not the `custom` shape this used to emit for every caller
+    /// indistinguishably, including `StoreError::InvalidValue`'s "contains a value the server
+    /// cannot store" (the only other caller, which keeps the unchanged generic shape below).
     fn with_issue(mut self, path: &str, message: &str) -> Self {
-        // Built through the constructor rather than as a struct literal: `ValidationIssue` now
+        // Built through the constructors rather than as a struct literal: `ValidationIssue` now
         // carries seven per-kind extras (`reference/fixtures/27-malformed-request-handling.txt`),
         // and a literal here would have to name every one of them and would break again on the
         // next kind the reference shows us.
-        let mut issue = amk_types::ValidationIssue::custom(message);
-        issue.path = vec![serde_json::Value::String(path.into())];
-        self.0.errors.push(issue);
+        let issue = if path == "page_token" {
+            amk_types::ValidationIssue::invalid_format(
+                "base64url",
+                Some(path),
+                "Invalid base64url-encoded string",
+            )
+        } else {
+            let mut issue = amk_types::ValidationIssue::custom(message);
+            issue.path = vec![serde_json::Value::String(path.into())];
+            issue
+        };
+        self.0.errors = vec![issue];
         self
     }
 }

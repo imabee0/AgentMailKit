@@ -1,7 +1,7 @@
 //! `/v0/api-keys`, `/v0/pods/{pod_id}/api-keys`, `/v0/inboxes/{inbox_id}/api-keys` — the one
 //! collection in this dispatch mounted all three ways. Written once, mounted three times.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 
@@ -16,6 +16,7 @@ use amk_types::api_key::{
 use amk_types::ids::ApiKeyId;
 
 use crate::auth::AuthContext;
+use crate::body::{JsonBody, QueryParams};
 use crate::error::AppError;
 use crate::ids::{decode_segment, PathPodId, PathPodIdString};
 use crate::pagination::{ListQuery, ListQueryNoDirection, Resolved};
@@ -38,7 +39,7 @@ fn inbox_id_from_path(raw: &str) -> Result<amk_types::ids::InboxId, amk_core::sc
 pub async fn list_org(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Query(q): Query<ListQuery>,
+    QueryParams(q): QueryParams<ListQuery>,
 ) -> Result<Json<ListApiKeysResponse>, AppError> {
     permissions::require(&ctx.grants, "api_key_read")?;
     let filter = organization_window(&ctx.scope);
@@ -51,7 +52,7 @@ pub async fn list_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
     PathPodId(pod_id): PathPodId,
-    Query(q): Query<ListQueryNoDirection>,
+    QueryParams(q): QueryParams<ListQueryNoDirection>,
 ) -> Result<Json<ListApiKeysResponse>, AppError> {
     let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "api_key_read")?;
@@ -63,7 +64,7 @@ pub async fn list_inbox(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(raw_inbox_id): Path<String>,
-    Query(q): Query<ListQueryNoDirection>,
+    QueryParams(q): QueryParams<ListQueryNoDirection>,
 ) -> Result<Json<ListApiKeysResponse>, AppError> {
     let inbox_id = inbox_id_from_path(&raw_inbox_id)?;
     let filter = settle_inbox_mount(&state.pool, &ctx.scope, &inbox_id).await?;
@@ -99,7 +100,7 @@ async fn list_keys(
 pub async fn create_org(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Json(req): Json<CreateApiKeyRequest>,
+    JsonBody(req): JsonBody<CreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
     permissions::require(&ctx.grants, "api_key_create")?;
     let filter = organization_window(&ctx.scope);
@@ -110,7 +111,7 @@ pub async fn create_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
     PathPodId(pod_id): PathPodId,
-    Json(req): Json<CreateApiKeyRequest>,
+    JsonBody(req): JsonBody<CreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
     let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "api_key_create")?;
@@ -121,7 +122,7 @@ pub async fn create_inbox(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(raw_inbox_id): Path<String>,
-    Json(req): Json<CreateApiKeyRequest>,
+    JsonBody(req): JsonBody<CreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
     let inbox_id = inbox_id_from_path(&raw_inbox_id)?;
     let filter = settle_inbox_mount(&state.pool, &ctx.scope, &inbox_id).await?;
