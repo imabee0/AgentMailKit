@@ -1,0 +1,22 @@
+# Path parameters for the P1 gate's schemathesis run.
+#
+# WHY THIS EXISTS. Mounting the message and thread get-by-id operations made the gate WORSE before
+# it made it better: schemathesis generates random UUIDs and Message-IDs for `{thread_id}` and
+# `{message_id}`, every one of them 404s, and hypothesis then aborts those operations with
+# `filter_too_much` — "Too many generated examples are filtered out". The 41-operation run reported
+# 8 failed health checks and warned that **13 operations repeatedly returned 404, preventing tests
+# from reaching your API's core logic**. The exit code went red while the coverage silently fell.
+#
+# So the gate seeds one real inbox, pod, thread, message and api-key, exports their ids, and binds
+# them here. `scripts/p1-gate.sh` is what sets these variables; a missing one is a hard ConfigError
+# from schemathesis rather than a silent fallback to random generation, which is the behaviour we
+# want — a gate that quietly stopped reaching its endpoints is exactly what this file is fixing.
+#
+# These are SEEDS, not a whitelist: schemathesis still fuzzes every other parameter, body and
+# header on those operations. Pinning the id is what lets it get past the lookup to the logic.
+[parameters]
+"path.inbox_id" = "${AMK_ST_INBOX_ID}"
+"path.pod_id" = "${AMK_ST_POD_ID}"
+"path.thread_id" = "${AMK_ST_THREAD_ID}"
+"path.message_id" = "${AMK_ST_MESSAGE_ID}"
+"path.api_key_id" = "${AMK_ST_API_KEY_ID}"

@@ -197,6 +197,42 @@ NODE_EXIT=$?
 echo "sdk_smoke.mjs exit: $NODE_EXIT"
 
 echo
+# ---- seed the resources the by-id operations need -------------------------------------------
+#
+# Mounting the message/thread get-by-id operations made the schemathesis half WORSE before it made
+# it better: the fuzzer generates random UUIDs and Message-IDs for `{thread_id}`/`{message_id}`,
+# every one 404s, and hypothesis aborts the operation with `filter_too_much`. The 41-operation run
+# reported 8 failed health checks and warned that 13 operations "repeatedly returned 404,
+# preventing tests from reaching your API's core logic" — the exit code went red while the coverage
+# silently fell. So seed one real row of each and bind the ids in conformance/schemathesis.toml.
+#
+# Threads and messages are seeded with SQL because no endpoint creates them yet: send is P2's
+# outbound half and ingest is the daemon. This is the same direct-UPDATE honesty as the operator
+# configuration above — stated, not hidden.
+echo
+echo "== seed the by-id fixtures =="
+ST_INBOX=$(api POST /v0/inboxes '{"username":"stfixture"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["inbox_id"])')
+ST_POD=$(api GET /v0/pods '' | python3 -c 'import sys,json;print(json.load(sys.stdin)["pods"][0]["pod_id"])')
+ST_KEY_ID=$(api POST /v0/api-keys '{"name":"st fixture"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["api_key_id"])')
+ST_THREAD=$(python3 -c 'import uuid;print(uuid.uuid4())')
+ST_MESSAGE="<stfixture@appsynergy.io>"
+"$PSQL" "$AMK_DATABASE_URL" -qc "
+  INSERT INTO threads (thread_id, organization_id, pod_id, inbox_id, labels, \"timestamp\",
+                       senders, recipients, subject, preview, last_message_id, message_count, size)
+  SELECT '$ST_THREAD', organization_id, '$ST_POD', '$ST_INBOX', ARRAY['received'], now(),
+         ARRAY['sender@example.test'], ARRAY['$ST_INBOX'], 'st fixture', 'preview',
+         '$ST_MESSAGE', 1, 42
+    FROM inboxes WHERE inbox_id = '$ST_INBOX';
+  INSERT INTO messages (inbox_id, message_id, organization_id, pod_id, thread_id, labels,
+                        \"timestamp\", from_address, to_addresses, size)
+  SELECT '$ST_INBOX', '$ST_MESSAGE', organization_id, '$ST_POD', '$ST_THREAD', ARRAY['received'],
+         now(), 'sender@example.test', ARRAY['$ST_INBOX'], 42
+    FROM inboxes WHERE inbox_id = '$ST_INBOX';" >/dev/null || {
+  echo "FATAL: could not seed the by-id fixtures" >&2; exit 1; }
+export AMK_ST_INBOX_ID="$ST_INBOX" AMK_ST_POD_ID="$ST_POD" AMK_ST_THREAD_ID="$ST_THREAD"
+export AMK_ST_MESSAGE_ID="$ST_MESSAGE" AMK_ST_API_KEY_ID="$ST_KEY_ID"
+echo "  inbox=$ST_INBOX pod=$ST_POD thread=$ST_THREAD api_key=$ST_KEY_ID"
+
 echo "== P1 gate, fourth part: schemathesis over the implemented paths =="
 # The last clause of the plan's P1 gate. The two SDK smokes walk the paths a client is meant to
 # walk; this walks the ones nobody would write down. Scope is DERIVED from router() and reconciled
@@ -224,7 +260,8 @@ if [ "$SCOPE_EXIT" -ne 0 ]; then
   echo "FATAL: router() and openapi.json disagree — run scripts/derive-implemented-paths.sh"
 fi
 PYTHONPATH=. SCHEMATHESIS_HOOKS=conformance.schemathesis_checks AMK_KEY="$CAND_KEY" \
-  .venv-schemathesis/bin/st run reference/openapi.json \
+  .venv-schemathesis/bin/st --config-file conformance/schemathesis.toml \
+    run reference/openapi.json \
     --url "http://${BIND}" \
     "${INCLUDE[@]}" \
     --checks not_a_server_error,content_type_conformance,response_schema_conformance,optionals_are_omitted_never_null,timestamps_are_wire_exact,error_shape_is_one_of_the_two \
