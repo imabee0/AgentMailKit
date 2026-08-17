@@ -6,6 +6,7 @@ members = [
     "crates/amk-store",
     "crates/amk-http",
     "crates/amk-cli",
+    "crates/amk-outbound",
 ]
 
 [workspace.package]
@@ -40,5 +41,18 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "
 # reference/fixtures/15-compile-spike.txt (F1: `features = ["ws"]` is required even though the
 # WebSocket upgrade is P4 — `axum::extract::ws::WebSocketUpgrade` does not exist without it. F2:
 # `uuid`'s `serde` feature, already enabled above, is required for `Path<Uuid>` extractors).
+# amk-outbound. The three stalwart-labs crates in their SANCTIONED role — libraries consumed like
+# any third party, confined to this one crate and converted at its edge. Versions verified in the
+# P-1 compile spike (reference/fixtures/15-compile-spike.txt); do not bump without re-running it.
+# `shape-provenance.sh` is what enforces that none of their types reaches a public signature.
+# The exact versions the spike RESOLVED, not the loose ones its manifest requested. `mail-send`
+# 0.6.0 depends on `mail-auth ^0.8`, which pins `hickory-resolver =0.26.0-alpha.1` and cannot
+# co-resolve with `mail-auth 0.12`; 0.6.1 is the release that moved to the 0.12 line. The spike's
+# `cargo tree` section is the authority here and its manifest section is not — the same "the
+# capture beats the text" rule that has bitten this project six times.
+mail-send = "=0.6.1"
+mail-builder = "=0.4.4"
+mail-auth = "=0.12.0"
+
 axum = { version = "=0.8.9", features = ["ws"] }
 tower = "=0.5.3"

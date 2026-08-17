@@ -1,0 +1,23 @@
+[package]
+name = "amk-outbound"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The three stalwart-labs crates live HERE and nowhere else. They are consumed as libraries — one
+# of the plan's two sanctioned roles for Stalwart — and converted at this crate's edge: no
+# `mail_send::`/`mail_builder::`/`mail_auth::` type may appear in a public signature or re-export.
+# `./scripts/shape-provenance.sh` checks that, and `crates/amk-{types,core,store,http}/Cargo.toml`
+# each carry the comment forbidding these same dependencies to themselves.
+[dependencies]
+amk-types = { path = "../amk-types" }
+mail-auth.workspace = true
+mail-builder.workspace = true
+mail-send.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
