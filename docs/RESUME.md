@@ -3,7 +3,7 @@
 Where the last session stopped, so a fresh one — on this workstation or in Claude's cloud sandbox —
 can continue without re-deriving it. Update this file in the commit that invalidates it.
 
-**Last updated:** 2026-08-17, after P1's Lane L went green and the first P2 slice landed.
+**Last updated:** 2026-08-17, after the P2 message/thread surface landed.
 
 ## Verified state
 
@@ -12,10 +12,10 @@ $ ./scripts/check.sh
 check: PASS
 plan-ledger: PASS
 $ ./scripts/check.sh --fast   # summed test results
-total passed: 607
+total passed: 619
 ```
 
-The branch is green at 607 workspace tests with a live Postgres on 127.0.0.1:55432 (`main` was
+The branch is green at 619 workspace tests with a live Postgres on 127.0.0.1:55432 (`main` was
 570 before this session's two fixes). Without that
 database the same command still exits PASS having skipped every DB-backed test — see the sandbox
 section of `CLAUDE.md`.
@@ -225,32 +225,46 @@ api.agentmail.to. That is R-key work — see item 1 below.
 
 ## P2 progress
 
-Contract: `.claude/contracts/amk-http-message-thread-reads.md`.
+Contracts: `.claude/contracts/amk-http-message-thread-reads.md`,
+`.claude/contracts/amk-store-mail-mutations.md`.
 
-**Landed (unmerged):** `GET /v0/inboxes/{inbox_id}/messages` and `GET …/threads` at all three
-mounts — four operations over the `get`/`list` `amk-store` already had. Router reconciles clean at
-**29 operations**.
+**Landed (unmerged): the whole message/thread read+mutate surface.** Router reconciles clean at
+**41 operations** (was 25 at P1):
 
-**Deliberately not mounted: get-by-id for either resource.** Every get-by-id path in the spec
-carries GET, PATCH and DELETE, and `amk-store` has no update or delete for messages or threads.
-Serving only the GET leaves two described operations unserved on a mounted path, which
-`derive-implemented-paths.sh` reports — and the P1 gate's schemathesis scope is derived by PATH, so
-a half-served path would have the gate fuzzing operations this server does not implement and
-reporting absences as failures. The handlers are written and compiled; they mount in the same
-dispatch that gives their store the update and delete.
+```
+GET                     /v0/inboxes/{inbox_id}/messages
+GET  PATCH  DELETE      /v0/inboxes/{inbox_id}/messages/{message_id}
+GET                     /v0/threads, /v0/pods/{pod_id}/threads, /v0/inboxes/{inbox_id}/threads
+GET  PATCH  DELETE      /v0/threads/{thread_id} and the same at both other mounts
+```
 
-**The next P2 step is therefore `amk-store`**, not `amk-http`: `messages::update`/`delete` and
-`threads::update`/`delete`, with fixture 19 (`19-message-label-patch-gate.txt`) as the evidence for
-the label-patch semantics. Then the six get-by-id/PATCH/DELETE mounts land together.
+It landed in two slices on purpose. The LIST slice went first with get-by-id deliberately
+**unmounted**, because every get-by-id path in the spec carries GET, PATCH *and* DELETE and
+`amk-store` had none of the latter two — a path serving some of its described methods is what
+`derive-implemented-paths.sh` reports, and the gate's schemathesis scope is derived by PATH, so a
+half-served path makes the gate fuzz operations the server does not implement and report absences
+as failures. `amk-store`'s `update`/`delete` came second, then the six mounts together.
 
-After that, in write order: `amk-ingest` + `amk-outbound` (may fan out), then `amk-events` +
-`amk-jobs`. P2's gate has an **R-phys** half no key substitutes for — mail injected from the OVH box
-via `/root/amksend.py`, and an SDK send to a Gmail account showing DKIM+SPF pass.
+**Fixture 19's system-label gate is implemented once and called from both resources.** The gate
+refuses `sent`/`received`/`bounced`/`scheduled`; **restricted labels are NOT system**, so a client
+may set `spam`/`trash`/`blocked`/`unauthenticated`; `errors[].path` is `["add_labels", 0]` (field
+name then array index); and one bad label rejects the **whole** mutation, asserted by re-reading
+the row rather than by the status.
 
-**One invented shape was caught by a test, worth remembering:** an earlier draft of the threads
-handler used a `thread_read` permission. There is no such flag — the vocabulary is the 38 names in
-`amk-types::api_key::WIRE_NAMES`, and `message_read`'s own field doc says "Also required to read
-threads". It refused every credential, including unrestricted ones' restricted siblings.
+**Two invented shapes were caught by tests, both the same mistake.** A draft used `thread_read`,
+and the update/delete handlers wanted `thread_update`/`thread_delete`. None of the three exists —
+the vocabulary is the 38 names in `amk-types::api_key::WIRE_NAMES`, and `message_read`,
+`message_update` and `message_delete` carry threads too, per their own field docs.
+
+### Where P2 goes next
+
+1. **`amk-ingest` + `amk-outbound`** — the write order allows these to fan out. Both are large and
+   neither is started.
+2. Deferred and still deferred: search (needs FTS), attachments and `raw` (need blobs and signed
+   URLs), the batch pair (parked under *Full parity*), drafts (P3).
+3. **P2's gate has an R-phys half no key substitutes for**: mail injected from the OVH box via
+   `/root/amksend.py` appearing with correct threading over a 3-message exchange, and an SDK send
+   to a Gmail account showing DKIM+SPF pass.
 
 ## Outstanding, needs the user
 
