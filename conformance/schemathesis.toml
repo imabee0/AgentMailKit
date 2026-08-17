@@ -20,3 +20,24 @@
 "path.thread_id" = "${AMK_ST_THREAD_ID}"
 "path.message_id" = "${AMK_ST_MESSAGE_ID}"
 "path.api_key_id" = "${AMK_ST_API_KEY_ID}"
+
+# ---- DELETE gets throwaway ids, because seeding alone is not enough ----------------------------
+#
+# The first version of this file pinned the ids above for EVERY operation, and the 404 warning got
+# WORSE, not better — from 13 operations to 25. The mechanism, once the DELETE list is read beside
+# the pin list, is obvious: ten DELETE operations are mounted, so a fuzzer handed a real
+# `{thread_id}` reliably deletes the seeded thread, and every by-id operation after that 404s.
+# Seeding plus a mounted DELETE on the same pinned id is a self-destroying fixture.
+#
+# So DELETE gets ids that are syntactically valid and deliberately absent. It still exercises the
+# real code path — decode the segment, resolve the mount, check the scope, miss — and it no longer
+# takes the other 30 operations down with it. Verifying a DELETE's success path is an integration
+# test's job (`crates/amk-http/tests/mail_reads.rs` does exactly that, against rows it seeds and
+# owns); the fuzzer's job here is the shapes around it.
+[[operations]]
+include-method = "DELETE"
+
+[operations.parameters]
+"path.thread_id" = "00000000-0000-4000-8000-0000000000de"
+"path.message_id" = "<absent-by-design@appsynergy.io>"
+"path.api_key_id" = "00000000-0000-4000-8000-0000000000ad"
