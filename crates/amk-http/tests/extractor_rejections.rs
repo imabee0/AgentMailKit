@@ -7,21 +7,20 @@
 //! **status, content-type, and the parsed envelope** — a test that checks only `code()` is what
 //! let the defects this dispatch fixes ship in the first place.
 //!
-//! # Known, out-of-scope divergences from the fixture's exact wording
+//! # No divergences remain
 //!
-//! Two sub-cases the fixture observed on the reference cannot be reproduced by this dispatch
-//! without editing `crate::pagination`, which is outside this dispatch's writable paths (and
-//! "improving the query-parameter parsing while in there" is explicitly prohibited). Both are
-//! documented in `crate::body`'s own doc and pinned here as the ACTUAL, correctly-scoped
-//! behaviour rather than asserted against the fixture's exact wording:
-//! - `?limit=-1` and `?limit=` are classified `invalid_type`/`NaN` here, not the reference's
-//!   `too_small` — `ListQuery::limit: Option<u64>` cannot represent a negative number at all, so
-//!   `-1` fails identically to `abc` at the Rust type level. `?limit=0` does not fail AT ALL: it
-//!   is a valid `u64` and `crate::pagination::resolve` already treats it as a legitimate empty-page
-//!   request, unchanged by this dispatch.
-//! - `?limit=101` returns 200 (correct — no cap is enforced) but echoes `limit:100`, not `101`:
-//!   `crate::pagination::MAX_LIMIT` clamps before echoing, which is existing, out-of-scope
-//!   behaviour this dispatch does not touch.
+//! An earlier round of this dispatch pinned three `limit` sub-cases here as *documented
+//! divergences* — `?limit=-1` and `?limit=` answering `invalid_type` instead of `too_small`,
+//! `?limit=0` not failing at all, and `?limit=101` echoing `100` instead of `101`. All three had
+//! one cause: `ListQuery::limit` was `Option<u64>`, which cannot represent a negative and cannot
+//! distinguish "not a number" from "a number that is too small", plus a `MAX_LIMIT` clamp that
+//! rewrote the echo. The contract was widened to include `crate::pagination` and they are now
+//! ordinary conformance assertions like every other test in this file.
+//!
+//! Worth keeping in view: the two that looked like cosmetic message-wording differences were not.
+//! `?limit=101` echoing `100` is a value a client reads and paginates against, and it is exactly
+//! what the conformance diff compares — the same class of defect as the extractor escapes this
+//! file was written for, arrived at from the other direction.
 
 mod support;
 
@@ -236,14 +235,17 @@ async fn limit_abc_is_invalid_type_received_nan() {
     );
 }
 
+/// `[SPEC:reference/fixtures/27-malformed-request-handling.txt]` §1: `?limit=-1`, `?limit=` and
+/// `?limit=0` are each 400 with a body the fixture records as *identical* — so this asserts the
+/// whole `errors[0]` object, and asserts the three are equal to each other. Both halves matter:
+/// the first pins the extras (`origin`/`minimum`/`inclusive`) that only appear on `too_small`, the
+/// second pins the "identical" the fixture states outright.
+///
+/// These three were a documented divergence until `crate::pagination` came into scope: with
+/// `limit: Option<u64>` the reference's split was unrepresentable, because `"-1"`, `""` and
+/// `"abc"` all fail `u64::from_str` the same way and `"0"` parses and is never validated at all.
 #[tokio::test]
-async fn limit_negative_one_and_limit_empty_are_rejected_as_invalid_type_not_too_small() {
-    // Documented divergence — see this file's own module doc and `crate::body`'s doc on
-    // `query_deserialize_error_to_issue`: the reference classifies these as `too_small`
-    // (`ListQuery::limit` would need to become a signed/coercing type to reproduce that, which is
-    // `crate::pagination`, out of this dispatch's scope). What IS pinned here is what this crate
-    // actually does today: still 400, still `validation_error`, still names `limit`, never a
-    // silent acceptance of a negative page size.
+async fn empty_negative_and_zero_limits_are_one_identical_too_small_envelope() {
     let Some(pool) = support::pool().await else {
         return;
     };
@@ -251,31 +253,29 @@ async fn limit_negative_one_and_limit_empty_are_rejected_as_invalid_type_not_too
     let key = support::org_key(&pool, &org).await;
     let router = support::test_router(pool);
 
-    for query in ["?limit=-1", "?limit="] {
+    let expected = json!({
+        "code": "too_small",
+        "origin": "number",
+        "minimum": 0,
+        "inclusive": false,
+        "path": ["limit"],
+        "message": "Too small: expected number to be >0",
+    });
+
+    let mut bodies = Vec::new();
+    for query in ["?limit=-1", "?limit=", "?limit=0"] {
         let resp = support::get(&router, &format!("/v0/pods{query}"), Some(&key)).await;
         assert_validation_envelope(&resp, query);
-        let issue = resp.first_error().unwrap();
-        assert_eq!(issue["code"], "invalid_type", "{query}: {issue}");
-        assert_eq!(issue["path"], json!(["limit"]), "{query}: {issue}");
+        assert_eq!(
+            resp.first_error().unwrap(),
+            &expected,
+            "{query} must be fixture 27 §1's too_small issue, whole: {}",
+            resp.body
+        );
+        bodies.push(resp.json.clone().unwrap());
     }
-}
-
-#[tokio::test]
-async fn limit_zero_is_not_a_rejection_it_is_an_empty_page() {
-    // Documented divergence, same reasoning as the test above: the reference rejects `?limit=0`
-    // as `too_small`; `u64` parses `"0"` successfully, and `crate::pagination::resolve` already
-    // treats a supplied `limit` of `0` as "return nothing", not an error — unchanged by this
-    // dispatch, pinned here so the gap is visible rather than silently assumed.
-    let Some(pool) = support::pool().await else {
-        return;
-    };
-    let org = support::seed_org(&pool).await;
-    let key = support::org_key(&pool, &org).await;
-    let router = support::test_router(pool);
-
-    let resp = support::get(&router, "/v0/pods?limit=0", Some(&key)).await;
-    assert_eq!(resp.status, 200, "body: {}", resp.body);
-    assert_eq!(resp.json.unwrap()["count"], 0);
+    assert_eq!(bodies[0], bodies[1], "fixture 27 §1: limit= is identical to limit=-1");
+    assert_eq!(bodies[1], bodies[2], "fixture 27 §1: limit=0 is identical to limit=-1");
 }
 
 #[tokio::test]
@@ -323,12 +323,15 @@ async fn an_unknown_query_parameter_is_ignored() {
     assert_eq!(resp.status, 200, "body: {}", resp.body);
 }
 
+/// `[SPEC:reference/fixtures/27-malformed-request-handling.txt]` §1: `GET /v0/pods?limit=101` is
+/// 200 and the response echoes `"limit":101`. The fixture states in as many words that no upper
+/// cap is enforced.
+///
+/// Both halves were divergent before `crate::pagination` came into scope: `MAX_LIMIT = 100`
+/// clamped the applied value AND the echo, so this endpoint answered `100`. The 200 was never in
+/// doubt; the echoed number was the actual defect, and it is the one a conformance diff sees.
 #[tokio::test]
-async fn limit_101_is_accepted_not_rejected_though_the_echoed_value_is_clamped() {
-    // `[SPEC:reference/fixtures/27-malformed-request-handling.txt]` §1: "no upper cap is
-    // enforced" — the 200 half of this is exactly what this dispatch's wrapper must preserve (an
-    // over-limit `limit` is a valid `u64`, never an extractor rejection). The echoed VALUE is a
-    // documented, out-of-scope divergence — see this file's own module doc.
+async fn a_limit_above_one_hundred_is_accepted_and_echoed_verbatim() {
     let Some(pool) = support::pool().await else {
         return;
     };
@@ -340,8 +343,8 @@ async fn limit_101_is_accepted_not_rejected_though_the_echoed_value_is_clamped()
     assert_eq!(resp.status, 200, "a limit above 100 must not be REJECTED: {}", resp.body);
     assert_eq!(
         resp.json.unwrap()["limit"],
-        100,
-        "crate::pagination::MAX_LIMIT clamps the echoed value — out of this dispatch's scope"
+        101,
+        "fixture 27 §1 echoes the caller's own 101; the old MAX_LIMIT clamp answered 100"
     );
 }
 

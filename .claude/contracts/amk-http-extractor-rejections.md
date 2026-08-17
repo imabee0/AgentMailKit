@@ -7,6 +7,31 @@ rather than reading the list. **Revised once already**: the first draft of this 
 the target behaviour, the probe that became fixture 27 was run instead, and it reversed two of the
 decisions below. What is written here now is observed.
 
+**Revised a third time (2026-08-17), and this revision widened the writable set.** The first
+dispatch against this contract could not satisfy it: the contract mandates a `max_body_bytes` field
+on `AppConfig` but did not make `AppConfig`'s other construction site writable, and it mandates
+`limit` behaviour that `crate::pagination`'s own types cannot express. Both are the SAME defect the
+contract already lectures about — enumerating the *extractor* sites is not enumerating the sites
+that a mandated change reaches. Two more derivations, run and pasted rather than recalled:
+
+```
+$ grep -rn "AppConfig\s*{" --include=*.rs crates/ | grep -v "pub struct"
+crates/amk-http/src/config.rs:44:impl Default for AppConfig {          # the impl itself
+crates/amk-http/tests/support/mod.rs:52:    let config = AppConfig {   # already writable
+crates/amk-cli/src/config.rs:50:pub fn app_config() -> AppConfig {     # NOT writable -> E0063
+crates/amk-cli/src/config.rs:51:    AppConfig {
+
+$ grep -rn "\.resolve()" --include=*.rs crates/amk-http/src   # every consumer of the limit rules
+crates/amk-http/src/handlers/pods.rs:42        crates/amk-http/src/handlers/api_keys.rs:46,59,72
+crates/amk-http/src/handlers/inboxes.rs:89     crates/amk-http/src/pagination.rs (its own tests)
+```
+
+An exhaustive struct literal is not rescued by adding `impl Default`, so `crates/amk-cli` fails to
+compile and the workspace gate can never go green. **The rule this buys: a contract that mandates a
+change to a type must make every construction site of that type writable, or it is unsatisfiable by
+construction.** Site enumeration is not variant enumeration, and it is not construction-site
+enumeration either — this is now the third form of the same mistake in one dispatch.
+
 ## Why this dispatch exists
 
 `.claude/contracts/amk-p1-divergences.md` asked "which typed **path** extractors can reject before
@@ -81,6 +106,12 @@ Three defects, in order of severity:
   raw non-JSON body, a custom content-type, or a POST with no body and no header at all — cases 1,
   4 and 5. Extend it; say in your report exactly what you added.
 - `crates/amk-http/src/config.rs` — the body-limit field only.
+- `crates/amk-cli/src/config.rs` — **added in revision 3**, and ONLY to keep `app_config()`
+  compiling against the new `AppConfig` field. It reads two environment variables and passes them
+  through; that must stay true. Do not give `max_body_bytes` an environment variable of its own,
+  do not add a third `AMK_*` name, and change nothing else in the file.
+- `crates/amk-http/src/pagination.rs` — **added in revision 3**, for the `limit` rules below only.
+  `page_token` and `ascending` handling, `DEFAULT_LIMIT`, and `direction_for` are NOT in scope.
 
 Nothing else. In particular **not** `crates/amk-types/**` (frozen — the envelope already has
 everything needed; `ErrorEnvelope::new(ErrorCode::ValidationError, msg)` now routes `msg` into
@@ -119,6 +150,27 @@ Decisions already made — each now cites the capture that settles it, not a jud
 - **An unknown query parameter is IGNORED** (`?nosuchparam=1` -> 200), and `?limit=101` is
   **accepted**, echoing `"limit":101`. Do not add a cap; the `agentmail-cli` help text documenting
   one is not enforced by the API this clones.
+- **`limit` must be parsed explicitly, not by serde's integer impl** — revision 3, and the reason
+  the previous bullet was unreachable. Fixture 27 §1 requires `?limit=-1`, `?limit=` and `?limit=0`
+  to produce *byte-identical* `too_small` bodies (`origin:"number"`, `minimum:0`,
+  `inclusive:false`, `path:["limit"]`), while `?limit=abc` produces `invalid_type`/`received:"NaN"`.
+  `Option<u64>` cannot express that distinction: `"-1"`, `""` and `"abc"` all fail `u64::from_str`
+  identically, and `"0"` succeeds and never reaches a validator at all. So `limit` deserializes as
+  a raw `Option<String>` and is classified by a function in `pagination.rs`:
+  - empty, or an integer `<= 0` -> `too_small`;
+  - anything else that is not a non-negative integer -> `invalid_type` / `received:"NaN"`;
+  - otherwise accepted **verbatim, uncapped**, and echoed verbatim.
+  This deletes the `limit` half of `body.rs`'s serde-message string matching rather than adding to
+  it, which is the point: a structured classifier cannot be broken by an upstream reword.
+  `MAX_LIMIT` and the clamp go with it — a clamp is what made `?limit=101` echo `100`. `ascending`
+  keeps its existing `Option<bool>` + rejection-text path; it already produces fixture 27's body
+  exactly, and widening it is out of scope.
+- **Uncapping `limit` is a considered, bounded risk, not an oversight.** Fixture 27 observed 101
+  accepted and the reference's own ceiling was deliberately not probed. `limit` reaches Postgres as
+  a `LIMIT` bound, so a pathological value returns at most the caller's own scoped rows and buys no
+  amplification; it is not the unbounded *buffer* the body-size limit above exists to prevent, and
+  the two must not be conflated. If a ceiling is ever wanted it is a plan decision with a fixture
+  behind it, not something to reintroduce quietly here.
 - **Body size: 413 is a third off-catalog status, and the limit itself diverges.** `JsonRejection`
   composites `BytesRejection` -> `FailedToBufferBody` -> `LengthLimitError`, which axum-core marks
   `#[status = PAYLOAD_TOO_LARGE]` against an unconditional 2 MB `DEFAULT_LIMIT` that applies whether
@@ -183,7 +235,9 @@ the parsed envelope** — a test that checks only `code()` is what let this ship
   wrong-typed `Content-Type` must now reach the handler as `{}` rather than being rejected, which
   by design turns four previously-failing requests into successful creates. That is the reference's
   behaviour and is the point.
-- Do not "improve" the query-parameter parsing while you are in there.
+- Do not "improve" the query-parameter parsing while you are in there. The `limit` classifier above
+  is the ONE carve-out, and it is mandated rather than optional: `page_token` and `ascending` keep
+  the parsing they have.
 - If the contract is ambiguous or appears wrong, **STOP and report**. Do not resolve it yourself.
 
 ## Reporting

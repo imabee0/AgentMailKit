@@ -79,8 +79,17 @@ async fn ascending_true_reverses_the_default_order() {
     assert_eq!(pods[1]["name"], "newer");
 }
 
+/// `[SPEC:reference/fixtures/27-malformed-request-handling.txt]` §1: no upper cap is enforced, and
+/// the response echoes the caller's own `limit`.
+///
+/// This test previously asserted the opposite — that a large `limit` was clamped to 100 and the
+/// envelope echoed `100` — on the reasoning that echoing `999999999` beside a one-item page would
+/// be self-contradictory. That reasoning was sound and the reference does not share it: the probe
+/// that became fixture 27 observed `?limit=101` answering `"limit":101`. `limit` describes the
+/// page size the caller ASKED for, not the row count they received; `count` describes the latter,
+/// and this asserts both together so the distinction cannot quietly collapse again.
 #[tokio::test]
-async fn a_limit_above_the_maximum_is_clamped_not_rejected() {
+async fn a_limit_above_the_maximum_is_neither_clamped_nor_rejected() {
     let Some(pool) = support::pool().await else {
         return;
     };
@@ -90,12 +99,15 @@ async fn a_limit_above_the_maximum_is_clamped_not_rejected() {
     support::post(&router, "/v0/pods", Some(&key), serde_json::json!({"name": "p"})).await;
 
     let resp = support::get(&router, "/v0/pods?limit=999999999", Some(&key)).await;
-    assert_eq!(resp.status, 200, "clamped, never a validation_error: {}", resp.body);
+    assert_eq!(resp.status, 200, "uncapped, never a validation_error: {}", resp.body);
+    let body = resp.json.unwrap();
     assert_eq!(
-        resp.json.unwrap()["limit"],
-        100,
-        "the echo is the APPLIED value — echoing the caller's raw 999999999 beside 1 item would \
-         be self-contradictory"
+        body["limit"], 999_999_999u64,
+        "fixture 27 §1: the caller's own limit is echoed verbatim, uncapped"
+    );
+    assert_eq!(
+        body["count"], 1,
+        "count is the page actually returned — limit is what was asked"
     );
 }
 
