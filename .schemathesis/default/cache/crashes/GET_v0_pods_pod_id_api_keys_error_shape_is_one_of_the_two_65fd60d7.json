@@ -1,0 +1,109 @@
+{
+  "operation": "GET /v0/pods/{pod_id}/api-keys",
+  "method": "GET",
+  "path_template": "/v0/pods/{pod_id}/api-keys",
+  "fingerprint": "65fd60d7",
+  "case_id": "vCCd5l",
+  "code_sample": "curl -X GET -H 'Authorization: [Filtered]' 'http://127.0.0.1:8111/v0/pods/876f2c2b-7e73-4462-9a84-aa5a19c4de14/api-keys?limit=null&limit=null'",
+  "sequence": [
+    {
+      "method": "GET",
+      "url": "http://127.0.0.1:8111/v0/pods/876f2c2b-7e73-4462-9a84-aa5a19c4de14/api-keys?limit=null&limit=null",
+      "url_template": "http://127.0.0.1:8111/v0/pods/{pod_id}/api-keys",
+      "headers": {
+        "User-Agent": "schemathesis/4.24.3",
+        "Accept-Encoding": "gzip, deflate, zstd",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "Authorization": "[Filtered]",
+        "X-Schemathesis-TestCaseId": "vCCd5l"
+      },
+      "response": {
+        "status_code": 400,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8",
+          "content-length": "72",
+          "date": "Mon, 17 Aug 2026 00:32:41 GMT"
+        },
+        "body": "Failed to deserialize query string: limit: invalid digit found in string"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "error_shape_is_one_of_the_two",
+          "status": "failure",
+          "message": "Custom check failed: `error_shape_is_one_of_the_two`\n\n400 response is not a JSON object (content-type=['text/plain; charset=utf-8']); every error in this surface is one of the two JSON shapes"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 1.0921008652076125e-05,
+          "mode": "negative"
+        },
+        "components": {
+          "PATH": "positive",
+          "HEADER": "positive",
+          "QUERY": "negative"
+        },
+        "phase": {
+          "name": "coverage",
+          "data": {
+            "type": "CoveragePhaseData",
+            "description": "limit: Incorrect type",
+            "location": null,
+            "parameter": "limit",
+            "parameter_location": "QUERY",
+            "scenario": "incorrect_type"
+          }
+        },
+        "pool_draws": [
+          {
+            "location": "path",
+            "parameter_name": "pod_id",
+            "resource_name": "type_pods:Pod",
+            "resource_field": "pod_id",
+            "source_operation": "POST /v0/pods",
+            "source_status": 200
+          }
+        ],
+        "pool_misses": [],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {
+          "PATH": {
+            "pod_id": "876f2c2b-7e73-4462-9a84-aa5a19c4de14"
+          },
+          "HEADER": {
+            "Authorization": ""
+          },
+          "QUERY": {
+            "limit": [
+              "null",
+              "null"
+            ]
+          }
+        }
+      },
+      "path": "/v0/pods/{pod_id}/api-keys",
+      "path_parameters": {
+        "pod_id": "876f2c2b-7e73-4462-9a84-aa5a19c4de14"
+      },
+      "query": {
+        "limit": [
+          "null",
+          "null"
+        ]
+      },
+      "case_headers": {
+        "Authorization": "[Filtered]"
+      },
+      "cookies": {},
+      "case_body": {
+        "encoding": "none"
+      },
+      "media_type": null,
+      "parent_index": null
+    }
+  ]
+}

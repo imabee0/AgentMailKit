@@ -1,0 +1,90 @@
+{
+  "operation": "POST /v0/api-keys",
+  "method": "POST",
+  "path_template": "/v0/api-keys",
+  "fingerprint": "15dd4e60",
+  "case_id": "k9P7ip",
+  "code_sample": "curl -X POST -H 'Authorization: [Filtered]' -H 'Content-Type: application/json' -d '{\"permissions\": {\"pod_delete\": {}}}' http://127.0.0.1:8111/v0/api-keys",
+  "sequence": [
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8111/v0/api-keys",
+      "url_template": "http://127.0.0.1:8111/v0/api-keys",
+      "headers": {
+        "User-Agent": "schemathesis/4.24.3",
+        "Accept-Encoding": "gzip, deflate, zstd",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "Authorization": "[Filtered]",
+        "X-Schemathesis-TestCaseId": "k9P7ip",
+        "Content-Type": "application/json",
+        "Content-Length": "35"
+      },
+      "response": {
+        "status_code": 422,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8",
+          "content-length": "139",
+          "date": "Mon, 17 Aug 2026 00:28:08 GMT"
+        },
+        "body": "Failed to deserialize the JSON body into the target type: permissions.pod_delete: invalid type: map, expected a boolean at line 1 column 31"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "error_shape_is_one_of_the_two",
+          "status": "failure",
+          "message": "Custom check failed: `error_shape_is_one_of_the_two`\n\n422 response is not a JSON object (content-type=['text/plain; charset=utf-8']); every error in this surface is one of the two JSON shapes"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 7.458991603925824e-06,
+          "mode": "negative"
+        },
+        "components": {
+          "HEADER": "positive",
+          "BODY": "negative"
+        },
+        "phase": {
+          "name": "coverage",
+          "data": {
+            "type": "CoveragePhaseData",
+            "description": "permissions -> pod_delete: Incorrect type",
+            "location": "/properties/permissions/properties/pod_delete/type",
+            "parameter": "application/json",
+            "parameter_location": "BODY",
+            "scenario": "incorrect_type"
+          }
+        },
+        "pool_draws": [],
+        "pool_misses": [],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {
+          "HEADER": {
+            "Authorization": ""
+          }
+        }
+      },
+      "path": "/v0/api-keys",
+      "path_parameters": {},
+      "query": {},
+      "case_headers": {
+        "Authorization": "[Filtered]"
+      },
+      "cookies": {},
+      "case_body": {
+        "encoding": "json",
+        "value": {
+          "permissions": {
+            "pod_delete": {}
+          }
+        }
+      },
+      "media_type": "application/json",
+      "parent_index": null
+    }
+  ]
+}

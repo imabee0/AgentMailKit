@@ -1,0 +1,105 @@
+{
+  "operation": "DELETE /v0/pods/{pod_id}/api-keys/{api_key_id}",
+  "method": "DELETE",
+  "path_template": "/v0/pods/{pod_id}/api-keys/{api_key_id}",
+  "fingerprint": "5a4508ca",
+  "case_id": "2geSRp",
+  "code_sample": "curl -X DELETE http://127.0.0.1:8111/v0/pods/5f261326-c73a-4f87-9b48-1650300d328c/api-keys/6b6c2ba2-dd7f-4c8a-af0c-ea82ae4a73a3",
+  "sequence": [
+    {
+      "method": "DELETE",
+      "url": "http://127.0.0.1:8111/v0/pods/5f261326-c73a-4f87-9b48-1650300d328c/api-keys/6b6c2ba2-dd7f-4c8a-af0c-ea82ae4a73a3",
+      "url_template": "http://127.0.0.1:8111/v0/pods/{pod_id}/api-keys/{api_key_id}",
+      "headers": {
+        "User-Agent": "schemathesis/4.24.3",
+        "Accept-Encoding": "gzip, deflate, zstd",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "X-Schemathesis-TestCaseId": "2geSRp",
+        "Content-Length": "0"
+      },
+      "response": {
+        "status_code": 401,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "26",
+          "date": "Mon, 17 Aug 2026 00:35:04 GMT"
+        },
+        "body": "{\"message\":\"Unauthorized\"}"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "error_shape_is_one_of_the_two",
+          "status": "failure",
+          "message": "Custom check failed: `error_shape_is_one_of_the_two`\n\n401 body is method, not an object"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 1.2263975804671645e-05,
+          "mode": "negative"
+        },
+        "components": {
+          "PATH": "positive",
+          "HEADER": "negative"
+        },
+        "phase": {
+          "name": "coverage",
+          "data": {
+            "type": "CoveragePhaseData",
+            "description": "Missing `Authorization` at header",
+            "location": null,
+            "parameter": "Authorization",
+            "parameter_location": "HEADER",
+            "scenario": "missing_parameter"
+          }
+        },
+        "pool_draws": [
+          {
+            "location": "path",
+            "parameter_name": "pod_id",
+            "resource_name": "type_api-keys:CreateApiKeyResponse",
+            "resource_field": "pod_id",
+            "source_operation": "POST /v0/pods/{pod_id}/api-keys",
+            "source_status": 200
+          },
+          {
+            "location": "path",
+            "parameter_name": "api_key_id",
+            "resource_name": "type_api-keys:CreateApiKeyResponse",
+            "resource_field": "api_key_id",
+            "source_operation": "POST /v0/pods/{pod_id}/api-keys",
+            "source_status": 200
+          }
+        ],
+        "pool_misses": [],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {
+          "PATH": {
+            "pod_id": "5f261326-c73a-4f87-9b48-1650300d328c",
+            "api_key_id": "6b6c2ba2-dd7f-4c8a-af0c-ea82ae4a73a3"
+          },
+          "HEADER": {}
+        }
+      },
+      "path": "/v0/pods/{pod_id}/api-keys/{api_key_id}",
+      "path_parameters": {
+        "pod_id": "5f261326-c73a-4f87-9b48-1650300d328c",
+        "api_key_id": "[Filtered]"
+      },
+      "query": {},
+      "case_headers": {
+        "Authorization": "[Filtered]"
+      },
+      "cookies": {},
+      "case_body": {
+        "encoding": "none"
+      },
+      "media_type": null,
+      "parent_index": null
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "operation": "PATCH /v0/inboxes/{inbox_id}",
+  "method": "PATCH",
+  "path_template": "/v0/inboxes/{inbox_id}",
+  "fingerprint": "73fb25cb",
+  "case_id": "tFnE7V",
+  "code_sample": "curl -X PATCH -H 'Authorization: [Filtered]' -H 'Content-Type: application/json' -d '{\"display_name\": null}' http://127.0.0.1:8111/v0/inboxes/braveisland824%40appsynergy.io",
+  "sequence": [
+    {
+      "method": "PATCH",
+      "url": "http://127.0.0.1:8111/v0/inboxes/braveisland824%40appsynergy.io",
+      "url_template": "http://127.0.0.1:8111/v0/inboxes/{inbox_id}",
+      "headers": {
+        "User-Agent": "schemathesis/4.24.3",
+        "Accept-Encoding": "gzip, deflate, zstd",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "Authorization": "[Filtered]",
+        "X-Schemathesis-TestCaseId": "tFnE7V",
+        "Content-Type": "application/json",
+        "Content-Length": "22"
+      },
+      "response": {
+        "status_code": 400,
+        "headers": {
+          "content-type": "application/json",
+          "content-length": "291",
+          "date": "Mon, 17 Aug 2026 00:34:50 GMT"
+        },
+        "body": "{\"name\":\"ValidationError\",\"code\":\"validation_error\",\"message\":\"At least one of display_name or metadata must be provided.\",\"fix\":\"Inspect the errors array \u2014 each entry names a path and a message \u2014 and correct the request body.\",\"docs\":\"https://docs.agentmail.to/errors#validation_error\"}"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "response_schema_conformance",
+          "status": "failure",
+          "message": "Response violates schema\n\n\"errors\" is a required property\n\nValidated against the response schema for status code 400.\n\nSchema at /components/schemas/type_:ValidationErrorResponse:\n\n    {\n        \"required\": [\n            \"name\",\n            \"errors\"\n        ],\n        \"type\": \"object\",\n        \"properties\": {\n            \"name\": {\n                \"$ref\": \"#/components/schemas/type_:ErrorName\"\n            },\n            \"code\": {\n                \"$ref\": \"#/components/schemas/type_:ErrorCode\"\n            },\n            \"message\": {\n                \"$ref\": \"#/components/schemas/type_:ErrorMessage\"\n            },\n            \"errors\": {\n                \"description\": \"Validation errors. Each entry has a path and a me...\n            },\n        // Output truncated...\n    }\n\nValue:\n\n    {\n        \"code\": \"validation_error\",\n        \"docs\": \"https://docs.agentmail.to/errors#validation_error\",\n        \"fix\": \"Inspect the errors array \\u2014 each entry names a path and a mes...\n        \"message\": \"At least one of display_name or metadata must be provided.\",\n        \"name\": \"ValidationError\"\n    }"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 1.3030017726123333e-05,
+          "mode": "negative"
+        },
+        "components": {
+          "PATH": "positive",
+          "HEADER": "positive",
+          "BODY": "negative"
+        },
+        "phase": {
+          "name": "coverage",
+          "data": {
+            "type": "CoveragePhaseData",
+            "description": "display_name: Incorrect type",
+            "location": "/properties/display_name/type",
+            "parameter": "application/json",
+            "parameter_location": "BODY",
+            "scenario": "incorrect_type"
+          }
+        },
+        "pool_draws": [
+          {
+            "location": "path",
+            "parameter_name": "inbox_id",
+            "resource_name": "type_inboxes:Inbox",
+            "resource_field": "inbox_id",
+            "source_operation": "POST /v0/inboxes",
+            "source_status": 200
+          }
+        ],
+        "pool_misses": [],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {
+          "PATH": {
+            "inbox_id": "braveisland824@appsynergy.io"
+          },
+          "HEADER": {
+            "Authorization": ""
+          }
+        }
+      },
+      "path": "/v0/inboxes/{inbox_id}",
+      "path_parameters": {
+        "inbox_id": "braveisland824%40appsynergy.io"
+      },
+      "query": {},
+      "case_headers": {
+        "Authorization": "[Filtered]"
+      },
+      "cookies": {},
+      "case_body": {
+        "encoding": "json",
+        "value": {
+          "display_name": null
+        }
+      },
+      "media_type": "application/json",
+      "parent_index": null
+    }
+  ]
+}

@@ -81,13 +81,41 @@ pub struct ErrorEnvelope {
     pub docs: Option<String>,
 }
 
+/// The envelope `message` every observed `validation_error` carries. The SPECIFIC text lives in
+/// `errors[]` — one entry per violated rule — not here.
+/// `[SPEC:fixture 05-error-catalog.http]`, n=1 but unambiguous:
+/// `"message":"Request validation failed"` beside
+/// `"errors":[{"code":"custom","path":[],"message":"to, cc, or bcc must be specified"}]`.
+pub const VALIDATION_MESSAGE: &str = "Request validation failed";
+
 impl ErrorEnvelope {
+    /// `validation_error` is the one code whose envelope shape is not "message says it all": the
+    /// live API fixes `message` to [`VALIDATION_MESSAGE`] and carries the specific rule in
+    /// `errors[]`, whose `path` is `[]` for a whole-body rule. So a caller's specific text is
+    /// routed there rather than into `message`, and `errors` is never empty for this code.
+    ///
+    /// Routed HERE rather than left to each call site, for the reason `ErrorCode::status()` is:
+    /// four sites constructed this envelope and **none** of them populated `errors`, so every
+    /// `validation_error` this server emitted violated both the observed shape and the spec's own
+    /// `ValidationErrorResponse.required = [name, errors]` — while emitting a `fix` string that
+    /// tells the client to "inspect the errors array" we did not send. Found by the P1 schemathesis
+    /// run, not by any hand-written test, because every hand-written test asserted the `message`
+    /// its own call site had just passed in.
+    ///
+    /// A caller with structured, per-field issues overrides the synthesized entry with
+    /// [`ErrorEnvelope::with_issues`].
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        let message = message.into();
+        let (message, errors) = if matches!(code, ErrorCode::ValidationError) {
+            (VALIDATION_MESSAGE.to_owned(), vec![ValidationIssue::custom(message)])
+        } else {
+            (message, Vec::new())
+        };
         Self {
             name: code.legacy_name().to_owned(),
             code,
-            message: message.into(),
-            errors: Vec::new(),
+            message,
+            errors,
             suggestions: Vec::new(),
             fix: None,
             resource: None,

@@ -207,6 +207,70 @@ fn error_code_statuses_match_fixture_05() {
     );
 }
 
+/// A `validation_error` states the RULE in `errors[]` and keeps `message` generic — and it never
+/// ships `errors` empty. Both halves come from the same capture in fixture 05.
+///
+/// This is the test that did not exist. Four call sites built a `validation_error` with the
+/// specific text in `message` and nothing in `errors`, and every test covering them asserted the
+/// message its own call site had just passed in — self-comparison again, the shape this project
+/// keeps finding. The divergence was surfaced by the P1 schemathesis run instead: the spec marks
+/// `ValidationErrorResponse.errors` required, and our body both omitted it and carried a `fix`
+/// string instructing the client to inspect it.
+#[test]
+fn validation_error_states_the_rule_in_errors_not_in_message_fixture_05() {
+    let text = fixture("05-error-catalog.http");
+
+    // The fixture is the authority for both halves; read them rather than transcribing them.
+    // This one envelope is captured across FOUR lines, so `verbatim_json_lines` (per-line, as the
+    // single-line captures need) cannot see it — scan the whole text instead.
+    let captured = text
+        .match_indices('{')
+        .filter_map(|(i, _)| {
+            serde_json::Deserializer::from_str(&text[i..])
+                .into_iter::<Value>()
+                .next()?
+                .ok()
+        })
+        .find(|v| v.get("code").and_then(Value::as_str) == Some("validation_error"))
+        .expect("05 must still contain a verbatim validation_error envelope");
+    let captured_message = captured["message"].as_str().expect("it carries a message");
+    assert_eq!(
+        captured_message,
+        amk_types::error::VALIDATION_MESSAGE,
+        "the constant must be whatever the capture says, not what we remember it saying"
+    );
+
+    // Our constructor, given the SPECIFIC rule text a handler knows, must produce the captured
+    // shape: generic message, one issue, whole-body path.
+    let ours = amk_types::ErrorEnvelope::new(
+        ErrorCode::ValidationError,
+        "At least one of display_name or metadata must be provided.",
+    );
+    assert_eq!(ours.message, captured_message);
+    assert_eq!(ours.errors.len(), 1, "errors[] is never empty for validation_error");
+    assert_eq!(ours.errors[0].code, "custom");
+    assert!(ours.errors[0].path.is_empty(), "a whole-body rule has an empty path");
+    assert_eq!(
+        ours.errors[0].message, "At least one of display_name or metadata must be provided.",
+        "the specific rule survives — it moves, it is not discarded"
+    );
+
+    // And it must actually reach the wire: `errors` is `skip_serializing_if = "Vec::is_empty"`,
+    // so an empty vector here would be indistinguishable from the defect.
+    let wire = serde_json::to_value(&ours).unwrap();
+    assert!(wire.get("errors").is_some(), "errors must be emitted, not skipped: {wire}");
+
+    // Every OTHER code keeps its own message and ships no errors[] — the special case is exactly
+    // one code wide, which is the half a "route everything through errors[]" mistake would break.
+    let other = amk_types::ErrorEnvelope::new(ErrorCode::NotFound, "Inbox not found.");
+    assert_eq!(other.message, "Inbox not found.");
+    assert!(other.errors.is_empty());
+    assert!(serde_json::to_value(&other)
+        .unwrap()
+        .get("errors")
+        .is_none());
+}
+
 /// `errors[].code` is NOT an `ErrorCode`. The live capture carries `"code":"custom"`, a zod-style
 /// issue kind from the validation layer, which shares a field name with the envelope's code but
 /// nothing else. Typing it as `ErrorCode` would reject valid responses; this pins it open.

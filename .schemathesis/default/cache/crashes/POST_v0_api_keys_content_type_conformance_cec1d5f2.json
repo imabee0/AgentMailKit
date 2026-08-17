@@ -1,0 +1,92 @@
+{
+  "operation": "POST /v0/api-keys",
+  "method": "POST",
+  "path_template": "/v0/api-keys",
+  "fingerprint": "cec1d5f2",
+  "case_id": "1h4waJ",
+  "code_sample": "curl -X POST -H 'Authorization: [Filtered]' -H 'Content-Type: application/json' -d $'\\x00' http://127.0.0.1:8111/v0/api-keys",
+  "sequence": [
+    {
+      "method": "POST",
+      "url": "http://127.0.0.1:8111/v0/api-keys",
+      "url_template": "http://127.0.0.1:8111/v0/api-keys",
+      "headers": {
+        "User-Agent": "schemathesis/4.24.3",
+        "Accept-Encoding": "gzip, deflate, zstd",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "Authorization": "[Filtered]",
+        "X-Schemathesis-TestCaseId": "1h4waJ",
+        "Content-Type": "application/json",
+        "Content-Length": "1"
+      },
+      "response": {
+        "status_code": 400,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8",
+          "content-length": "75",
+          "date": "Mon, 17 Aug 2026 00:35:06 GMT"
+        },
+        "body": "Failed to parse the request body as JSON: expected value at line 1 column 1"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "content_type_conformance",
+          "status": "failure",
+          "message": "Undocumented Content-Type\n\nReceived: text/plain; charset=utf-8\nDocumented: application/json"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 0.0039700370107311755,
+          "mode": "negative"
+        },
+        "components": {
+          "BODY": "negative"
+        },
+        "phase": {
+          "name": "fuzzing",
+          "data": {
+            "type": "FuzzingPhaseData",
+            "description": "Invalid syntax: random bytes",
+            "location": null,
+            "parameter": null,
+            "parameter_location": "BODY",
+            "mutations": [
+              {
+                "path": [],
+                "schema_pointer": "",
+                "channel": "schema",
+                "operator": "syntax_fuzzing",
+                "keywords": [],
+                "parameter": null,
+                "original_value": null,
+                "new_value": null
+              }
+            ]
+          }
+        },
+        "pool_draws": [],
+        "pool_misses": [],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {}
+      },
+      "path": "/v0/api-keys",
+      "path_parameters": {},
+      "query": {},
+      "case_headers": {
+        "Authorization": "[Filtered]"
+      },
+      "cookies": {},
+      "case_body": {
+        "encoding": "base64",
+        "value": "AA=="
+      },
+      "media_type": "application/json",
+      "parent_index": null
+    }
+  ]
+}

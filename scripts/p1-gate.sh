@@ -2,8 +2,11 @@
 # P1 control-plane gate: stand up a throwaway candidate deployment, seed it with the resources the
 # manifest's placeholders resolve against, and run the dual-target conformance diff.
 #
-# SECRETS: `amk init` prints the root key once. It is captured into a shell variable, passed to the
-# harness through the environment, and never echoed, never written to a file, never committed.
+# SECRETS: `amk init` prints the root key once. It is captured into a shell variable, printed back
+# only as `<redacted>`, and never committed. It reaches each tool by environment variable, or — for
+# curl, which has no environment channel for a header — through a 0600 temp file removed by the
+# exit trap. It is never passed as a command-line argument: see the CURLRC block below for what
+# that cost when it was.
 set -uo pipefail
 # Portable, matching scripts/check.sh's own convention — NOT a hardcoded path to the primary
 # checkout. A hardcoded `/home/imma/projects/AgentMailKit` here silently built and served whatever
@@ -22,6 +25,7 @@ BIND=127.0.0.1:8111
 
 cleanup() {
   [ -n "${AMKD_PID:-}" ] && kill "$AMKD_PID" 2>/dev/null
+  rm -f "${CURLRC:-}"
   wait "${AMKD_PID:-}" 2>/dev/null
   docker exec "$CTR" psql -U amk -d postgres -qc \
     "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
@@ -52,6 +56,17 @@ CAND_KEY=$(printf '%s\n' "$INIT_OUT" | sed -n 's/.*root api key: *//p' | tr -d '
 printf '%s\n' "$INIT_OUT" | sed -E 's/(root api key: *).*/\1<redacted>/'
 [ -n "$CAND_KEY" ] || { echo "FATAL: could not capture the root key"; exit 1; }
 
+# ARGV IS NOT A PRIVATE CHANNEL. `curl -H "Authorization: Bearer $CAND_KEY"` writes the key into
+# /proc/<pid>/cmdline, which is world-readable for as long as the process runs — no privilege
+# needed. Found the hard way: a `pgrep -af` run against this script's own schemathesis invocation
+# printed a live key straight into a transcript. Every request below presents the credential
+# through this 0600 config file instead, and schemathesis takes it from the environment via
+# conformance/schemathesis_checks.py's before_call hook. Environment variables are the right
+# channel here (/proc/<pid>/environ is owner-only, argv is not), which is how every other secret
+# in this script already travels.
+CURLRC=$(umask 077; mktemp "${TMPDIR:-/tmp}/p1gate-curlrc.XXXXXX") || exit 1
+printf 'header = "Authorization: Bearer %s"\n' "$CAND_KEY" > "$CURLRC"
+
 echo "== operator configuration (direct UPDATE — no endpoint sets these; that is the honest state
      the divergence-1 contract itself names) =="
 # The reference organization carries values for these eight columns; ours has none until an
@@ -70,7 +85,7 @@ echo "== serve =="
 ./target/debug/amkd --role api &
 AMKD_PID=$!
 for _ in $(seq 1 40); do
-  curl -fsS -o /dev/null "http://${BIND}/v0/auth/me" -H "Authorization: Bearer $CAND_KEY" && break
+  curl -fsS -o /dev/null -K "$CURLRC" "http://${BIND}/v0/auth/me" && break
   sleep 0.25
 done
 
@@ -79,7 +94,7 @@ echo "== seed the candidate to match the reference's STATE, not just its schema 
 # reports it "missing" against a reference whose resources do. That is a data difference wearing a
 # shape difference's clothes, and it hid the real diffs in the first run. Same for
 # `next_page_token`: it is absent on the last page, so a single-pod candidate can never emit one.
-api() { curl -fsS -X "$1" "http://${BIND}$2" -H "Authorization: Bearer $CAND_KEY" \
+api() { curl -fsS -K "$CURLRC" -X "$1" "http://${BIND}$2" \
           -H 'Content-Type: application/json' ${3:+-d "$3"}; }
 enc() { python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"; }
 
@@ -163,7 +178,48 @@ AMK_BASE="http://${BIND}" AMK_KEY="$CAND_KEY" node conformance/sdk_smoke.mjs
 NODE_EXIT=$?
 echo "sdk_smoke.mjs exit: $NODE_EXIT"
 
-# All three must pass. Reporting only the diff's verdict would let a broken client ship behind a
+echo
+echo "== P1 gate, fourth part: schemathesis over the implemented paths =="
+# The last clause of the plan's P1 gate. The two SDK smokes walk the paths a client is meant to
+# walk; this walks the ones nobody would write down. Scope is DERIVED from router() and reconciled
+# against openapi.json on every run (conformance/schemathesis_scope.py) rather than listed here —
+# a hand-written path list is right when written and silently wrong the moment a route moves.
+#
+# CHECKS, and why this set. `status_code_conformance` is EXCLUDED, with cause: the schema is
+# AgentMail's own openapi.json, which this project has caught being wrong against live captures
+# four times, and it is 0-for-3 on DELETE statuses alone (fixtures 22 and 23 — it documents 200
+# where the live API returns 204 and 202). Statuses already have a far better oracle: fixture 25
+# diffs ours against the LIVE reference's for every request. What is kept is what the spec is good
+# at — response shapes, content types, no 5xx — plus three checks of our own carrying the
+# invariants no OpenAPI document can express (conformance/schemathesis_checks.py).
+if [ ! -x .venv-schemathesis/bin/st ]; then
+  python3 -m venv .venv-schemathesis
+  .venv-schemathesis/bin/pip install -q -r conformance/requirements-schemathesis.txt
+fi
+# `SCOPE_EXIT=$?` after a `mapfile < <(...)` reads MAPFILE's status, not the script's — which is
+# always 0, so a router/spec disagreement would have been announced and then ignored. Capture the
+# script's own exit through a command substitution, which propagates it.
+INCLUDE_ARGS=$(python3 conformance/schemathesis_scope.py --include-args)
+SCOPE_EXIT=$?
+mapfile -t INCLUDE <<< "$INCLUDE_ARGS"
+if [ "$SCOPE_EXIT" -ne 0 ]; then
+  echo "FATAL: router() and openapi.json disagree — run scripts/derive-implemented-paths.sh"
+fi
+PYTHONPATH=. SCHEMATHESIS_HOOKS=conformance.schemathesis_checks AMK_KEY="$CAND_KEY" \
+  .venv-schemathesis/bin/st run reference/openapi.json \
+    --url "http://${BIND}" \
+    "${INCLUDE[@]}" \
+    --checks not_a_server_error,content_type_conformance,response_schema_conformance,optionals_are_omitted_never_null,timestamps_are_wire_exact,error_shape_is_one_of_the_two \
+    --mode all \
+    --max-examples "${AMK_ST_EXAMPLES:-40}" \
+    --seed 1 \
+    --continue-on-failure \
+    --output-sanitize true
+ST_EXIT=$?
+echo "schemathesis exit: $ST_EXIT"
+
+# All four must pass. Reporting only the diff's verdict would let a broken client ship behind a
 # clean diff, which is the exact gap the SDK halves exist to close.
-[ "$GATE_EXIT" -eq 0 ] && [ "$SMOKE_EXIT" -eq 0 ] && [ "$NODE_EXIT" -eq 0 ]
+[ "$GATE_EXIT" -eq 0 ] && [ "$SMOKE_EXIT" -eq 0 ] && [ "$NODE_EXIT" -eq 0 ] \
+  && [ "$ST_EXIT" -eq 0 ] && [ "$SCOPE_EXIT" -eq 0 ]
 exit $?

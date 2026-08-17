@@ -1,0 +1,104 @@
+{
+  "operation": "PATCH /v0/inboxes/{inbox_id}",
+  "method": "PATCH",
+  "path_template": "/v0/inboxes/{inbox_id}",
+  "fingerprint": "01fb8b29",
+  "case_id": "AiiGoO",
+  "code_sample": "curl -X PATCH -H 'Authorization: [Filtered]' -H 'Content-Type: application/json' -d $'\\x00' http://127.0.0.1:8111/v0/inboxes/swiftjasper993%40appsynergy.io",
+  "sequence": [
+    {
+      "method": "PATCH",
+      "url": "http://127.0.0.1:8111/v0/inboxes/swiftjasper993%40appsynergy.io",
+      "url_template": "http://127.0.0.1:8111/v0/inboxes/{inbox_id}",
+      "headers": {
+        "User-Agent": "schemathesis/4.24.3",
+        "Accept-Encoding": "gzip, deflate, zstd",
+        "Accept": "*/*",
+        "Connection": "keep-alive",
+        "Authorization": "[Filtered]",
+        "X-Schemathesis-TestCaseId": "AiiGoO",
+        "Content-Type": "application/json",
+        "Content-Length": "1"
+      },
+      "response": {
+        "status_code": 400,
+        "headers": {
+          "content-type": "text/plain; charset=utf-8",
+          "content-length": "75",
+          "date": "Mon, 17 Aug 2026 00:38:31 GMT"
+        },
+        "body": "Failed to parse the request body as JSON: expected value at line 1 column 1"
+      },
+      "link": null,
+      "checks": [
+        {
+          "name": "content_type_conformance",
+          "status": "failure",
+          "message": "Undocumented Content-Type\n\nReceived: text/plain; charset=utf-8\nDocumented: application/json"
+        }
+      ],
+      "meta": {
+        "generation": {
+          "time": 0.01390326299588196,
+          "mode": "negative"
+        },
+        "components": {
+          "PATH": "negative",
+          "BODY": "negative"
+        },
+        "phase": {
+          "name": "fuzzing",
+          "data": {
+            "type": "FuzzingPhaseData",
+            "description": "Invalid syntax: random bytes",
+            "location": null,
+            "parameter": null,
+            "parameter_location": "BODY",
+            "mutations": [
+              {
+                "path": [],
+                "schema_pointer": "",
+                "channel": "schema",
+                "operator": "syntax_fuzzing",
+                "keywords": [],
+                "parameter": null,
+                "original_value": null,
+                "new_value": null
+              }
+            ]
+          }
+        },
+        "pool_draws": [
+          {
+            "location": "path",
+            "parameter_name": "inbox_id",
+            "resource_name": "type_inboxes:Inbox",
+            "resource_field": "inbox_id",
+            "source_operation": "POST /v0/inboxes/{inbox_id}/api-keys",
+            "source_status": 200
+          }
+        ],
+        "pool_misses": [],
+        "semantic_draws": [],
+        "dictionary_draws": [],
+        "constants_draws": [],
+        "raw_containers": {}
+      },
+      "path": "/v0/inboxes/{inbox_id}",
+      "path_parameters": {
+        "inbox_id": "swiftjasper993%40appsynergy.io"
+      },
+      "query": {},
+      "case_headers": {
+        "Authorization": "[Filtered]"
+      },
+      "cookies": {},
+      "case_body": {
+        "encoding": "base64",
+        "value": "AA=="
+      },
+      "media_type": "application/json",
+      "parent_index": null
+    }
+  ]
+}
