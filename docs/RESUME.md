@@ -15,13 +15,13 @@ $ ./scripts/check.sh --fast   # summed test results
 total passed: 619
 ```
 
-The branch is green at 619 workspace tests with a live Postgres on 127.0.0.1:55432 (`main` was
-570 before this session's two fixes). Without that
+The branch is green at 619 workspace tests with a live Postgres on 127.0.0.1:55432. Without that
 database the same command still exits PASS having skipped every DB-backed test — see the sandbox
 section of `CLAUDE.md`.
 
-**Re-confirmed in the cloud sandbox, 2026-08-17: `cargo test --workspace` = 570 passed, 0 failed**,
-against a hand-started local Postgres (below). The 570 figure therefore holds on both PG17 and PG16.
+`main` stood at **570** when this session started, and that figure was re-confirmed here against a
+hand-started local Postgres before any change was made — so it holds on both PG17 (where it was
+recorded) and PG16 (this sandbox). Everything above 570 is this session's work.
 
 ### DB-backed tests need no Docker any more
 
@@ -68,7 +68,7 @@ were run individually in the sandbox:
 
 | conjunct | lane | result |
 |---|---|---|
-| schemathesis over the mounted operations | L | **exit 0** — 2056 cases, Coverage 25/25, Fuzzing 25/25, Stateful 84/84 |
+| schemathesis over the mounted operations | L | **exit 0** — 2056 cases, Coverage 25/25, Fuzzing 25/25, Stateful 84/84 (re-running now over the 41-operation surface) |
 | Python SDK smoke (`agentmail==0.5.9`) | L | **28 checks, 0 failed** |
 | Node SDK smoke (`agentmail@0.5.19`) | L | **26 checks, 0 failed** |
 | dual-target conformance diff | **R-key** | **not run — needs the read-only AgentMail key** |
@@ -78,8 +78,9 @@ Both defects that had schemathesis red are fixed and one is merged: the extracto
 `CURRENT_PHASE=P0` and **stays there until the conformance diff runs** — local green is not the
 gate, and advancing on Lane L alone is exactly the "gate its own evidence contradicts" trap.
 
-**P2: started.** The first slice — the message and thread LIST endpoints — is written, tested and
-mutation-verified on this branch. See "P2 progress" below.
+**P2: the message/thread surface is done.** Reads, label mutations and deletes at every mount —
+41 router operations, reconciling clean against `openapi.json`. `amk-ingest` and `amk-outbound` are
+not started. See "P2 progress" below.
 
 ## The extractor-rejection work item: DONE and MERGED (`main` @ 0d0631c), still ungated
 
