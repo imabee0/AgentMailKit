@@ -1,4 +1,15 @@
 {
+  "attribution": {
+    "$comment": [
+      "Claude attribution is OFF, by user instruction 2026-08-17. Empty strings suppress the commit",
+      "trailer and the PR-body footer; sessionUrl:false drops the Claude-Session link that web and",
+      "Remote Control sessions otherwise append. This is the supported control for it — the harness",
+      "reads these keys, so nothing is left to per-commit discipline."
+    ],
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
   "$comment": [
     "Harness enforcement for AgentMailKit. The plan's anti-drift rules are prompts until they are",
     "bound here: the model does not decide whether a hook runs.",
