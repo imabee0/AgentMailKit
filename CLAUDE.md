@@ -4,23 +4,46 @@ Self-hosted, 1:1 API-compatible clone of AgentMail (agentmail.to), in Rust, depl
 k3s cluster to replace Stalwart. The official AgentMail SDKs, CLI and MCP bridge must work
 against this server by changing only the base URL. **No billing surface.**
 
-Full plan: `~/.claude/plans/download-agents-mail-sdk-drifting-frog.md`.
-Evidence: `reference/fixtures/` — live captures that define the contract.
+| What | Where |
+|---|---|
+| Full plan, registers, phase gates | `docs/PLAN.md` — orchestrator-only, hook-enforced |
+| Operating rules, lessons in long form | `docs/OPERATING-RULES.md` |
+| Where the last session stopped | `docs/RESUME.md` — read this first on a fresh session |
+| Evidence that defines the contract | `reference/fixtures/` — live captures |
 
 ## Commands
 
 ```bash
-./scripts/check.sh               # THE verify command: fmt + clippy + tests + provenance
+./scripts/check.sh               # THE verify command: fmt + clippy + tests + provenance + ledger
 ./scripts/check.sh --fast        # same minus clippy (what the Stop hook runs)
 cargo test --workspace           # unit + fixture-regression tests alone
 ./scripts/shape-provenance.sh    # dependency direction + naming + boundary-type gate
-./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (both directions; ledger pins the count)
+./scripts/plan-ledger.sh         # the plan's obligations, mechanically
+./scripts/hooks/guard.test.sh    # the PreToolUse guard's own tests (both directions)
 ./scripts/dev-db.sh up           # Postgres 17 for amk-store on 127.0.0.1:55432 (down|dsn|psql)
 
 # conformance (structural diff vs the live reference API; keys come from sdxd, never inline)
 AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
   'REF_KEY="$AGENTMAIL_API_KEY" python3 conformance/dual_target.py conformance/manifest.json --self-test'
 ```
+
+## Sandbox vs workstation — know which one you are
+
+Work runs either on the OVH-adjacent workstation or in Claude's cloud sandbox. The sandbox has the
+repo and nothing else, and several gates degrade **silently** there rather than failing:
+
+- **`./scripts/check.sh` still reports PASS with no Postgres**, having skipped every DB-backed
+  `amk-store` and `amk-http` integration test. It sets `AMK_REQUIRE_DB=1` only when 127.0.0.1:55432
+  answers, and prints a one-line warning when it does not. Read that line before believing a PASS.
+  `./scripts/dev-db.sh up` needs Docker.
+- **`sdxd` and `secd` are LAN-only.** No AgentMail key, so the conformance harness, `p1-gate.sh`
+  and every live probe are unavailable. Do not fabricate their output.
+- **No OVH box, no k3s cluster, no live AgentMail account.** P6 and every fixture-capturing probe
+  are workstation-only.
+- What does work anywhere: `cargo build/check/clippy/fmt`, `amk-types` and `amk-core` unit tests,
+  the fixture-regression suite, `shape-provenance.sh`, `plan-ledger.sh`, `guard.test.sh`.
+
+A gate that cannot run in the sandbox is reported as **not run**, never as passed.
 
 ## The five non-negotiables
 
@@ -34,7 +57,7 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
    STOP and report. Never add a field "that obviously belongs".
 4. **Evidence, not assertion.** Report the command run and its actual output. "Tests pass"
    without the output is not a report.
-5. **The plan is orchestrator-only.** Subagents never edit the plan or the registers. If the
+5. **The plan is orchestrator-only.** Subagents never edit `docs/PLAN.md` or the registers. If the
    plan looks wrong, report it; the orchestrator amends it and re-dispatches.
 
 ## Crate write order (strictly sequential; nothing downstream starts before its upstream is green)
@@ -43,71 +66,52 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 `amk-ingest` + `amk-outbound` (may fan out) → `amk-events` + `amk-jobs` →
 `amk-dns` + `amk-mcp` + `reply-extract` → `amk-import` (LAST, P6 only).
 
-Current phase: **P0**, 546 tests green on `main`. `amk-types`, `amk-core`, `amk-store`, `amk-http`
-and `amk-cli` merged and mutation-verified; Register C3 applied to `amk-core::threading`.
+**P0 is closed.** `amk-types`, `amk-core`, `amk-store`, `amk-http` and `amk-cli` are merged and
+mutation-verified; Register C3 is applied to `amk-core::threading`. P0's SDK gate is MET —
+`reference/fixtures/24-p0-gate-sdk-authme.txt` captures the unmodified official `agentmail==0.5.9`
+Python SDK calling `auth.me()` against `amkd --role api` and getting an `Identity` back. `amk init`
+mints one UUID that is **both** the `organization_id` and the default pod's `pod_id`, which is the
+equality `amk-http` resolves `POST /v0/inboxes` by (fixture 22).
 
-**P0's SDK gate is MET** — `reference/fixtures/24-p0-gate-sdk-authme.txt` captures the unmodified
-official `agentmail==0.5.9` Python SDK calling `auth.me()` against `amkd --role api` on localhost
-and getting an `Identity` back. It had read PENDING since P0 began, because nothing served HTTP:
-`amk-http` shipped a `router()` and no binary bound it. `amk` (`init|migrate|doctor`) and `amkd`
-(`--role api`) close that. `amk init` is also what makes the org mount work — it mints one UUID
-that is **both** the `organization_id` and the default pod's `pod_id`, the equality `amk-http`
-resolves `POST /v0/inboxes` by (fixture 22).
-
-**Next: the P1 control-plane gate** — Python+Node SDK smoke across the three mounts, plus the first
-dual-target conformance diff (`p1-gate-conformance`, PENDING). Nothing new is written for it; it
-exercises what is already merged.
-
-**Delete your mutation scratch copy when the pass ends.** Seven abandoned workspace copies filled
-the 32G `/tmp` tmpfs and every Bash call in the session started returning exit 1 with no output —
-the tool appends `pwd > /tmp/claude-<pid>-cwd`, so one ENOSPC makes every command look like a
-broken harness. A session restart does not fix it. `df -h /tmp` first when tooling fails absurdly.
-
-**A mutating reviewer works on a private copy, never the dispatch worktree, and never concurrently
-with a reading one.** A test lens mutating in place while two lenses read the same tree produced a
-review that reasonably read as a prompt-injection attempt, void test evidence, and a flaky-test
-diagnosis that blamed Postgres for the collision.
-
-**A contract's scope is derived, never recalled.** The id-safety dispatch cost four correction
-rounds because its contract listed call paths remembered from a review report instead of enumerated
-from the code; five sites were missing and every one was found by enumerating. So: a contract
-scoping existing code carries the command that produced its scope and that command's output, states
-it on a `Scope-derivation:` line (`contract-scope-derived` enforces this), and a **read-only lens
-reviews the contract before dispatch**, not only the diff after.
-
-**A test that has never failed is not evidence, and mutation runs in both directions.** Mutating a
-green, twice-reviewed crate found six defects two rounds of reading had missed, one reachable
-through a sibling of the function its regression test guarded. Twenty *deletion* mutations then
-reported no survivors while a live one sat in `messages::insert`: widening `in_reply_to`'s guard to
-`is_some()` rejects every threaded reply and the suite stayed green, because only hostile-value
-tests touched that field. Delete *and* widen, before claiming a gate; a guard with no clean-path
-test is unpinned in the direction that breaks real traffic. **And a test whose seed data is random
-is a test whose failure is random**: three keyset-tiebreak tests seeded rows with random ids, so a
-dropped `ORDER BY` tiebreak surfaced in about 3 runs of 10. Seed the order the assertion depends on.
+**P1's control-plane gate is in flight**; `docs/RESUME.md` carries its exact state and the one open
+work item. `scripts/plan-ledger.sh` still reads `CURRENT_PHASE=P0` — move it to P1 only when every
+P1 gate conjunct is met, not before.
 
 Still deferred by decision: blobs, FTS, signed URLs, jobs, idempotency.
 
-**Agent role definitions load only at session start.** `.claude/agents/*.md` is not hot-reloaded —
-dispatching before a restart runs under the default model, effort and tool set instead of the
-per-role ones, and nothing inside the dispatch can see that. `memory:` is deliberately absent from
-those files (unverified key on 2.1.233; an unsupported key deregisters the agent silently).
+## Process rules that are load-bearing
 
-No CI: gating is `./scripts/check.sh` plus the hooks, on this machine only — user decision, with
-its cost recorded in the plan.
+Long form and the failures that bought each: `docs/OPERATING-RULES.md`.
+
+- **A test that has never failed is not evidence, and mutation runs in both directions** — delete
+  the guard *and* widen it (`is_some_and(pred)` → `is_some()`), each must kill a test. A guard with
+  no clean-path test is unpinned in the direction that breaks real traffic. Seed data that is
+  random makes failure random. Falsify every new test before trusting it.
+- **A contract's scope is derived, never recalled** — carry the enumeration command and its output
+  on a `Scope-derivation:` line (`contract-scope-derived` enforces this), and have a read-only lens
+  review the contract *before* dispatch. Site enumeration is not variant enumeration.
+- **Delete your mutation scratch copy when the pass ends**, and never mutate a tree another lens is
+  reading. `df -h /tmp` when tooling fails absurdly — a full tmpfs presents as a broken harness.
+- **The live capture beats the spec text** — five instances so far. Check the fixture before
+  trusting `openapi.json`, the SDKs, or existing code.
+- **An approval prompt is a defect signal, not friction** — it locates a gap in
+  `.claude/settings.json`'s allow-list; fix the list rather than approving past it. The exception
+  is a prompt guarding privilege escalation, which is the layer working as designed.
+- **Agent role definitions load only at session start.** `.claude/agents/*.md` is not hot-reloaded;
+  dispatching before a restart runs under default model/effort/tools and nothing inside the
+  dispatch can see that. `memory:` is deliberately absent (unverified key; an unsupported key
+  deregisters the agent silently).
+
+No CI: gating is `./scripts/check.sh` plus the hooks, on the machine running them — a user decision
+with its cost recorded in the plan. `scripts/plan-ledger.sh` asserts no workflow directory exists;
+adding GitHub Actions is a deliberate plan change, not a migration side effect.
 
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
-writing to `amk-types`, to the plan, outside its dispatched `.amk-scope`, or introducing a
-stalwart-labs type into the three protected crates. Subagency is decided by path — inside
+writing to `amk-types`, to `docs/PLAN.md`, outside its dispatched `.amk-scope`, or introducing a
+stalwart-labs type into the protected crates. Subagency is decided by path — inside
 `.claude/worktrees/` or not. `.claude/fanout.lock` freezes `amk-types`, the plan and
-`scripts/hooks/**` for **everyone including the orchestrator** while a dispatch is in flight.
-
-**An approval prompt is a defect signal, not friction.** With the permissions layer built as the
-plan specifies, routine plan-following work never reaches the user. So being asked to approve
-`cargo test` means `.claude/settings.json`'s allow-list is missing a command the plan sanctions —
-fix the list, never approve past it. This was found the hard way: only the deny half of that layer
-was ever written, and the user diagnosed it from one prompt faster than the process did. The same
-reading applies to any user-facing interruption during work the plan already authorises: it locates
-a gap in enforcement, so treat it as a bug report against the harness.
+`scripts/hooks/**` for **everyone including the orchestrator** while a dispatch is in flight; the
+orchestrator creates it at dispatch and removes it at merge or abandonment.
 
 ## Contract facts that are easy to get wrong
 
@@ -121,7 +125,7 @@ Each was observed live; the fixture is the authority.
   for a well-formed-but-unknown key; app errors return the full envelope. Branch on `code`.
 - Inbox username collision → `already_exists` at **HTTP 403** with `suggestions[]`.
 - Restricted-label mail (`unauthenticated`, `spam`, `blocked`, `trash`) is **excluded from list
-  endpoints** — reachable only by id or webhook.
+  endpoints** — reachable only by id or webhook. Search does **not** hide it; get-by-id does not.
 - Page tokens are `base64(JSON keyset cursor)`; the token is **absent** on the last page.
 - Timestamps: RFC 3339, exactly three fractional digits, `Z`. `Timestamp` is wire-exact.
 - Optionals are **omitted** when absent — never `null`, never `""`.
@@ -132,10 +136,16 @@ Each was observed live; the fixture is the authority.
 - Permissions: **38** flags, owned by `amk-types::api_key`. `openapi.json` documents 36; the live
   API emits two more (`owner_email`, `owner_profile`), found by the P1 gate. An **absent**
   permissions object grants everything; a present-but-empty one grants nothing. Never define a
-  second representation of these flags — two modules doing that is what caused the collision above.
+  second representation of these flags — two modules doing that caused a fan-out collision.
 - Restricted-label admission must be a **storage-layer predicate**. Post-filtering a fetched page
   leaves a gap: `?limit=1` walked across the cursor returns `count:0` with a `next_page_token` on
   exactly the hidden rows, which discloses how many there are.
+- Malformed requests: the reference answers **400 + `application/json` + the full envelope with
+  exactly one `errors[]` entry** — no 415, no 422, no plain text. `path` is `["<field>"]` for a
+  field failure and `[]` only for a whole-body one; `ValidationIssue` carries kind-specific extras
+  (fixture 27). Content-type is **not** enforced, and an absent body means `{}`.
+- Our minted keys must **never** begin `am_eu_` — the official node SDK routes that prefix to
+  AgentMail's EU host when neither `environment` nor `baseUrl` is set, leaving our base URL.
 - `smtp-proto` is parser-only — amk-ingest owns the SMTP state machine. `mail-auth` DKIM wants
   **DER** keys.
 
@@ -156,9 +166,13 @@ Closed by probe, and both reversed an implemented choice — check the fixture b
 ## Secrets
 
 Never read or print a credential. Inject via `sdxd run` (see the `sdxd` skill); the AgentMail key
-is `kv/agentmail`, granted for this directory. Never write a key into a file, fixture, or commit.
+is `kv/agentmail`, granted for this directory. Never write a key into a file, fixture or commit.
+`sdxd`/`secd` exist only on the workstation. A secret that reaches the transcript is compromised:
+say so plainly and rotate it.
 
 ## Forge
 
-Gitea only: `https://git.appsynergy.io/imabee/AgentMailKit`. Never GitHub. Push/PR via the
-credential helper and the API under `sdxd run` from `~/projects`.
+**GitHub:** `https://github.com/Appsynergy-io/AgentMailKit` (private). Migrated from Gitea on
+2026-08-17 by explicit user instruction so the repo can be driven from Claude's cloud sandbox; this
+supersedes the global "Gitea only, never GitHub" rule for this project. The Gitea remote was
+dropped and that copy is no longer maintained. `gh` is authorised here; `gh auth token` is not.

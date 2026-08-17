@@ -15,7 +15,12 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# The plan lives IN the repo at docs/PLAN.md as of the 2026-08-17 GitHub migration, so that a
+# session in Claude's cloud sandbox — which never sees ~/.claude — reads the same contract this
+# machine does. The pre-migration external path stays matched because a stale copy still sits at
+# ~/.claude/plans/ and must not become a second, quietly-diverging record of the same obligations.
 PLAN_GLOB='plans/download-agents-mail-sdk-drifting-frog.md'
+PLAN_IN_REPO='docs/PLAN.md'
 
 read -r -d '' PAYLOAD || true
 
@@ -105,7 +110,7 @@ case "$FILE" in */.claude/worktrees/*) IN_WORKTREE=1 ;; esac
 # Removing it is a deliberate act; forgetting the rule is not.
 if [ -f "$REPO/.claude/fanout.lock" ]; then
   case "$FILE" in
-    */crates/amk-types/*|*"$PLAN_GLOB"|*/.claude/plans/*|*/scripts/hooks/*)
+    */crates/amk-types/*|*"$PLAN_GLOB"|*"$PLAN_IN_REPO"|*/.claude/plans/*|*/scripts/hooks/*)
       deny "A fan-out is IN FLIGHT ($REPO/.claude/fanout.lock exists) and this path is frozen for
 everyone — orchestrator included — until it completes:
   $FILE
@@ -122,7 +127,7 @@ fi
 # 1. The plan and its registers are orchestrator-only. A subagent that edits the contract it is
 #    being judged against has silently redefined "correct".
 case "$FILE" in
-  *"$PLAN_GLOB"|*/.claude/plans/*)
+  *"$PLAN_GLOB"|*"$PLAN_IN_REPO"|*/.claude/plans/*)
     if [ "$IN_WORKTREE" -eq 1 ]; then
       deny "The plan is the contract and is ORCHESTRATOR-ONLY.
 If the plan is wrong or ambiguous, STOP and report it — do not edit it."

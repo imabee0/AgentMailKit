@@ -55,6 +55,11 @@ check 2 "subagent edits amk-types (frozen)" \
   "$(j Write "$WT/crates/amk-types/src/ids.rs" "$WT" "pub struct X;")"
 check 2 "subagent edits the plan" \
   "$(j Edit "$PLAN" "$WT" "text")"
+# The plan moved INTO the repo (docs/PLAN.md) at the GitHub migration so a cloud-sandbox session
+# reads the same contract. Rule 1 has to follow it there, or "orchestrator-only" silently became
+# "orchestrator-only at a path nobody uses any more".
+check 2 "subagent edits the in-repo plan (docs/PLAN.md)" \
+  "$(j Edit "$ORCH/docs/PLAN.md" "$WT" "text")"
 check 2 "mail_parser type into amk-core" \
   "$(j Write "$WT/crates/amk-core/src/threading.rs" "$WT" "use mail_parser::Message;")"
 check 2 "mail_auth type into amk-store" \
@@ -80,6 +85,8 @@ check 0 "orchestrator edits amk-types" \
   "$(j Write "$ORCH/crates/amk-types/src/ids.rs" "$ORCH" "pub struct X;")"
 check 0 "orchestrator edits the plan" \
   "$(j Edit "$PLAN" "$ORCH" "text")"
+check 0 "orchestrator edits the in-repo plan (docs/PLAN.md)" \
+  "$(j Edit "$ORCH/docs/PLAN.md" "$ORCH" "text")"
 check 0 "comment mentioning Stalwart/JMAP is documentation" \
   "$(j Write "$WT/crates/amk-core/src/threading.rs" "$WT" "// Unlike JMAP, threading here is per-inbox.")"
 check 0 "doc comment mentioning JMAP alongside real code" \

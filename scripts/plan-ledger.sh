@@ -91,14 +91,22 @@ check harness-agent-frontmatter yes \
                grep -qvE "^(name|description|model|tools|disallowedTools)$" && exit 1
            done; exit 0'
 
-check harness-no-github yes \
-  "no .github/ (Gitea only)" \
-  bash -c '[ ! -d .github ]'
+# `harness-no-github` ("no .github/, Gitea only") was RETIRED at the 2026-08-17 GitHub migration.
+# It asserted the absence of the whole directory, which was only ever a proxy for "this project is
+# not on GitHub" — a premise the user reversed. Kept as a comment rather than deleted silently
+# because a check that vanishes and a check that never existed are indistinguishable later.
+#
+# What it was actually protecting is the no-CI decision, and `ci-layer-local-only` below already
+# holds that, keyed on the workflow directories rather than on the forge. Re-adding a second check
+# here would give one obligation two records, which is the failure mode the ledger exists to
+# prevent: the two disagree eventually, and the one that disagrees quietly wins. `.github/` may now
+# hold non-CI GitHub metadata (issue templates, CODEOWNERS); `.github/workflows/` may not.
 
 # CI layer: DECIDED 2026-08-15 by the user — local-only, no forge CI. This is a deliberate
 # departure from the plan's "CI remains the authoritative gate", recorded there with what it costs.
 # Kept as a check rather than an attestation so the decision cannot be reversed by accident: a
-# workflow file appearing here means someone added CI without reopening the decision.
+# workflow file appearing here means someone added CI without reopening the decision. It survived
+# the GitHub migration unchanged: moving forge does not reopen the CI decision.
 check ci-layer-local-only yes \
   "no forge CI — local-only gating, decided" \
   bash -c '[ ! -d .gitea/workflows ] && [ ! -d .github/workflows ]'

@@ -54,5 +54,5 @@ grep -c '\[\[bin\]\]' crates/*/Cargo.toml 2>/dev/null | sed 's/^/  /' || true
 
 echo
 echo "== 5. what the plan's P0 line requires of them =="
-grep -n "amk init\|amkd\|--role" ~/.claude/plans/download-agents-mail-sdk-drifting-frog.md \
+grep -n "amk init\|amkd\|--role" docs/PLAN.md \
   | head -8 | sed 's/^/  /'
