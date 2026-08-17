@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|NotebookEdit|run_terminal_command|search_replace|write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/stop-gate.sh",
+            "timeout": 300
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/scripts/hooks/stop-gate.sh",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}
