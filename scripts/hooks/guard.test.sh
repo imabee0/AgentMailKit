@@ -25,6 +25,7 @@ cp "$SRC" "$ROOT/scripts/hooks/guard.sh" || { echo "cannot stage the guard under
 GUARD="$ROOT/scripts/hooks/guard.sh"
 ORCH="$ROOT"
 WT="$ROOT/.claude/worktrees/test-wt"
+GWT="$ROOT/.grok/worktrees/test-gwt"
 LOCK="$ROOT/.claude/fanout.lock"
 PLAN=/home/imma/.claude/plans/download-agents-mail-sdk-drifting-frog.md
 
@@ -47,6 +48,24 @@ if f: ti["file_path"]=f
 if content: ti["content"]=content
 if cmd: ti["command"]=cmd
 print(json.dumps({"tool_name":t,"tool_input":ti,"cwd":c}))
+PY
+}
+
+# Grok shape only: camelCase keys, Grok tool names, no tool_name/tool_input.
+# File key defaults to target_file (not Claude's file_path); pass a 6th arg for path/file_path.
+jg() { # jg <tool> <file> <cwd> [content] [cmd] [file_key]
+  python3 - "$@" <<'PY'
+import json,sys
+t,f,c = sys.argv[1],sys.argv[2],sys.argv[3]
+content = sys.argv[4] if len(sys.argv)>4 else ""
+cmd     = sys.argv[5] if len(sys.argv)>5 else ""
+fkey    = sys.argv[6] if len(sys.argv)>6 else "target_file"
+ti={}
+if f: ti[fkey]=f
+if content:
+    ti["new_string" if t == "search_replace" else "content"] = content
+if cmd: ti["command"]=cmd
+print(json.dumps({"toolName":t,"toolInput":ti,"cwd":c}))
 PY
 }
 
@@ -156,6 +175,26 @@ check 2 "implementer escapes its worktree to the primary checkout" \
 rm -f "$WT/.amk-scope"
 check 0 "orchestrator writes the dispatch contract before .amk-scope exists" \
   "$(j Write "$WT/CLAUDE.md" "$ORCH" "# amk-store contract")"
+
+echo "== Grok payload + grok worktree (same outcomes; no Claude keys) =="
+check 2 "grok write to amk-types from a grok worktree" \
+  "$(jg write "$GWT/crates/amk-types/src/ids.rs" "$GWT" "pub struct X;")"
+check 2 "grok search_replace to amk-types from a grok worktree" \
+  "$(jg search_replace "$GWT/crates/amk-types/src/ids.rs" "$GWT" "pub struct X;")"
+check 2 "grok write to amk-types via path key from a grok worktree" \
+  "$(jg write "$GWT/crates/amk-types/src/ids.rs" "$GWT" "pub struct X;" "" path)"
+check 2 "grok write to amk-types via file_path key from a grok worktree" \
+  "$(jg write "$GWT/crates/amk-types/src/ids.rs" "$GWT" "pub struct X;" "" file_path)"
+check 2 "grok run_terminal_command git reset from a grok worktree" \
+  "$(jg run_terminal_command "" "$GWT" "" "git reset --hard HEAD~1")"
+check 2 "grok write to amk-types (Grok payload, Claude worktree)" \
+  "$(jg write "$WT/crates/amk-types/src/ids.rs" "$WT" "pub struct X;")"
+mkdir -p "$GWT"
+printf 'crates/amk-core/*\ncrates/amk-core/src/*\n' > "$GWT/.amk-scope"
+check 0 "grok in-scope write under a grok worktree" \
+  "$(jg write "$GWT/crates/amk-core/src/scope.rs" "$GWT" "pub struct S;")"
+check 2 "grok out-of-scope write under a grok worktree" \
+  "$(jg write "$GWT/crates/amk-store/src/lib.rs" "$GWT" "pub struct S;")"
 
 printf '\nguard tests: %d passed, %d failed\n' "$pass" "$fail"
 exit $(( fail > 0 ))

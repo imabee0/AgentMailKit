@@ -7,11 +7,12 @@
 # Contract: reads the hook JSON on stdin, exits 2 to BLOCK (reason on stderr, shown to the model),
 # exits 0 to allow. Runnable outside Claude Code for testing:
 #     echo '{"tool_name":"Write","tool_input":{"file_path":"..."}}' | scripts/hooks/guard.sh
+#     echo '{"toolName":"write","toolInput":{"target_file":"..."}}' | scripts/hooks/guard.sh
 #
 # How "is this a subagent?" is decided: by PATH, not by identity. Implementer subagents work inside
-# .claude/worktrees/<id>/; the orchestrator works in the primary checkout. That is an observable,
-# deterministic discriminator that matches the project's actual isolation model — no guessing at
-# session identity.
+# .claude/worktrees/<id>/ or ~/.grok/worktrees/<id>/; the orchestrator works in the primary
+# checkout. That is an observable, deterministic discriminator that matches the project's actual
+# isolation model — no guessing at session identity.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -36,11 +37,17 @@ except Exception:
     for k in ("TOOL", "FILE", "CMD", "CONTENT", "CWD"):
         emit(k, "")
     sys.exit(0)
-ti = d.get("tool_input") or {}
-emit("TOOL", d.get("tool_name"))
-emit("FILE", ti.get("file_path"))
+# Grok sends camelCase keys and its own tool names; map onto the names the rules already match.
+ti = d.get("tool_input") or d.get("toolInput") or {}
+if not isinstance(ti, dict):
+    ti = {}
+tool = d.get("tool_name") or d.get("toolName") or ""
+tool = {"run_terminal_command": "Bash", "search_replace": "Edit", "write": "Write"}.get(tool, tool)
+path = ti.get("file_path") or ti.get("target_file") or ti.get("path") or ""
+emit("TOOL", tool)
+emit("FILE", path)
 emit("CMD", ti.get("command"))
-# Write carries content; Edit carries new_string
+# Write carries content; Edit / search_replace carry new_string
 emit("CONTENT", (ti.get("content") or "") + (ti.get("new_string") or ""))
 emit("CWD", d.get("cwd"))
 ')"
@@ -53,7 +60,7 @@ if [ "$TOOL" = "Bash" ]; then
   # checkout and destroyed uncommitted orchestrator work. Worktree-scoped agents get no history
   # rewriting and no redirecting git at another checkout.
   case "$CWD" in
-    */.claude/worktrees/*)
+    */.claude/worktrees/*|*/.grok/worktrees/*)
       case "$CMD" in
         *"git reset"*|*"git checkout"*|*"git clean"*|*"git -C"*|*"GIT_DIR="*|*"git worktree"*)
           deny "Implementer agents may not run history-rewriting or checkout-redirecting git.
@@ -84,8 +91,8 @@ esac
 # The orchestrator merges by copying worktree files INTO the primary checkout, which writes primary
 # paths from a primary CWD, and is unaffected.
 IN_WORKTREE=0
-case "$CWD" in */.claude/worktrees/*) IN_WORKTREE=1 ;; esac
-case "$FILE" in */.claude/worktrees/*) IN_WORKTREE=1 ;; esac
+case "$CWD" in */.claude/worktrees/*|*/.grok/worktrees/*) IN_WORKTREE=1 ;; esac
+case "$FILE" in */.claude/worktrees/*|*/.grok/worktrees/*) IN_WORKTREE=1 ;; esac
 
 # 0. THE FAN-OUT LOCK — the one rule that does not care who you are.
 #
@@ -168,10 +175,14 @@ WT=""
 case "$CWD" in
   */.claude/worktrees/*)
     WT="${CWD%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${CWD#*/.claude/worktrees/}" | cut -d/ -f1)" ;;
+  */.grok/worktrees/*)
+    WT="${CWD%%/.grok/worktrees/*}/.grok/worktrees/$(printf '%s' "${CWD#*/.grok/worktrees/}" | cut -d/ -f1)" ;;
   *)
     case "$FILE" in
       */.claude/worktrees/*)
         WT="${FILE%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${FILE#*/.claude/worktrees/}" | cut -d/ -f1)" ;;
+      */.grok/worktrees/*)
+        WT="${FILE%%/.grok/worktrees/*}/.grok/worktrees/$(printf '%s' "${FILE#*/.grok/worktrees/}" | cut -d/ -f1)" ;;
     esac ;;
 esac
 if [ -n "$WT" ] && [ -f "$WT/.amk-scope" ]; then
