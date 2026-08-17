@@ -129,12 +129,22 @@ fn looks_like_json_content_type(headers: &HeaderMap) -> bool {
 /// matching a rejection's rendered text and so needs to raise an issue of its own through the same
 /// single constructor. One envelope shape, one place that builds it.
 pub(crate) fn validation_error(issue: ValidationIssue) -> AppError {
+    validation_error_many(vec![issue])
+}
+
+/// The same envelope carrying SEVERAL issues.
+///
+/// `errors[]` is an array on the wire and the reference fills it: fixture 19's system-label gate
+/// rejects the whole mutation and reports every offending label, not just the first. Every
+/// extractor rejection above produces exactly one issue, which is why [`validation_error`] exists
+/// as the one-issue spelling of this — not because one is the only shape the envelope has.
+pub(crate) fn validation_error_many(issues: Vec<ValidationIssue>) -> AppError {
     // `ErrorEnvelope::new` special-cases `ValidationError` by boxing its `message` argument into a
     // synthesized `errors[0]` (`amk_types::error`'s own doc on `ErrorEnvelope::new`) — passed
     // through here only to be immediately replaced by `with_issues`, so the placeholder text below
     // is never observed on the wire.
     AppError::from(
-        ErrorEnvelope::new(ErrorCode::ValidationError, "validation_error").with_issues(vec![issue]),
+        ErrorEnvelope::new(ErrorCode::ValidationError, "validation_error").with_issues(issues),
     )
 }
 

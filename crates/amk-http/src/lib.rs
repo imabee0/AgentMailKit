@@ -1,5 +1,5 @@
 //! The axum HTTP surface: the tower auth layer, scope resolution into handlers, the error
-//! envelope, pagination, and the P0/P1 handlers plus the P2 mail-read lists (29 operations — see
+//! envelope, pagination, and the P0/P1 handlers plus the P2 mail surface (41 operations — see
 //! `.claude/contracts/amk-http.md`).
 //!
 //! # This crate ships a `Router`, not a binary
@@ -47,7 +47,7 @@ impl AppState {
     }
 }
 
-/// Build the router for this dispatch's 29 operations. Three mounts share one handler set per
+/// Build the router for this dispatch's 41 operations. Three mounts share one handler set per
 /// collection (see each `handlers::*` module) — every `*_org`/`*_pod`/`*_inbox` sibling calls the
 /// same shared inner function, so the routing table below is the only place mount and path are
 /// spelled out.
@@ -109,27 +109,45 @@ pub fn router(state: AppState) -> Router {
             "/v0/inboxes/{inbox_id}/api-keys/{api_key_id}",
             delete(handlers::api_keys::delete_inbox),
         )
-        // ---- messages (1) and threads (3): the LIST paths only ----
+        // ---- messages (3) and threads (9): lists, and now the full get/patch/delete triple ----
         //
-        // Get-by-id is written and tested (`handlers::messages::get`, `handlers::threads::get_*`)
-        // but deliberately NOT mounted yet. Every get-by-id path in the spec carries three methods
-        // — GET, PATCH and DELETE — and `amk-store` has no update or delete for either resource, so
-        // serving only the GET would leave two described operations unserved on a mounted path.
-        // `scripts/derive-implemented-paths.sh` reports exactly that, and the P1 gate's
-        // schemathesis scope is derived by PATH: a mounted path with unserved methods would be
-        // fuzzed against operations this server does not implement, and the gate would start
-        // reporting failures that are really absences.
-        //
-        // The four LIST paths below carry GET alone in the spec, so path-filtering stays exact.
-        // The get-by-id handlers are mounted in the same dispatch that gives their store the
-        // update and delete they are waiting on.
+        // The get-by-id paths carry GET, PATCH and DELETE in the spec, and all three are served
+        // here — they waited on `amk-store`'s update and delete, which is why the LIST slice landed
+        // first with these deliberately unmounted. A path serving only some of its described
+        // methods is what `scripts/derive-implemented-paths.sh` reports, and the P1 gate's
+        // schemathesis scope is derived by PATH, so a half-served path would have the gate fuzzing
+        // operations this server does not implement and reporting absences as failures.
         .route("/v0/inboxes/{inbox_id}/messages", get(handlers::messages::list))
+        .route(
+            "/v0/inboxes/{inbox_id}/messages/{message_id}",
+            get(handlers::messages::get)
+                .patch(handlers::messages::update)
+                .delete(handlers::messages::delete),
+        )
         // Search and the attachment downloads are deferred with FTS and blobs respectively; every
         // exclusion is recorded in `.claude/contracts/amk-http-message-thread-reads.md` rather than
         // left as an absence, because an unexplained gap in the reconciliation reads as oversight.
         .route("/v0/threads", get(handlers::threads::list_org))
+        .route(
+            "/v0/threads/{thread_id}",
+            get(handlers::threads::get_org)
+                .patch(handlers::threads::update_org)
+                .delete(handlers::threads::delete_org),
+        )
         .route("/v0/pods/{pod_id}/threads", get(handlers::threads::list_pod))
+        .route(
+            "/v0/pods/{pod_id}/threads/{thread_id}",
+            get(handlers::threads::get_pod)
+                .patch(handlers::threads::update_pod)
+                .delete(handlers::threads::delete_pod),
+        )
         .route("/v0/inboxes/{inbox_id}/threads", get(handlers::threads::list_inbox))
+        .route(
+            "/v0/inboxes/{inbox_id}/threads/{thread_id}",
+            get(handlers::threads::get_inbox)
+                .patch(handlers::threads::update_inbox)
+                .delete(handlers::threads::delete_inbox),
+        )
         // Unknown path -> 404 envelope.
         .fallback(not_found_fallback)
         // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
