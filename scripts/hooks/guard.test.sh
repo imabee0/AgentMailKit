@@ -196,5 +196,23 @@ check 0 "grok in-scope write under a grok worktree" \
 check 2 "grok out-of-scope write under a grok worktree" \
   "$(jg write "$GWT/crates/amk-store/src/lib.rs" "$GWT" "pub struct S;")"
 
+# Production Grok layout is two levels: ~/.grok/worktrees/<repo>/<subagent-id>/.
+# .amk-scope lives only at that second level — never on the repo-slug parent.
+GWT2="$ROOT/.grok/worktrees/projects-agentmailkit/subagent-test"
+mkdir -p "$GWT2/crates/amk-core/src"
+printf 'crates/amk-core/*\ncrates/amk-core/src/*\n' > "$GWT2/.amk-scope"
+check 0 "grok two-level worktree in-scope write" \
+  "$(jg write "$GWT2/crates/amk-core/src/scope.rs" "$GWT2" "pub struct S;")"
+check 2 "grok two-level worktree out-of-scope write" \
+  "$(jg write "$GWT2/crates/amk-store/src/lib.rs" "$GWT2" "pub struct S;")"
+check 2 "grok two-level worktree escape to primary" \
+  "$(jg write "$ORCH/crates/amk-core/src/scope.rs" "$GWT2" "pub struct S;")"
+check 2 "grok two-level out-of-scope from nested cwd" \
+  "$(jg write "$GWT2/crates/amk-store/src/lib.rs" "$GWT2/crates/amk-core/src" "pub struct S;")"
+check 2 "grok two-level (cwd=primary) write into worktree OUT of scope" \
+  "$(jg write "$GWT2/crates/amk-store/src/lib.rs" "$ORCH" "pub struct S;")"
+check 0 "grok two-level (cwd=primary) write into worktree IN scope" \
+  "$(jg write "$GWT2/crates/amk-core/src/scope.rs" "$ORCH" "pub struct S;")"
+
 printf '\nguard tests: %d passed, %d failed\n' "$pass" "$fail"
 exit $(( fail > 0 ))

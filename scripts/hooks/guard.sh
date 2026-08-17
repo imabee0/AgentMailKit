@@ -10,7 +10,7 @@
 #     echo '{"toolName":"write","toolInput":{"target_file":"..."}}' | scripts/hooks/guard.sh
 #
 # How "is this a subagent?" is decided: by PATH, not by identity. Implementer subagents work inside
-# .claude/worktrees/<id>/ or ~/.grok/worktrees/<id>/; the orchestrator works in the primary
+# .claude/worktrees/<id>/ or ~/.grok/worktrees/<repo>/<id>/; the orchestrator works in the primary
 # checkout. That is an observable, deterministic discriminator that matches the project's actual
 # isolation model — no guessing at session identity.
 set -uo pipefail
@@ -171,18 +171,39 @@ esac
 #    contract files BEFORE creating .amk-scope. The scope file's existence is what arms this rule,
 #    so ordering solves the write-the-contract-in case with no exemption — and an exemption is
 #    exactly what an agent would use to rewrite its own contract.
+#
+# Grok worktrees are ~/.grok/worktrees/<repo>/<id>/ (tests may use one level). Claude's
+# cut -d/ -f1 would land on the repo-slug parent and miss .amk-scope at the real root.
+grok_wt_root() {
+  local p="${1:-}" next
+  [ -n "$p" ] || return 1
+  while :; do
+    case "$p" in
+      */.grok/worktrees/*) ;;
+      *) return 1 ;;
+    esac
+    if [ -f "$p/.amk-scope" ] || [ -e "$p/.git" ]; then
+      printf '%s' "$p"
+      return 0
+    fi
+    next="${p%/*}"
+    [ "$next" = "$p" ] && return 1
+    p="$next"
+  done
+}
+
 WT=""
 case "$CWD" in
   */.claude/worktrees/*)
     WT="${CWD%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${CWD#*/.claude/worktrees/}" | cut -d/ -f1)" ;;
   */.grok/worktrees/*)
-    WT="${CWD%%/.grok/worktrees/*}/.grok/worktrees/$(printf '%s' "${CWD#*/.grok/worktrees/}" | cut -d/ -f1)" ;;
+    WT="$(grok_wt_root "$CWD")" ;;
   *)
     case "$FILE" in
       */.claude/worktrees/*)
         WT="${FILE%%/.claude/worktrees/*}/.claude/worktrees/$(printf '%s' "${FILE#*/.claude/worktrees/}" | cut -d/ -f1)" ;;
       */.grok/worktrees/*)
-        WT="${FILE%%/.grok/worktrees/*}/.grok/worktrees/$(printf '%s' "${FILE#*/.grok/worktrees/}" | cut -d/ -f1)" ;;
+        WT="$(grok_wt_root "$FILE")" ;;
     esac ;;
 esac
 if [ -n "$WT" ] && [ -f "$WT/.amk-scope" ]; then
