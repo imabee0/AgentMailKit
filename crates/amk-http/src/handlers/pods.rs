@@ -1,7 +1,7 @@
 //! `/v0/pods` — the only mount pods have (there is no `/v0/pods/{pod_id}/pods`, so this handler
 //! set is written once and mounted once, unlike inboxes and api-keys).
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 
@@ -14,6 +14,7 @@ use amk_types::ids::{OrganizationId, PodId};
 use amk_types::pod::{CreatePodRequest, ListPodsResponse, Pod};
 
 use crate::auth::AuthContext;
+use crate::body::{JsonBody, QueryParams};
 use crate::error::AppError;
 use crate::ids::PathPodId;
 use crate::pagination::{ListQuery, Resolved};
@@ -31,7 +32,7 @@ const DEFAULT_NAME: &str = "New Pod";
 pub async fn list(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Query(q): Query<ListQuery>,
+    QueryParams(q): QueryParams<ListQuery>,
 ) -> Result<Json<ListPodsResponse>, AppError> {
     // The organization mount is always Ready (never a probe, never denied — see
     // `amk_core::scope::Scope::resolve`'s own doc), so there is no scope-masking concern that
@@ -94,7 +95,7 @@ async fn degenerate_single_pod(
 pub async fn create(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Json(req): Json<CreatePodRequest>,
+    JsonBody(req): JsonBody<CreatePodRequest>,
 ) -> Result<Json<Pod>, AppError> {
     permissions::require(&ctx.grants, "pod_create")?;
     let name = req.name.unwrap_or_else(|| DEFAULT_NAME.to_owned());

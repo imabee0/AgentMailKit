@@ -2,7 +2,7 @@
 //! mounted twice — every `*_org` handler and its `*_pod` sibling share the functions below the
 //! `// ---- shared ----` markers.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use uuid::Uuid;
@@ -18,6 +18,7 @@ use amk_types::inbox::{ListInboxesResponse, MetadataUpdate};
 use amk_types::{CreateInboxRequest, ErrorCode, ErrorEnvelope, Inbox, UpdateInboxRequest};
 
 use crate::auth::AuthContext;
+use crate::body::{JsonBody, QueryParams};
 use crate::error::AppError;
 use crate::ids::{decode_segment, PathPodId, PathPodIdString};
 use crate::pagination::{ListQuery, Resolved};
@@ -60,7 +61,7 @@ fn bound_inbox_matches(filter: &ScopeFilter, target: &InboxId) -> bool {
 pub async fn list_org(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Query(q): Query<ListQuery>,
+    QueryParams(q): QueryParams<ListQuery>,
 ) -> Result<Json<ListInboxesResponse>, AppError> {
     permissions::require(&ctx.grants, "inbox_read")?;
     let filter = organization_window(&ctx.scope);
@@ -71,7 +72,7 @@ pub async fn list_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
     PathPodId(pod_id): PathPodId,
-    Query(q): Query<ListQuery>,
+    QueryParams(q): QueryParams<ListQuery>,
 ) -> Result<Json<ListInboxesResponse>, AppError> {
     let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "inbox_read")?;
@@ -135,7 +136,7 @@ async fn degenerate_single_inbox(
 pub async fn create_org(
     State(state): State<AppState>,
     ctx: AuthContext,
-    Json(req): Json<CreateInboxRequest>,
+    JsonBody(req): JsonBody<CreateInboxRequest>,
 ) -> Result<Json<Inbox>, AppError> {
     permissions::require(&ctx.grants, "inbox_create")?;
     let filter = organization_window(&ctx.scope);
@@ -150,7 +151,7 @@ pub async fn create_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
     PathPodId(pod_id): PathPodId,
-    Json(req): Json<CreateInboxRequest>,
+    JsonBody(req): JsonBody<CreateInboxRequest>,
 ) -> Result<Json<Inbox>, AppError> {
     let filter = settle_pod_mount(&state.pool, &ctx.scope, pod_id).await?;
     permissions::require(&ctx.grants, "inbox_create")?;
@@ -332,7 +333,7 @@ pub async fn update_org(
     State(state): State<AppState>,
     ctx: AuthContext,
     Path(raw_inbox_id): Path<String>,
-    Json(req): Json<UpdateInboxRequest>,
+    JsonBody(req): JsonBody<UpdateInboxRequest>,
 ) -> Result<Json<Inbox>, AppError> {
     let target = inbox_id_from_path(&raw_inbox_id)?;
     let window = organization_window(&ctx.scope);
@@ -343,7 +344,7 @@ pub async fn update_pod(
     State(state): State<AppState>,
     ctx: AuthContext,
     PathPodIdString(pod_id, raw_inbox_id): PathPodIdString,
-    Json(req): Json<UpdateInboxRequest>,
+    JsonBody(req): JsonBody<UpdateInboxRequest>,
 ) -> Result<Json<Inbox>, AppError> {
     let target = inbox_id_from_path(&raw_inbox_id)?;
     let window = window_for_pod_own_resource(&ctx.scope, pod_id)?;

@@ -52,6 +52,7 @@ pub fn test_router(pool: PgPool) -> Router {
     let config = AppConfig {
         primary_domain: Some("example.test".into()),
         product_name: Some("AmkTest".into()),
+        max_body_bytes: amk_http::config::DEFAULT_MAX_BODY_BYTES,
     };
     router(AppState::new(pool, config))
 }
@@ -185,11 +186,19 @@ pub async fn inbox_key(pool: &PgPool, org: &OrganizationId, inbox: &InboxId) -> 
     mint_key(pool, org, None, Some(inbox.clone()), None).await
 }
 
-/// A parsed HTTP response: status, raw body text, and the body parsed as JSON when it is (every
-/// success and every `AppError` response is JSON; a router-level 405 would not be, which is
-/// exactly the shape the "no 405 anywhere" edge case tests for).
+/// A parsed HTTP response: status, the response's own `Content-Type` header, raw body text, and
+/// the body parsed as JSON when it is (every success and every `AppError` response is JSON; a
+/// router-level 405 would not be, which is exactly the shape the "no 405 anywhere" edge case tests
+/// for).
+///
+/// `content_type` was added for this dispatch (`amk-http-extractor-rejections`): every malformed-
+/// request edge case it tests turns on whether the RESPONSE is `application/json` or axum's own
+/// `text/plain` — a distinction `status`/`json`/`body` alone cannot make (a `text/plain` body that
+/// happens to parse as JSON, or an empty JSON-looking string, would otherwise be indistinguishable
+/// from the real envelope).
 pub struct TestResponse {
     pub status: StatusCode,
+    pub content_type: Option<String>,
     pub json: Option<Value>,
     pub body: String,
 }
@@ -201,10 +210,41 @@ impl TestResponse {
     pub fn message(&self) -> Option<&str> {
         self.json.as_ref()?.get("message")?.as_str()
     }
+    /// The first `errors[]` entry, for the malformed-request tests that assert the whole issue
+    /// object (code + path + kind-specific extras), not merely the envelope's own `code`.
+    pub fn first_error(&self) -> Option<&Value> {
+        self.json.as_ref()?.get("errors")?.get(0)
+    }
 }
 
 /// Send one request through `router` (cloned — `Router` is cheap to clone, an `Arc` handle) and
-/// collect the response body.
+/// collect the response.
+async fn dispatch(router: &Router, request: Request<Body>) -> TestResponse {
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("router never errors as a Service");
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("test bodies are always collectible");
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    let json = serde_json::from_str(&body).ok();
+    TestResponse { status, content_type, json, body }
+}
+
+/// Send a request whose body is a `serde_json::Value` — every ordinary, well-formed test request
+/// in this suite. Always sets `content-type: application/json` for `Some(body)`, and sends neither
+/// a body nor a `Content-Type` header for `None` (case 5's own shape — see [`send_raw`] for the
+/// malformed-request cases this cannot express at all: a raw non-JSON body, a body sent under a
+/// content type OTHER than `application/json`, and a request that carries a `Content-Type` header
+/// but literally no body).
 pub async fn send(
     router: &Router,
     method: &str,
@@ -223,18 +263,32 @@ pub async fn send(
             .expect("valid request"),
         None => builder.body(Body::empty()).expect("valid request"),
     };
-    let response = router
-        .clone()
-        .oneshot(request)
-        .await
-        .expect("router never errors as a Service");
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("test bodies are always collectible");
-    let body = String::from_utf8_lossy(&bytes).into_owned();
-    let json = serde_json::from_str(&body).ok();
-    TestResponse { status, json, body }
+    dispatch(router, request).await
+}
+
+/// Send a request with a caller-controlled raw body and `Content-Type` — the malformed-request
+/// edge cases `send`/`post`/`patch` cannot express (see [`send`]'s own doc for the exact three).
+/// `content_type: None` omits the header entirely; `Some("")` is not a case any edge case needs
+/// and is not specially handled.
+pub async fn send_raw(
+    router: &Router,
+    method: &str,
+    uri: &str,
+    bearer: Option<&str>,
+    content_type: Option<&str>,
+    raw_body: &[u8],
+) -> TestResponse {
+    let mut builder = Request::builder().method(method).uri(uri);
+    if let Some(token) = bearer {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    if let Some(ct) = content_type {
+        builder = builder.header("content-type", ct);
+    }
+    let request = builder
+        .body(Body::from(raw_body.to_vec()))
+        .expect("valid request");
+    dispatch(router, request).await
 }
 
 pub async fn get(router: &Router, uri: &str, bearer: Option<&str>) -> TestResponse {
