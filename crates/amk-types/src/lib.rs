@@ -36,7 +36,10 @@ pub use ids::{
     ThreadId, WebhookId,
 };
 pub use inbox::{CreateInboxRequest, Inbox, Metadata, MetadataValue, UpdateInboxRequest};
-pub use message::{Attachment, Message, MessageItem, SendMessageRequest, SendMessageResponse};
+pub use message::{
+    Attachment, Message, MessageItem, ReplyAllMessageRequest, ReplyToMessageRequest,
+    SendMessageRequest, SendMessageResponse,
+};
 pub use page::{Cursor, ListParams};
 pub use pod::{Identity, Organization, Pod, ScopeType};
 pub use thread::{Thread, ThreadItem};

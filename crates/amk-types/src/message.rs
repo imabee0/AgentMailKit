@@ -241,6 +241,57 @@ pub struct SendMessageResponse {
     pub thread_id: ThreadId,
 }
 
+/// `[SPEC:openapi type_messages:ReplyToMessageRequest]`. No `subject` — PLAN.md: reply reuses
+/// the parent subject with `Re:`. `reply_all` is mutually exclusive with `to`/`cc`/`bcc`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplyToMessageRequest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<Addresses>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<Addresses>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cc: Option<Addresses>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bcc: Option<Addresses>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_all: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SendAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
+}
+
+impl ReplyToMessageRequest {
+    /// PLAN.md / SDK: `reply_all` is mutually exclusive with to/cc/bcc.
+    pub fn reply_all_conflicts_with_recipients(&self) -> bool {
+        self.reply_all == Some(true)
+            && [&self.to, &self.cc, &self.bcc].into_iter().flatten().any(|a| !a.is_empty())
+    }
+}
+
+/// `[SPEC:openapi type_messages:ReplyAllMessageRequest]`. No recipients, no `subject`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplyAllMessageRequest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<Addresses>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SendAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, String>>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UpdateMessageRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -305,6 +356,32 @@ mod tests {
         assert!(!req.has_recipient(), "empty body must fail validation");
         let req: SendMessageRequest = serde_json::from_str(r#"{"bcc":"x@y.z"}"#).unwrap();
         assert!(req.has_recipient(), "bcc alone satisfies the rule");
+    }
+
+    #[test]
+    fn reply_to_request_has_no_subject_and_omits_empty() {
+        let req: ReplyToMessageRequest = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(v.get("subject").is_none(), "openapi ReplyToMessageRequest has no subject");
+        assert!(v.get("to").is_none());
+        assert_eq!(v.get("text").and_then(|t| t.as_str()), Some("hi"));
+    }
+
+    #[test]
+    fn reply_all_request_has_no_recipients() {
+        let req: ReplyAllMessageRequest = serde_json::from_str("{}").unwrap();
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(v.get("to").is_none() && v.get("cc").is_none() && v.get("bcc").is_none());
+        assert!(v.get("subject").is_none());
+    }
+
+    #[test]
+    fn reply_all_flag_conflicts_with_explicit_recipients() {
+        let ok: ReplyToMessageRequest = serde_json::from_str(r#"{"reply_all":true}"#).unwrap();
+        assert!(!ok.reply_all_conflicts_with_recipients());
+        let bad: ReplyToMessageRequest =
+            serde_json::from_str(r#"{"reply_all":true,"to":"a@b.c"}"#).unwrap();
+        assert!(bad.reply_all_conflicts_with_recipients());
     }
 
     #[test]
