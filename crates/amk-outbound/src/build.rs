@@ -3,11 +3,16 @@
 //! `[SPEC:.claude/contracts/amk-outbound.md]`. `mail-builder` assembles; nothing it produces or
 //! consumes crosses this module's public edge.
 
-use amk_types::message::{Addresses, SendMessageRequest};
+use amk_types::message::{Addresses, SendAttachment, SendMessageRequest};
+use base64::Engine as _;
 
-use crate::assemble::check_headers;
+use crate::assemble::{check_field, check_headers};
 use crate::signing::Keyring;
 use crate::{OutboundError, SignedMessage};
+
+/// `[SPEC:repo agentmail-toolkit]` via PLAN.md:250 and `amk_http::config` — the inline
+/// attachment / URL threshold. Size `cap - 1` is accepted; `cap` and `cap + 1` are rejected.
+pub const INLINE_ATTACHMENT_MAX_BYTES: usize = 5_950_000;
 
 /// What a send needs beyond the caller's request: who is sending, and the threading position.
 ///
@@ -38,6 +43,21 @@ pub fn build_signed(
 ) -> Result<SignedMessage, OutboundError> {
     if let Some(headers) = &req.headers {
         check_headers(headers)?;
+    }
+    for (name, addrs) in [
+        ("to", req.to.as_ref()),
+        ("cc", req.cc.as_ref()),
+        ("bcc", req.bcc.as_ref()),
+        ("reply_to", req.reply_to.as_ref()),
+    ] {
+        if let Some(a) = addrs {
+            for addr in a.clone().into_vec() {
+                check_field(name, &addr)?;
+            }
+        }
+    }
+    if let Some(subject) = &req.subject {
+        check_field("subject", subject)?;
     }
 
     let domain = ctx
@@ -104,6 +124,18 @@ pub fn build_signed(
                 builder.header(name.as_str(), mail_builder::headers::raw::Raw::new(value.as_str()));
         }
     }
+    for att in &req.attachments {
+        let bytes = decoded_inline_attachment(att)?;
+        if let Some(name) = &att.filename {
+            check_field("filename", name)?;
+        }
+        let ctype = att
+            .content_type
+            .as_deref()
+            .unwrap_or("application/octet-stream");
+        let filename = att.filename.as_deref().unwrap_or("attachment");
+        builder = builder.attachment(ctype, filename, bytes);
+    }
 
     let raw = builder
         .write_to_vec()
@@ -139,6 +171,54 @@ fn flatten_opt(a: Option<&Addresses>) -> Option<Vec<String>> {
     (!v.is_empty()).then_some(v)
 }
 
+/// Decode one inline `SendAttachment`. URL sources and sizes at/over the toolkit cap are refused.
+pub fn decoded_inline_attachment(att: &SendAttachment) -> Result<Vec<u8>, OutboundError> {
+    if !att.has_exactly_one_source() {
+        return Err(OutboundError::Assembly(
+            "attachment must have exactly one of content or url".to_owned(),
+        ));
+    }
+    if att.url.is_some() {
+        return Err(OutboundError::Assembly(
+            "attachment url is not fetched on send; use inline content under the size cap"
+                .to_owned(),
+        ));
+    }
+    let encoded = att
+        .content
+        .as_deref()
+        .expect("xor check: content is present");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|e| {
+            OutboundError::Assembly(format!("attachment content is not valid base64: {e}"))
+        })?;
+    if bytes.len() >= INLINE_ATTACHMENT_MAX_BYTES {
+        return Err(OutboundError::Assembly(format!(
+            "attachment exceeds the {INLINE_ATTACHMENT_MAX_BYTES}-byte inline cap"
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Reply subject: parent plus `Re:`, without doubling an existing prefix. PLAN.md / SDK: reply
+/// has no `subject` field.
+pub fn reply_subject(parent: Option<&str>) -> String {
+    match parent {
+        Some(s) if s.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) => s.to_owned(),
+        Some(s) => format!("Re: {s}"),
+        None => "Re:".to_owned(),
+    }
+}
+
+/// The addr-spec of `Name <a@b>` or a bare `a@b`. Used only to compare mailboxes.
+pub fn mailbox_addr(addr: &str) -> &str {
+    addr.rsplit_once('<')
+        .and_then(|(_, rest)| rest.strip_suffix('>'))
+        .unwrap_or(addr)
+        .trim()
+}
+
 /// Recipients for a reply-all: everyone on the parent except the sender itself.
 ///
 /// **`[INFERRED]`** — no fixture captures the reference's reply-all derivation. What is implemented
@@ -151,19 +231,19 @@ pub fn reply_all_recipients(
     parent_cc: &[String],
     sending_inbox: &str,
 ) -> Vec<String> {
-    let me = sending_inbox.to_ascii_lowercase();
+    let me = mailbox_addr(sending_inbox).to_ascii_lowercase();
     let mut out: Vec<String> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for addr in std::iter::once(parent_from)
         .chain(parent_to.iter().map(String::as_str))
         .chain(parent_cc.iter().map(String::as_str))
     {
-        let folded = addr.to_ascii_lowercase();
+        let folded = mailbox_addr(addr).to_ascii_lowercase();
         if folded == me || seen.contains(&folded) {
             continue;
         }
         seen.push(folded);
-        out.push(addr.to_owned());
+        out.push(mailbox_addr(addr).to_owned());
     }
     out
 }
@@ -330,5 +410,61 @@ mod tests {
             "me@example.test",
         );
         assert_eq!(out, vec!["alice@other.test"]);
+    }
+
+    #[test]
+    fn cr_lf_in_to_or_subject_never_reaches_the_assembled_bytes() {
+        let mut r = req();
+        r.to = Some(Addresses::One("you@other.test\r\nBcc: ev@il".into()));
+        assert!(matches!(
+            build_signed(&r, &ctx(), &keyring(), "<x@example.test>"),
+            Err(OutboundError::ForbiddenHeader(n)) if n == "to"
+        ));
+        let mut r = req();
+        r.subject = Some("hi\ninjected".into());
+        assert!(matches!(
+            build_signed(&r, &ctx(), &keyring(), "<x@example.test>"),
+            Err(OutboundError::ForbiddenHeader(n)) if n == "subject"
+        ));
+    }
+
+    #[test]
+    fn inline_attachment_at_the_cap_and_one_over_is_refused_one_under_is_accepted() {
+        let cap = INLINE_ATTACHMENT_MAX_BYTES;
+        let ok = SendAttachment {
+            content: Some(base64::engine::general_purpose::STANDARD.encode(vec![b'A'; cap - 1])),
+            ..Default::default()
+        };
+        assert_eq!(decoded_inline_attachment(&ok).unwrap().len(), cap - 1);
+        for n in [cap, cap + 1] {
+            let att = SendAttachment {
+                content: Some(base64::engine::general_purpose::STANDARD.encode(vec![b'A'; n])),
+                ..Default::default()
+            };
+            assert!(decoded_inline_attachment(&att).is_err(), "{n} must be at or over the cap");
+        }
+        let url = SendAttachment { url: Some("https://x/y".into()), ..Default::default() };
+        assert!(decoded_inline_attachment(&url).is_err());
+    }
+
+    #[test]
+    fn reply_subject_prefixes_re_once() {
+        assert_eq!(reply_subject(Some("Hello")), "Re: Hello");
+        assert_eq!(reply_subject(Some("Re: Hello")), "Re: Hello");
+        assert_eq!(reply_subject(Some("RE: Hello")), "RE: Hello");
+        assert_eq!(reply_subject(None), "Re:");
+    }
+
+    #[test]
+    fn a_small_inline_attachment_is_in_the_assembled_bytes() {
+        let mut r = req();
+        r.attachments = vec![SendAttachment {
+            filename: Some("note.txt".into()),
+            content_type: Some("text/plain".into()),
+            content: Some(base64::engine::general_purpose::STANDARD.encode(b"hi")),
+            ..Default::default()
+        }];
+        let text = as_text(&build_signed(&r, &ctx(), &keyring(), "<att@example.test>").unwrap());
+        assert!(text.contains("note.txt"), "{text}");
     }
 }

@@ -39,6 +39,7 @@ const SIGNED_HEADERS: &[&str] = &[
 /// unusable key fails when an operator is watching rather than on the first send; the per-send
 /// parse is the cost of that API shape, paid deliberately rather than by keeping an unvalidated
 /// blob around.
+#[derive(Clone)]
 pub struct SigningKey {
     selector: String,
     der: Vec<u8>,
@@ -75,7 +76,7 @@ fn parse_der(der: &[u8]) -> Option<RsaKey<Sha256>> {
 }
 
 /// Signing keys by domain. A domain with no key cannot send.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Keyring {
     keys: BTreeMap<String, SigningKey>,
 }

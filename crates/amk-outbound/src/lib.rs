@@ -24,6 +24,14 @@
 pub mod assemble;
 pub mod build;
 pub mod signing;
+pub mod smtp;
+
+pub use build::{
+    build_signed, decoded_inline_attachment, mailbox_addr, reply_all_recipients, reply_subject,
+    SendContext, INLINE_ATTACHMENT_MAX_BYTES,
+};
+pub use signing::Keyring;
+pub use smtp::{OutboundTransport, SmtpMode, SmtpTransport};
 
 use std::sync::{Arc, Mutex};
 
@@ -114,6 +122,20 @@ impl Transport for RecordingTransport {
     }
 }
 
+/// Assemble, sign, then hand the bytes to `transport`. Persist is the caller's job, and only
+/// after this returns — a `NoSigningKey` never produces a [`SignedMessage`] on a recording fake.
+pub async fn sign_and_deliver(
+    req: &amk_types::message::SendMessageRequest,
+    ctx: &build::SendContext,
+    keys: &signing::Keyring,
+    message_id: &str,
+    transport: &impl Transport,
+) -> Result<SignedMessage, OutboundError> {
+    let signed = build::build_signed(req, ctx, keys, message_id)?;
+    transport.deliver(&signed).await?;
+    Ok(signed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +158,26 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].message_id, "<a@x.test>");
         assert_eq!(sent[1].message_id, "<b@x.test>", "order is preserved");
+    }
+
+    /// PR 4 case 1a: no key → `NoSigningKey` and the recording fake has no `SignedMessage`.
+    #[tokio::test]
+    async fn no_key_leaves_the_recording_transport_empty() {
+        let t = RecordingTransport::new();
+        let req = amk_types::message::SendMessageRequest {
+            to: Some(amk_types::message::Addresses::One("you@other.test".into())),
+            subject: Some("hi".into()),
+            text: Some("body".into()),
+            ..Default::default()
+        };
+        let ctx = build::SendContext { from: "me@unkeyed.test".into(), ..Default::default() };
+        let err = sign_and_deliver(&req, &ctx, &signing::Keyring::new(), "<a@unkeyed.test>", &t)
+            .await
+            .expect_err("no key means no send");
+        assert!(
+            matches!(err, OutboundError::NoSigningKey(ref d) if d == "unkeyed.test"),
+            "{err}"
+        );
+        assert!(t.sent().is_empty(), "fail-closed: nothing is handed to the transport");
     }
 }
