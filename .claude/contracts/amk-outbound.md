@@ -8,31 +8,52 @@ construction-site hole extractor-rejection rev 3 hit. The scope is this command'
 not a recalled list.
 
 ```
-$ python3 -c '…openapi paths matching /messages/send|/reply|/forward…'
-POST /v0/inboxes/{inbox_id}/messages/send          body=$ref type_messages:SendMessageRequest
-POST /v0/inboxes/{inbox_id}/messages/{message_id}/reply      body=$ref type_messages:ReplyToMessageRequest
-POST /v0/inboxes/{inbox_id}/messages/{message_id}/reply-all  body=$ref type_messages:ReplyAllMessageRequest
-POST /v0/inboxes/{inbox_id}/messages/{message_id}/forward    body=$ref type_messages:SendMessageRequest
-
-$ python3 -c '…schema property keys…'
-type_messages:SendMessageRequest      ['labels','reply_to','to','cc','bcc','subject','text','html','attachments','headers']
-type_messages:ReplyToMessageRequest   ['labels','reply_to','to','cc','bcc','reply_all','text','html','attachments','headers']
-type_messages:ReplyAllMessageRequest  ['labels','reply_to','text','html','attachments','headers']
+$ python3 -c '
+import json
+from pathlib import Path
+p=json.loads(Path("reference/openapi.json").read_text())
+for path, ops in p["paths"].items():
+    if any(s in path for s in ("/messages/send","/reply","/forward")):
+        for m,op in ops.items():
+            if m.startswith("x-"): continue
+            ref=((op.get("requestBody") or {}).get("content") or {}).get("application/json",{}).get("schema",{})
+            print(f"{m.upper()} {path}  body={ref}")
+print("--- request schemas ---")
+for name in ("type_messages:ReplyToMessageRequest","type_messages:ReplyAllMessageRequest","type_messages:SendMessageRequest"):
+    print(name, list((p["components"]["schemas"][name].get("properties") or {}).keys()))
+'
+POST /v0/inboxes/{inbox_id}/messages/send  body={'$ref': '#/components/schemas/type_messages:SendMessageRequest'}
+POST /v0/inboxes/{inbox_id}/messages/{message_id}/reply  body={'$ref': '#/components/schemas/type_messages:ReplyToMessageRequest'}
+POST /v0/inboxes/{inbox_id}/messages/{message_id}/reply-all  body={'$ref': '#/components/schemas/type_messages:ReplyAllMessageRequest'}
+POST /v0/inboxes/{inbox_id}/messages/{message_id}/forward  body={'$ref': '#/components/schemas/type_messages:SendMessageRequest'}
+--- request schemas ---
+type_messages:ReplyToMessageRequest ['labels', 'reply_to', 'to', 'cc', 'bcc', 'reply_all', 'text', 'html', 'attachments', 'headers']
+type_messages:ReplyAllMessageRequest ['labels', 'reply_to', 'text', 'html', 'attachments', 'headers']
+type_messages:SendMessageRequest ['labels', 'reply_to', 'to', 'cc', 'bcc', 'subject', 'text', 'html', 'attachments', 'headers']
 
 $ rg -n "pub struct Reply" crates/amk-types/src/message.rs
-  (added by the orchestrator on amk/p2/types — fields copied from the openapi keys above)
+247:pub struct ReplyToMessageRequest {
+280:pub struct ReplyAllMessageRequest {
 
 $ rg -n "AppState::new|AppConfig \{" crates --glob '*.rs'
-  crates/amk-http/src/lib.rs          AppState { pool, config }
-  crates/amk-http/src/config.rs       AppConfig { primary_domain, product_name, max_body_bytes }
-  crates/amk-http/tests/support/mod.rs  exhaustive AppConfig + AppState::new
-  crates/amk-cli/src/config.rs        AppConfig { ..Default }
-  crates/amk-cli/src/server.rs        AppState::new(pool, config)
-  crates/amk-cli/tests/*              AppState::new
+crates/amk-http/src/lib.rs:39:pub struct AppState {
+crates/amk-http/src/lib.rs:45:    pub fn new(pool: PgPool, config: AppConfig) -> Self {
+crates/amk-http/src/config.rs:19:pub struct AppConfig {
+crates/amk-http/tests/support/mod.rs:55:    let config = AppConfig {
+crates/amk-http/tests/support/mod.rs:60:    router(AppState::new(pool, config))
+crates/amk-http/tests/support/mod.rs:66:    router(AppState::new(pool, AppConfig::default()))
+crates/amk-cli/src/config.rs:51:    AppConfig {
+crates/amk-cli/src/server.rs:36:    let app = amk_http::router(AppState::new(pool, config));
+crates/amk-cli/tests/init_and_serve.rs:148:    let app = router(AppState::new(db.pool.clone(), AppConfig::default()));
+crates/amk-http/src/lib.rs:191:        let state = AppState::new(pool, AppConfig::default());
 
 $ rg -n "pub async fn" crates/amk-store/src/threads.rs crates/amk-store/src/messages.rs
-  messages::{insert, get, update, …}
-  threads::{insert, get_with_messages, update}   # update is labels-only
+messages.rs:55:pub async fn insert
+messages.rs:201:pub async fn get
+messages.rs:427:pub async fn update
+threads.rs:52:pub async fn insert
+threads.rs:148:pub async fn get_with_messages
+threads.rs:316:pub async fn update   # labels-only
 ```
 
 Forward uses `SendMessageRequest` (has `subject`). Reply has no `subject` (PLAN.md: parent + `Re:`).

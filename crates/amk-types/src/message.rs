@@ -359,29 +359,66 @@ mod tests {
     }
 
     #[test]
-    fn reply_to_request_has_no_subject_and_omits_empty() {
-        let req: ReplyToMessageRequest = serde_json::from_str(r#"{"text":"hi"}"#).unwrap();
+    fn reply_to_request_emits_exactly_the_openapi_keys() {
+        let req = ReplyToMessageRequest {
+            labels: vec!["sent".into()],
+            reply_to: Some(Addresses::One("a@b.c".into())),
+            to: Some(Addresses::One("c@d.e".into())),
+            cc: Some(Addresses::One("e@f.g".into())),
+            bcc: Some(Addresses::One("g@h.i".into())),
+            reply_all: Some(true),
+            text: Some("t".into()),
+            html: Some("h".into()),
+            attachments: vec![SendAttachment { content: Some("Zg==".into()), ..Default::default() }],
+            headers: Some(BTreeMap::from([("X".into(), "1".into())])),
+        };
         let v = serde_json::to_value(&req).unwrap();
-        assert!(v.get("subject").is_none(), "openapi ReplyToMessageRequest has no subject");
-        assert!(v.get("to").is_none());
-        assert_eq!(v.get("text").and_then(|t| t.as_str()), Some("hi"));
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["attachments", "bcc", "cc", "headers", "html", "labels", "reply_all", "reply_to", "text", "to"],
+            "must be the openapi property set; subject is not one of them",
+        );
+        assert_eq!(serde_json::to_value(&ReplyToMessageRequest::default()).unwrap(), serde_json::json!({}));
     }
 
     #[test]
-    fn reply_all_request_has_no_recipients() {
-        let req: ReplyAllMessageRequest = serde_json::from_str("{}").unwrap();
+    fn reply_all_request_emits_exactly_the_openapi_keys() {
+        let req = ReplyAllMessageRequest {
+            labels: vec!["sent".into()],
+            reply_to: Some(Addresses::One("a@b.c".into())),
+            text: Some("t".into()),
+            html: Some("h".into()),
+            attachments: vec![SendAttachment { content: Some("Zg==".into()), ..Default::default() }],
+            headers: Some(BTreeMap::from([("X".into(), "1".into())])),
+        };
         let v = serde_json::to_value(&req).unwrap();
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["attachments", "headers", "html", "labels", "reply_to", "text"]);
         assert!(v.get("to").is_none() && v.get("cc").is_none() && v.get("bcc").is_none());
-        assert!(v.get("subject").is_none());
+        assert_eq!(serde_json::to_value(&ReplyAllMessageRequest::default()).unwrap(), serde_json::json!({}));
     }
 
     #[test]
-    fn reply_all_flag_conflicts_with_explicit_recipients() {
-        let ok: ReplyToMessageRequest = serde_json::from_str(r#"{"reply_all":true}"#).unwrap();
-        assert!(!ok.reply_all_conflicts_with_recipients());
-        let bad: ReplyToMessageRequest =
-            serde_json::from_str(r#"{"reply_all":true,"to":"a@b.c"}"#).unwrap();
-        assert!(bad.reply_all_conflicts_with_recipients());
+    fn reply_all_flag_conflicts_with_to_or_cc_or_bcc() {
+        assert!(!ReplyToMessageRequest { reply_all: Some(true), ..Default::default() }
+            .reply_all_conflicts_with_recipients());
+        assert!(!ReplyToMessageRequest {
+            reply_all: Some(false),
+            to: Some(Addresses::One("a@b.c".into())),
+            ..Default::default()
+        }
+        .reply_all_conflicts_with_recipients());
+        for body in [
+            r#"{"reply_all":true,"to":"a@b.c"}"#,
+            r#"{"reply_all":true,"cc":"a@b.c"}"#,
+            r#"{"reply_all":true,"bcc":"a@b.c"}"#,
+        ] {
+            let req: ReplyToMessageRequest = serde_json::from_str(body).unwrap();
+            assert!(req.reply_all_conflicts_with_recipients(), "{body}");
+        }
     }
 
     #[test]
