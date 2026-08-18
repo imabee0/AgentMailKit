@@ -1,0 +1,242 @@
+# AgentMailKit — remaining V1 as an execute-plan DAG
+
+Derived from `docs/PLAN.md` and `docs/RESUME.md`. Not a second plan: `docs/PLAN.md` stays the
+contract. This file is the parseable PR DAG for `/execute-plan`. If the two disagree, PLAN.md wins
+and this file is amended by the orchestrator.
+
+## Goal
+
+Finish V1 in PLAN.md write order without skipping a gate or a listed process. execute-plan launches
+worktrees and keeps state. Dispatch, review, branch names, and merge follow PLAN.md.
+
+## Current position
+
+P0 gated (fixture 24). P1 Lane L green; Lane R (dual-target conformance) **not run**;
+`CURRENT_PHASE=P0`. P2 message/thread surface landed; `amk-outbound` has signing/assemble/build;
+SMTP `Transport` and the four send HTTP endpoints are not wired; `amk-ingest` does not exist.
+P3–P6 not started.
+
+## Key Decisions
+
+1. **Gates are nodes.** A gate PR produces a fixture (or an explicit **not run**). It does not
+   write product code. “Not run” is never recorded as passed. `CURRENT_PHASE` moves only when the
+   current phase is gated.
+2. **Lane R is not a parent of the next phase’s code.** PLAN.md allows the next phase’s *code* at
+   Lane L code-complete. R-key / R-phys nodes stay in the DAG and stay blocked until their input
+   exists (read-only AgentMail key via `sdxd`; OVH + Gmail for P2 R-phys).
+3. **Crate write order is the dependency graph.** types → core → store → http → ingest + outbound
+   (fan-out only if all four predicates hold) → events + jobs → dns + mcp + reply-extract → import
+   last, P6 only.
+4. **Fan-out predicates (all four):** disjoint files; neither crate depends on the other; both
+   depend only on merged crates; `amk-types` frozen. Ceiling 2. `.claude/fanout.lock` on for the
+   duration.
+5. **Dispatch order is load-bearing.** Contract into the worktree first, then `.amk-scope`, then
+   the lock. Contract reviewed read-only before implement. Scope is derived (command + output on
+   `Scope-derivation:`).
+6. **Merge branch is `amk/<phase>/<crate>`.** execute-plan’s `execute-plan/<id>-pr-N-…` label is
+   the worktree only. Orchestrator publishes `amk/<phase>/<crate>` from `commit_sha` before review.
+   Merge that branch after three clean lenses. Never merge-commit; rebase onto `main` first.
+7. **Three lenses on every returned diff** — `amk-review-contract`, `amk-review-provenance`,
+   `amk-review-tests` — plus the pre-dispatch contract lens. execute-plan’s single generic reviewer
+   is extra, not a substitute.
+8. **Orchestrator writes no implementation except `amk-types`.** No invented shapes. Mutation both
+   directions on new guards. Report the command and its output. `./scripts/check.sh` — read the
+   DB-skip line before believing PASS.
+9. **No permission bypass.** No `--always-approve` / `--yolo`. Restore
+   `~/.grok/requirements.toml` `disable_bypass_permissions_mode = true` if a restart deleted it.
+10. **Harness on `main` before any worktree is cut from `origin/main`.** GitHub PRs #5–#9 are the
+    harness stack. Until they land, new worktrees branch from the stack tip
+    `execute-plan/e957ddfb-pr-5-…`, not from `origin/main`.
+
+## Binding instructions (injected into every child)
+
+- Follow `.claude/contracts/<crate>.md` and the `[SPEC:*]` citations. If a needed type is not in
+  `amk-types` or a fixture, STOP and report.
+- Writable paths are the contract’s list only.
+- Never edit `docs/PLAN.md`, `scripts/hooks/**`, or `crates/amk-types/**`.
+- Mutation both directions on a scratch copy outside the worktree; delete it.
+- Reviewers are the three named lenses, read-only.
+- Report the command and its actual output.
+
+## Gate catalog
+
+| ID | Gate | Lane | Command / evidence | Advances |
+|---|---|---|---|---|
+| G1 | P1 dual-target conformance | R-key | `sdxd` + conformance conjunct of `./scripts/p1-gate.sh`; fixture | `CURRENT_PHASE` off P0 only when every P1 conjunct is MET |
+| G2 | P2 Lane L | L | `./scripts/check.sh`; schemathesis + Python/Node SDK smokes over send/ingest mounts | P2 code-complete; P3 code may start |
+| G3 | P2 conformance | R-key | dual-target diff for this phase’s endpoints | P2 gated (with G4) |
+| G4 | P2 inject + Gmail DKIM/SPF | R-phys | `/root/amksend.py` 3-message thread; SDK send to Gmail | P2 gated (with G3) |
+| G5 | P3 Lane L | L | scheduled draft delivers locally; idempotency tests | P3 code-complete |
+| G6 | P3 R-key | R-key | dual-target for P3 endpoints | P3 gated |
+| G7 | P4 Lane L | L | svix lib verifies signatures against localhost; WS test | P4 code-complete |
+| G8 | P4 R-key | R-key | dual-target for P4 endpoints | P4 gated |
+| G9 | P5 Lane L | L | domain types vs `reference/fixtures/C1-domain-shape.txt` | P5 code-complete |
+| G10 | P5 R-phys | R-phys | one real domain; induced bounce | P5 gated (with R-key) |
+| G11 | P6 | R-phys | restore drill; `.64` cutover; Stalwart 0; dns-health | V1 acceptance |
+
+## PR Plan
+
+### PR 1: Land the harness stack on `main`
+
+- **Description:** Merge GitHub PRs #5–#9 in stack order. Human merges. Orchestrator does not push
+  `main`. After merge: delete `execute-plan/e957ddfb-*` branches and leftover worktrees. Confirm
+  `./scripts/hooks/guard.test.sh` is 49/49 on `main` and `.grok/hooks/amk-harness.json` exists.
+- **Files/components affected:** merge only
+- **Dependencies:** None
+
+### PR 2: This file (`docs/execute-plan-v1.md`)
+
+- **Description:** The DAG. Already this document. Do not edit `docs/PLAN.md`.
+- **Files/components affected:** `docs/execute-plan-v1.md`
+- **Dependencies:** None (authored on the harness tip so later worktrees see it)
+
+### PR 3: Re-derive the outbound remainder contract
+
+- **Description:** Re-run the derivation in `.claude/contracts/amk-outbound.md` against the
+  post-harness `main` (or this tip until PR 1 lands). Record command + output on
+  `Scope-derivation:`. Remaining work is SMTP `Transport` (direct-to-MX + smarthost) and the four
+  HTTP operations, persist via `amk-store::messages::insert`, thread via `amk-core::threading`. No
+  new types. Read-only contract lens before any implementer. Orchestrator amends the contract only
+  if derivation drifted.
+- **Files/components affected:** `.claude/contracts/amk-outbound.md` (only if derivation requires)
+- **Dependencies:** PR 2
+
+### PR 4: `amk-outbound` SMTP Transport
+
+- **Description:** Implement `mail-send` behind the existing `Transport` trait. Direct-to-MX and
+  smarthost, both configurable. Fail closed with no signing key. Public signatures `amk-types`
+  only. Tests use a recording fake — no real mail. Mutation both directions. Branch published as
+  `amk/p2/outbound`. Three lenses. `./scripts/check.sh` + `shape-provenance.sh` in the report.
+  Contract: `.claude/contracts/amk-outbound.md`. Specs: fixtures 15, 10/10b. Assigned cases 1 and 7
+  from that contract.
+- **Files/components affected:** `crates/amk-outbound/**`
+- **Dependencies:** PR 3
+
+### PR 5: `amk-outbound` HTTP send / reply / reply-all / forward
+
+- **Description:** Mount the four operations. `AppState` carries `Keyring` + `Transport`. Persist
+  through existing `messages::insert`; thread through existing `amk-core::threading`. Reply and
+  reply-all set linkage headers (fixture 21 / C3); forward starts a new thread. Assigned cases 2–8
+  in the outbound contract. Same published branch `amk/p2/outbound`. Three lenses. No `amk-types`
+  edits. Re-run `./scripts/derive-implemented-paths.sh` — mounted set grows by exactly four.
+- **Files/components affected:** `crates/amk-http/src/handlers/messages.rs`,
+  `crates/amk-http/src/lib.rs`, `crates/amk-http/Cargo.toml`, `crates/amk-http/tests/**`,
+  `crates/amk-outbound/**` as needed to expose Transport
+- **Dependencies:** PR 4
+
+### PR 6: Derive and review the `amk-ingest` contract
+
+- **Description:** New contract. First line is `Scope-derivation:` plus the enumeration command and
+  its raw output. Sites from PLAN.md P2 ingest (SMTP daemon on high-port, local-domain RCPT only,
+  mail-auth verdicts → labels, threading, blob store, HTTP ingest fallback) and fixtures 09b, 16,
+  21, 15. `smtp-proto` is parser-only; ingest owns the state machine. Read-only lens on the
+  contract before dispatch. No product code. Orchestrator writes the contract.
+- **Files/components affected:** `.claude/contracts/amk-ingest.md`
+- **Dependencies:** PR 2
+
+### PR 7: `amk-ingest` crate
+
+- **Description:** Implement the reviewed ingest contract only. Fan-out with PR 4/5 only if all
+  four fan-out predicates hold and `fanout.lock` is on. Branch `amk/p2/ingest`. Three lenses. Stop
+  if a type is missing. Do not resolve C2.
+- **Files/components affected:** `crates/amk-ingest/**`, workspace `Cargo.toml` member line only
+- **Dependencies:** PR 6
+
+### PR 8: P2 Lane L gate (G2)
+
+- **Description:** Run `./scripts/check.sh` (read the DB-skip line), schemathesis, and both SDK
+  smokes over the new send/ingest mounts. Paste output into a new fixture. Do **not** advance
+  `CURRENT_PHASE`. If a conjunct fails, this PR fails; P3 does not start.
+- **Files/components affected:** `reference/fixtures/` (P2 Lane L transcript), `docs/RESUME.md`
+  (one status paragraph)
+- **Dependencies:** PR 5, PR 7
+
+### PR 9: P1 Lane R gate (G1)
+
+- **Description:** Dual-target conformance via `sdxd`. Independent of PR 4–8. If the key is
+  absent, report **not run**; leave `CURRENT_PHASE=P0`. Only if every P1 conjunct is MET may the
+  orchestrator move `CURRENT_PHASE`.
+- **Files/components affected:** `reference/fixtures/` (conformance transcript),
+  `scripts/plan-ledger.sh` (`CURRENT_PHASE` only when actually gated)
+- **Dependencies:** PR 1
+
+### PR 10: P2 R-key gate (G3)
+
+- **Description:** Dual-target conformance for P2 endpoints. **Not run** without the key. Does not
+  unblock P3 code (G2 does). Required for P2 gated.
+- **Files/components affected:** `reference/fixtures/` (P2 conformance transcript)
+- **Dependencies:** PR 8
+
+### PR 11: P2 R-phys gate (G4)
+
+- **Description:** Mail injected from the OVH box via `/root/amksend.py` appears with correct
+  threading over a 3-message exchange; SDK send to a Gmail account shows DKIM+SPF pass. **Not run**
+  without the box and Gmail. Does not unblock P3 code.
+- **Files/components affected:** `reference/fixtures/` (P2 R-phys transcript)
+- **Dependencies:** PR 8
+
+### PR 12: `amk-events`
+
+- **Description:** Webhooks CRUD (3 scopes, write-only headers), Svix-wire delivery + retries
+  (full 8-attempt schedule, fixture 07), inbox events. Contract derived and reviewed first. Branch
+  `amk/p4/events` only when this phase is open; until G2 is green this node stays pending.
+- **Files/components affected:** `crates/amk-events/**` (after a reviewed contract)
+- **Dependencies:** PR 8
+
+### PR 13: `amk-jobs`
+
+- **Description:** Postgres `jobs` table + tokio workers. Fan-out with PR 12 if predicates hold.
+  Branch `amk/p3/jobs` when P3 is open (drafts/`send_at` need it). Contract first.
+- **Files/components affected:** `crates/amk-jobs/**`
+- **Dependencies:** PR 8
+
+### PR 14: P3 drafts, scheduling, idempotency
+
+- **Description:** Drafts CRUD/modes/references, `send_at` jobs, `Idempotency-Key` layer,
+  SSRF-safe url-attachments. Gate G5 after. No types invented.
+- **Files/components affected:** per a reviewed P3 contract
+- **Dependencies:** PR 8, PR 13
+
+### PR 15: P3 Lane L gate (G5) and P3 R-key (G6)
+
+- **Description:** G5: scheduled draft delivers locally; duplicate key identical; mismatch 409.
+  G6: dual-target for P3 endpoints, **not run** without the key.
+- **Files/components affected:** `reference/fixtures/`
+- **Dependencies:** PR 14
+
+### PR 16: `amk-dns` + `amk-mcp` + `reply-extract`
+
+- **Description:** Leaf crates. Fan-out (ceiling 2, then the third). Each has its own derived
+  contract and `amk/p5/…` or parked-parity branch. MCP Gate is later (connectors). Reply extract
+  may stay degraded (`extracted_*` = full body) until the Talon port exists.
+- **Files/components affected:** `crates/amk-dns/**`, `crates/amk-mcp/**`, `crates/reply-extract/**`
+- **Dependencies:** PR 12, PR 13
+
+### PR 17: P4 events surface + G7/G8
+
+- **Description:** WS hub, metrics, opt-in spam events replace `received`. G7 localhost svix + WS.
+  G8 R-key **not run** without the key.
+- **Files/components affected:** `crates/amk-http/**` event mounts, `crates/amk-events/**`
+- **Dependencies:** PR 12, PR 15
+
+### PR 18: P5 domains + G9/G10
+
+- **Description:** Domain CRUD, DNS verify, DKIM keygen/import, `feedback_enabled`. G9: types vs
+  `C1-domain-shape.txt`. G10: one real domain + bounce — **not run** without R-phys. D1 still
+  blocks probing production domains.
+- **Files/components affected:** per a reviewed domain contract
+- **Dependencies:** PR 16, PR 17
+
+### PR 19: Import mapping table (P6, before any import code)
+
+- **Description:** Write and review the Stalwart→AgentMail mapping table from PLAN.md. Any
+  “keep Stalwart’s version” row is a defect. No `amk-import` code in this PR.
+- **Files/components affected:** `.claude/contracts/amk-import.md`
+- **Dependencies:** PR 18
+
+### PR 20: `amk-import` + P6 cutover (G11)
+
+- **Description:** LAST. Translation boundary only. Deletable after cutover. G11: restore drill,
+  `.64` swap, Stalwart 0, dns-health. R-phys. Not started before PR 19 is reviewed.
+- **Files/components affected:** `crates/amk-import/**`, `deploy/k3s/**`
+- **Dependencies:** PR 19
