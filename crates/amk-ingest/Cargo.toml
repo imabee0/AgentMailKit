@@ -1,0 +1,24 @@
+[package]
+name = "amk-ingest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Inbound SMTP state machine and persist. smtp-proto/mail-parser/mail-auth stay inside this crate."
+
+[dependencies]
+amk-types = { path = "../amk-types" }
+amk-core = { path = "../amk-core" }
+amk-store = { path = "../amk-store" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+sqlx.workspace = true
+chrono.workspace = true
+mail-parser.workspace = true
+mail-auth.workspace = true
+smtp-proto.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }
+uuid.workspace = true
