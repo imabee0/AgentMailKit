@@ -180,6 +180,26 @@ pub async fn get(
     row.as_ref().map(row_to_inbox).transpose()
 }
 
+/// Lookup by the `inbox_id` primary key alone. RCPT has only the address;
+/// `inbox_id` is the PK (`0003_inboxes.sql`). Same row as [`get`].
+pub async fn get_by_inbox_id(
+    pool: &PgPool,
+    inbox_id: &InboxId,
+) -> Result<Option<Inbox>, StoreError> {
+    if has_forbidden_byte(inbox_id.as_str()) {
+        return Ok(None);
+    }
+    let normalized = inbox_id.normalized();
+    let row = sqlx::query(
+        "SELECT inbox_id, organization_id, pod_id, client_id, display_name, metadata, created_at, updated_at \
+         FROM inboxes WHERE inbox_id = $1",
+    )
+    .bind(normalized.as_str())
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_inbox).transpose()
+}
+
 /// One list request, already resolved to a concrete direction and a decoded (and scope-validated)
 /// cursor — same role as [`crate::messages::ListMessagesQuery`].
 pub struct ListInboxesQuery {

@@ -2,7 +2,7 @@
 //!
 //! `mail-parser` / `mail-auth` types stay inside this module. Persist uses only
 //! [`amk_store::messages::NewMessage`] and [`amk_store::threads::NewThread`].
-//! `threads::record_member` does not exist; join tests assert GET-by-id `thread_id`.
+//! A join calls [`amk_store::threads::record_member`].
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -13,7 +13,7 @@ use amk_core::threading::{
     InMemoryThreadIndex, ReferenceChainThreading, ThreadAssigner, ThreadAssignment, ThreadCandidate,
 };
 use amk_store::messages::{self, NewMessage};
-use amk_store::threads::{self, NewThread};
+use amk_store::threads::{self, NewThread, ThreadMember};
 use amk_store::StoreError;
 use amk_types::ids::{AttachmentId, InboxId, MessageId, OrganizationId, PodId, ThreadId};
 use amk_types::message::labels;
@@ -390,12 +390,12 @@ pub async fn accept(
             thread_id,
             labels: msg_labels,
             timestamp,
-            from,
-            to,
+            from: from.clone(),
+            to: to.clone(),
             cc,
             bcc,
             subject,
-            preview,
+            preview: preview.clone(),
             attachments,
             in_reply_to,
             references,
@@ -412,7 +412,25 @@ pub async fn accept(
     .await;
 
     match insert_result {
-        Ok(()) => Ok(Some(Accepted { message_id, thread_id, inbox_id: req.dest.inbox_id.clone() })),
+        Ok(()) => {
+            if !new_thread {
+                threads::record_member(
+                    pool,
+                    thread_id,
+                    ThreadMember {
+                        last_message_id: message_id.clone(),
+                        timestamp,
+                        sent_timestamp: None,
+                        sender: from,
+                        recipients: to,
+                        preview,
+                        size,
+                    },
+                )
+                .await?;
+            }
+            Ok(Some(Accepted { message_id, thread_id, inbox_id: req.dest.inbox_id.clone() }))
+        }
         Err(e) if is_unique_violation(&e) => Err(reject("Duplicate Message-ID")),
         Err(e) => Err(e.into()),
     }

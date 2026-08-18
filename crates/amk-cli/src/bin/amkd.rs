@@ -2,7 +2,7 @@
 //! `.claude/contracts/amk-bins.md`. Deliberately thin, matching `amk.rs`'s own shape: every real
 //! decision lives in `amk_cli`'s library half.
 
-use amk_cli::args::{self, AmkdCommand};
+use amk_cli::args::{self, AmkdCommand, AmkdRole};
 use amk_cli::{config, exit, server};
 
 #[tokio::main]
@@ -39,7 +39,14 @@ async fn main() {
     let bind = config::bind_address();
     let app_config = config::app_config();
 
-    if let Err(e) = server::serve_api(&url, &bind, app_config).await {
+    let result = match role {
+        AmkdRole::Api => server::serve_api(&url, &bind, app_config).await,
+        AmkdRole::Smtpd => server::serve_smtpd(&url, &bind, app_config).await,
+        AmkdRole::Worker | AmkdRole::All => {
+            unreachable!("not_yet_implemented already rejected worker/all")
+        }
+    };
+    if let Err(e) = result {
         eprintln!("amkd: {e}");
         std::process::exit(exit::FAILURE);
     }

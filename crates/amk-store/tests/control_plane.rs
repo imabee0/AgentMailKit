@@ -2291,3 +2291,105 @@ async fn migration_status_reports_a_current_schema_with_a_nonzero_count() {
     );
     assert!(status.is_current());
 }
+
+// ---- get_by_inbox_id (SMTP RCPT: address only; inbox_id is the PK) -----------------------------
+
+/// Same row `get` would return, without an organization or pod pin.
+#[tokio::test]
+async fn get_by_inbox_id_returns_the_same_row_as_scoped_get() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+
+    let scoped = inboxes::get(&pool, &org, Some(pod), &inbox)
+        .await
+        .unwrap()
+        .expect("scoped get");
+    let by_pk = inboxes::get_by_inbox_id(&pool, &inbox)
+        .await
+        .unwrap()
+        .expect("pk get");
+    assert_eq!(by_pk.inbox_id, scoped.inbox_id);
+    assert_eq!(by_pk.organization_id, scoped.organization_id);
+    assert_eq!(by_pk.pod_id, scoped.pod_id);
+    assert_eq!(by_pk.email, scoped.email);
+}
+
+/// The whole point of this function: RCPT has only the address. `get` from another org is
+/// None; the PK lookup is still Some.
+#[tokio::test]
+async fn get_by_inbox_id_is_the_primary_key_and_does_not_need_an_organization() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org_a, _pod_a, inbox_a) = support::seed_org_pod_inbox(&pool).await;
+    let org_b = support::seed_org(&pool).await;
+
+    assert!(
+        inboxes::get(&pool, &org_b, None, &inbox_a)
+            .await
+            .unwrap()
+            .is_none(),
+        "scoped get from another org must stay None"
+    );
+    let found = inboxes::get_by_inbox_id(&pool, &inbox_a)
+        .await
+        .unwrap()
+        .expect("pk lookup must not require an organization");
+    assert_eq!(found.inbox_id, inbox_a);
+    assert_eq!(found.organization_id.as_ref(), Some(&org_a));
+}
+
+#[tokio::test]
+async fn get_by_inbox_id_normalizes_a_mixed_case_inbox_id() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, _) = support::seed_org_pod_inbox(&pool).await;
+    let mixed = format!("MixedCase-{}@Example.Test", support::unique_suffix());
+    let created = inboxes::create(
+        &pool,
+        NewInbox {
+            inbox_id: InboxId::new(mixed.clone()),
+            organization_id: org,
+            pod_id: pod,
+            client_id: None,
+            display_name: None,
+            metadata: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let found = inboxes::get_by_inbox_id(&pool, &InboxId::new(mixed.to_uppercase()))
+        .await
+        .unwrap()
+        .expect("mixed-case lookup must fold to the stored row");
+    assert_eq!(found.inbox_id, created.inbox_id);
+}
+
+#[tokio::test]
+async fn get_by_inbox_id_unknown_is_none() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let missing = InboxId::new(format!("missing-{}@example.test", support::unique_suffix()));
+    assert!(inboxes::get_by_inbox_id(&pool, &missing)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn get_by_inbox_id_with_a_nul_byte_is_not_found_not_a_database_error() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let hostile = InboxId::new("abc\0def@example.test");
+    let result = inboxes::get_by_inbox_id(&pool, &hostile).await;
+    assert!(
+        matches!(result, Ok(None)),
+        "a NUL-bearing inbox_id must mask as not-found, not error: {result:?}"
+    );
+}

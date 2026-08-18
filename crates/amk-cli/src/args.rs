@@ -73,14 +73,16 @@ USAGE:
 
 ROLES:
     api      Serve the HTTP control-plane API.
-    smtpd    Mail ingest -- not implemented yet (amk-ingest/amk-outbound, plan phase P2).
+    smtpd    Serve inbound SMTP ingest (amk-ingest).
     worker   Background job processing -- not implemented yet (amk-jobs).
     all      Every role above -- not implemented yet (requires all of the above).
 
     -h, --help  Print this message and exit.
 
 `--role api` reads AMK_DATABASE_URL (required), AMK_BIND (default 127.0.0.1:8080),
-AMK_PRIMARY_DOMAIN and AMK_PRODUCT_NAME (both optional) from the environment.";
+AMK_PRIMARY_DOMAIN and AMK_PRODUCT_NAME (both optional) from the environment.
+`--role smtpd` reads AMK_DATABASE_URL (required), AMK_BIND (SMTP listen address;
+default 127.0.0.1:8080), and AMK_PRIMARY_DOMAIN (required; there is no default).";
 
 /// The role named by a well-formed `--role <ROLE>` — every value this parser recognises, whether
 /// or not that role is actually runnable yet. Whether it is runnable is `crate::server`'s call,

@@ -19,6 +19,7 @@ path = "src/bin/amkd.rs"
 amk-types = { path = "../amk-types" }
 amk-store = { path = "../amk-store" }
 amk-http = { path = "../amk-http" }
+amk-ingest = { path = "../amk-ingest" }
 # `PgConnectOptions` for `amk doctor`'s own parse-before-connect (see the dispatch contract's own
 # reasoning: `PgPoolOptions::connect` defers the parse, so a malformed DSN and an unreachable
 # database are indistinguishable without doing this parse ourselves), and `sqlx::Error`'s variants

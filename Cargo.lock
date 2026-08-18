@@ -19,6 +19,7 @@ name = "amk-cli"
 version = "0.1.0"
 dependencies = [
  "amk-http",
+ "amk-ingest",
  "amk-store",
  "amk-types",
  "axum",
