@@ -3,7 +3,7 @@
 Where the last session stopped, so a fresh one — on this workstation or in Claude's cloud sandbox —
 can continue without re-deriving it. Update this file in the commit that invalidates it.
 
-**Last updated:** 2026-08-17, after the P2 message/thread surface landed.
+**Last updated:** 2026-08-18, after `amk-outbound` send HTTP and `amk-ingest` SMTP persist landed.
 
 Grok now has a project harness on this tree: `AGENTS.md` (identity + commands, pointer here and
 to `docs/PLAN.md` / `docs/OPERATING-RULES.md`), `.grok/config.toml` in ask-mode with the deny
@@ -84,9 +84,11 @@ Both defects that had schemathesis red are fixed and one is merged: the extracto
 `CURRENT_PHASE=P0` and **stays there until the conformance diff runs** — local green is not the
 gate, and advancing on Lane L alone is exactly the "gate its own evidence contradicts" trap.
 
-**P2: the message/thread surface is done.** Reads, label mutations and deletes at every mount —
-41 router operations, reconciling clean against `openapi.json`. `amk-ingest` and `amk-outbound` are
-not started. See "P2 progress" below.
+**P2: message/thread reads plus send + ingest.** Router is 45 operations (`derive-implemented-paths`
++4 send/reply/reply-all/forward). `amk-outbound` SMTP Transport and the four HTTP POSTs are on
+`main` (three-lens CLEAN @ `8c5d3d7`). `amk-ingest` SMTP state machine + persist is on `main`
+(three-lens CLEAN @ `45ad7ae`). `amkd --role smtpd` is still rejected. P1 Lane R conformance is
+still **not run**. `CURRENT_PHASE` stays P0. See "P2 progress" below.
 
 ## The extractor-rejection work item: DONE and MERGED (`main` @ 0d0631c), still ungated
 
@@ -235,8 +237,8 @@ api.agentmail.to. That is R-key work — see item 1 below.
 Contracts: `.claude/contracts/amk-http-message-thread-reads.md`,
 `.claude/contracts/amk-store-mail-mutations.md`.
 
-**Landed (unmerged): the whole message/thread read+mutate surface.** Router reconciles clean at
-**41 operations** (was 25 at P1):
+**Landed: the whole message/thread read+mutate surface**, then the four send POSTs. Router
+reconciles clean at **45 operations** (was 25 at P1, 41 before send):
 
 ```
 GET                     /v0/inboxes/{inbox_id}/messages
@@ -307,36 +309,15 @@ reproduced**, not as explained away.
 
 ### Where P2 goes next
 
-**`amk-outbound` is real but not yet wired.** Contract: `.claude/contracts/amk-outbound.md`.
-Landed and mutation-verified:
+**`amk-outbound` send path is on `main`** (three-lens CLEAN @ `8c5d3d7`). SMTP `Transport`
+(direct-to-MX + smarthost), `record_member`, four inbox POSTs. Production `AppState` has an empty
+Keyring (fail closed). Tests use `RecordingTransport`. No real mail.
 
-- `signing::Keyring` — DKIM signing that **fails closed**: a domain with no key is
-  `NoSigningKey`, never an unsigned send. Accepts DER in **either PKCS#8 or PKCS#1**, which the
-  test key forced: `openssl genpkey -outform DER` produced PKCS#1, `from_pkcs8_der` returned
-  `InvalidEncoding` on that exact 1191-byte file and `from_der` accepted it. PEM is still refused.
-  Holds DER bytes rather than a parsed `RsaKey` because `DkimSigner::from_key` takes its key by
-  value and `RsaKey` is not `Clone`; validation still runs at load. `Debug` is hand-written so key
-  material cannot reach a log line, with a test that asserts it.
-- `assemble::check_headers` — refuses a caller copy of any envelope-owned header, and CR/LF/NUL
-  anywhere in a name or value. Refused, not stripped.
-- `build::build_signed` — MIME assembly, bracketed linkage headers (register C3 / fixture 21 on the
-  send side), and the envelope.
-- `build::reply_all_recipients` — **`[INFERRED]`**, marked in the code. No fixture captures the
-  reference's derivation.
+**`amk-ingest` is on `main`** (three-lens CLEAN @ `45ad7ae`). SMTP state machine + `accept`
+persist. `amkd --role smtpd` is still rejected. No HTTP ingest route.
 
-**A real defect this caught:** `mail_builder`'s `.bcc()` writes a `Bcc:` header *into the message*,
-disclosing every blind recipient to every other recipient. Found by a test asserting the header was
-absent, not by reading the API. `bcc` now reaches the envelope and nothing else, and both halves are
-asserted — dropping it from delivery is wrong in a way the header assertion alone would not catch.
-
-**Not yet done in `amk-outbound`:** the SMTP delivery implementation (`mail-send`; only the
-`Transport` trait and `RecordingTransport` exist), and the four HTTP endpoints
-(`POST …/messages/send`, `…/reply`, `…/reply-all`, `…/forward`). Wiring those needs `AppState` to
-carry a `Keyring` and a `Transport`, plus threading through `amk-core::threading` and persistence
-through `amk-store::messages::insert` — all Lane L work, none of it started.
-
-After that, in write order: `amk-ingest`, then `amk-events` + `amk-jobs`, then `amk-dns` +
-`amk-mcp` + `reply-extract`, then `amk-import` (P6 only).
+Next in write order: `amk-events` + `amk-jobs`, then `amk-dns` + `amk-mcp` + `reply-extract`,
+then `amk-import` (P6 only). P2 Lane L gate (G2) needs fixture 28 after `smtpd` is wired.
 
 **P2's gate has an R-phys half no key substitutes for**: mail injected from the OVH box via
 `/root/amksend.py` appearing with correct threading over a 3-message exchange, and an SDK send to a
