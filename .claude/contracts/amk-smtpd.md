@@ -32,6 +32,9 @@ $ rg -n "smtpd" crates/amk-cli/tests/process.rs
 ## The evidence
 
 `[SPEC:.claude/contracts/amk-ingest.md]` — session, RCPT two-check, persist, 09b, C3.
+`[SPEC:reference/fixtures/09b-unauthenticated-variant.txt]`
+`[SPEC:reference/fixtures/16-threading-matrix/summary.txt]`
+`[SPEC:reference/fixtures/21-unbracketed-in-reply-to.txt]`
 `[SPEC:docs/PLAN.md]` P2 ingest daemon; `amkd --role api|smtpd|worker|all`; local-domain
 RCPT; greet-pause; `AMK_PRIMARY_DOMAIN` is the domain `POST /v0/inboxes` uses.
 `[SPEC:docs/execute-plan-v1.md]` PR 8: injected inbound + matching `thread_id`.
