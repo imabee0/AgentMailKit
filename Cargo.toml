@@ -7,6 +7,7 @@ members = [
     "crates/amk-http",
     "crates/amk-cli",
     "crates/amk-outbound",
+    "crates/amk-ingest",
 ]
 
 [workspace.package]
@@ -53,6 +54,8 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "
 mail-send = "=0.6.1"
 mail-builder = "=0.4.4"
 mail-auth = "=0.12.0"
+mail-parser = "=0.11.6"
+smtp-proto = "=0.2.3"
 
 axum = { version = "=0.8.9", features = ["ws"] }
 tower = "=0.5.3"
