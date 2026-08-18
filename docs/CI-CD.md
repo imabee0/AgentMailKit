@@ -57,47 +57,61 @@ verified none of the DB-backed integration tests.
 Those are reasonable in a pre-flight and disqualifying in a merge gate. A gate that passes because a
 tool was missing reports the same green as one that passed because the code was correct.
 
-### Three outcomes, because sandboxes are the normal case
-
-Much of this project's work happens in environments where `cargo-deny` is not installed and
-Postgres may not be running. Two outcomes cannot describe that honestly, so there are three:
+### Three outcomes, and two of them are failures
 
 | Exit | Status | Meaning |
 |---|---|---|
 | 0 | **PASS** | the step ran, and the code satisfied it |
 | 1 | **FAIL** | the step ran, and the code did not |
-| 3 | **NOT RUN** | the step *could not* run here — a tool or service is absent |
+| 3 | **DEPENDENCY MISSING** | the step could not run — **also a failure** |
 
-`NOT RUN` is only available when `AMK_PERMIT_NOT_RUN=1`, which **only `check.sh` sets**. CI never
-sets it, so in CI a missing prerequisite is a hard `FAIL`: every tool is meant to be present on a
-runner, and its absence is a broken environment, not a quirk to tolerate.
+Exit 3 exists only so the remedy printed is the right one — "provision this machine" rather than
+"fix your code". It is never a pass, in any environment, under any flag. There is no `INCOMPLETE`
+state and no escape-hatch variable; `check.sh` goes red if any step could not run.
 
-| Situation | old `check.sh` | now, locally | now, in CI |
-|---|---|---|---|
-| rustfmt missing | skipped, PASS | NOT RUN | **FAIL** |
-| clippy missing | skipped, PASS | NOT RUN | **FAIL** |
-| Postgres unreachable | partial suite, **PASS** | NOT RUN | **FAIL** |
-| cargo-deny missing | (no such check) | NOT RUN | **FAIL** |
+| Situation | old `check.sh` | now, everywhere |
+|---|---|---|
+| rustfmt missing | skipped, PASS | **FAIL** |
+| clippy missing | skipped, PASS | **FAIL** |
+| Postgres unreachable | partial suite, **PASS** | **FAIL** |
+| cargo-deny missing | (no such check) | **FAIL** |
 
-The critical property: **no step is ever dropped from the list to make a run green.** `check.sh`
-runs all eight every time, counts the outcomes, and ends with a summary naming anything that did
-not run:
+Being this strict is affordable because provisioning is solved rather than assumed. The project
+targets exactly two environments and `./scripts/bootstrap.sh` fully provisions both, so a missing
+dependency means bootstrap was not run or failed — which is worth a red run. The alternative is a
+green run that examined less than it appears to have, and this project has already shipped that
+defect once, when `check.sh` printed `PASS` with no Postgres.
 
 ```
 == check summary ==
-  ran and passed: fmt clippy fixtures test provenance hooks ledger
-  NOT RUN: audit
+  passed: ledger
+  DEPENDENCY MISSING: fmt fixtures test provenance
 
-check: INCOMPLETE — everything that could run passed, but the steps above did NOT run.
+check: FAIL — this machine is not provisioned, so the steps above did not run.
+Run ./scripts/bootstrap.sh and try again. A run that skipped checks is not a pass.
 ```
 
-It prints the word `PASS` **only** when all eight actually executed. `INCOMPLETE` exits 0
-deliberately: a non-zero exit would block the Stop hook on every turn in a sandbox, and Claude Code
-disables a Stop hook after 8 consecutive blocks — which would destroy the gate that does work. The
-banner carries the signal, not the exit code.
+### What the Claude sandbox actually has
 
-`check.sh` keeps the ergonomics too: it starts the database for you, and orders steps
-cheapest-first so a formatting slip costs seconds rather than a full compile.
+Verified against the published cloud-environment reference and confirmed on a live sandbox:
+
+| | Status |
+|---|---|
+| Ubuntu 24.04, running as root, `sudo` available | preinstalled |
+| Rust — `rustc`, `cargo`, `rustup` | preinstalled (so `rust-toolchain.toml` is honoured) |
+| Python 3.x with `pip` | preinstalled |
+| Node 20 / 21 / 22 under `/opt/nodeNN`, 22 on `PATH` | preinstalled |
+| **PostgreSQL 16** | **installed but NOT running**, and `initdb`/`pg_ctl` are **not on `PATH`** — they live under `/usr/lib/postgresql/16/bin`, so `psql` being present does not imply `initdb` is |
+| `git`, `jq`, `ripgrep` | preinstalled |
+| Docker client | present; the daemon is not running by default |
+| **`cargo-deny`** | **not preinstalled** — the only thing this project needs that isn't |
+
+Network access is **Trusted** by default, which reaches crates.io, PyPI and npm — so `bootstrap.sh`
+can install what's missing. At the **None** access level it cannot, and the checks then fail, which
+is the correct outcome rather than a reason to soften them.
+
+Whatever bootstrap installs is kept by the environment cache, so later sessions in the same
+environment start already provisioned and pay the `cargo-deny` build only once.
 
 ### Reproducing a CI failure
 

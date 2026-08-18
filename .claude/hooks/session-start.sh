@@ -18,7 +18,17 @@ fi
 
 cd "${CLAUDE_PROJECT_DIR:-$(dirname "$0")/../..}" || exit 0
 
-# Never block a session from starting. A failed bootstrap must degrade to "some steps report NOT
-# RUN", which is visible and recoverable, not to "the session will not open".
-./scripts/bootstrap.sh || echo "bootstrap: incomplete — ./scripts/check.sh will report what is NOT RUN"
+# bootstrap.sh exits non-zero when it could not provision. This hook still exits 0, so a session
+# always opens — a sandbox you cannot get into is worse than one you must fix. The failure is NOT
+# swallowed: bootstrap prints which steps are BLOCKED, and ./scripts/check.sh will FAIL on exactly
+# those, because scripts/verify.sh treats a missing dependency as a failure rather than a caveat.
+# The gate is check.sh, not this hook; this only tries to make check.sh able to pass.
+if ! ./scripts/bootstrap.sh; then
+  echo
+  echo "############################################################"
+  echo "bootstrap FAILED — this sandbox is not fully provisioned."
+  echo "./scripts/check.sh will FAIL on the BLOCKED steps above."
+  echo "That is deliberate: a check that cannot run is never a pass."
+  echo "############################################################"
+fi
 exit 0

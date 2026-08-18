@@ -17,28 +17,27 @@
 # The steps are identical in both. When CI fails on `verify:clippy`, you reproduce it here with
 # `./scripts/verify.sh clippy` — same command, same flags, same compiler (rust-toolchain.toml).
 #
-# SANDBOXES ARE THE NORMAL CASE, NOT THE EXCEPTION. Much of this project's work happens where
-# cargo-deny is not installed and Postgres may not be running. So no step is ever dropped from the
-# list to make the run green: a step whose prerequisite is missing reports NOT RUN, is counted, and
-# is named again in the final banner. The banner never reads a bare PASS unless every step
-# actually executed — because "it wasn't in the list" is precisely how a check gets missed.
+# A MISSING DEPENDENCY IS A FAILURE. There is no partial pass and no INCOMPLETE state. No step is
+# ever dropped from the list, and a step whose prerequisite is absent turns the whole run red.
+#
+# That is affordable because provisioning is solved rather than assumed: this project targets the
+# workstation and the Claude sandbox, and ./scripts/bootstrap.sh fully provisions both. So a
+# missing dependency means bootstrap was not run or failed — which is worth a red run, because the
+# alternative is a green run that quietly examined less than it appears to have examined. This
+# project has already shipped that defect once, when this script printed PASS with no Postgres.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 FAST=0
 [ "${1:-}" = "--fast" ] && FAST=1
 
-# Lets verify.sh distinguish "cannot run here" (exit 3) from "ran and failed" (exit 1). CI never
-# sets this, so a missing prerequisite there is a hard failure rather than a tolerated gap.
-export AMK_PERMIT_NOT_RUN=1
-
 # The DB-backed suite is most of amk-store's and amk-http's real coverage, so this script tries to
 # start the database rather than stepping around it. dev-db.sh is idempotent and needs no Docker.
-# If it cannot, `test` reports NOT RUN below — it is never silently omitted.
+# If it cannot, the `test` step FAILS the run — it is never silently omitted and never tolerated.
 if ! timeout 2 bash -c '(exec 3<>/dev/tcp/127.0.0.1/55432) 2>/dev/null'; then
   printf '== starting the dev database ==\n'
   ./scripts/dev-db.sh up >/dev/null 2>&1 \
-    || printf '\033[33mcheck: could not start Postgres — the test step will report NOT RUN\033[0m\n'
+    || printf '\033[31mcheck: could not start Postgres — the test step will FAIL\033[0m\n'
 fi
 
 # Order is deliberate: cheapest and most-likely-to-fail first, so a formatting slip costs seconds
@@ -49,35 +48,30 @@ else
   STEPS="fmt clippy fixtures test provenance hooks audit ledger"
 fi
 
-passed=""; failed=""; skipped=""
+passed=""; failed=""; missing=""
 for step in $STEPS; do
   ./scripts/verify.sh "$step"
   case $? in
     0) passed="$passed $step" ;;
-    3) skipped="$skipped $step" ;;
+    3) missing="$missing $step" ;;
     *) failed="$failed $step" ;;
   esac
 done
 
 printf '\n\033[1m== check summary ==\033[0m\n'
-printf '  ran and passed:%s\n' "${passed:- (none)}"
+printf '  passed:%s\n' "${passed:- (none)}"
 [ -n "$failed" ]  && printf '  \033[31mFAILED:%s\033[0m\n' "$failed"
-[ -n "$skipped" ] && printf '  \033[33mNOT RUN:%s\033[0m\n' "$skipped"
+[ -n "$missing" ] && printf '  \033[31mDEPENDENCY MISSING:%s\033[0m\n' "$missing"
+
+if [ -n "$missing" ]; then
+  printf '\n\033[31mcheck: FAIL\033[0m — this machine is not provisioned, so the steps above did not run.\n'
+  printf 'Run \033[1m./scripts/bootstrap.sh\033[0m and try again. A run that skipped checks is not a pass.\n'
+  exit 1
+fi
 
 if [ -n "$failed" ]; then
   printf '\n\033[31mcheck: FAIL\033[0m\n'
   exit 1
-fi
-
-if [ -n "$skipped" ]; then
-  # Deliberately NOT the word PASS, and deliberately still exit 0 — a non-zero exit here would
-  # block the Stop hook on every turn in a sandbox, and Claude Code disables a Stop hook after 8
-  # consecutive blocks, which would destroy the gate that does work. The banner carries the signal.
-  printf '\n\033[33mcheck: INCOMPLETE\033[0m — everything that could run passed, but the steps above did NOT run.\n'
-  printf 'This is not equivalent to CI. Install the missing prerequisite, or let CI cover it:\n'
-  printf '  audit -> cargo install --locked cargo-deny\n'
-  printf '  test  -> ./scripts/dev-db.sh up\n'
-  exit 0
 fi
 
 printf '\n\033[32mcheck: PASS\033[0m  (every step ran; CI remains the authoritative gate)\n'

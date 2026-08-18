@@ -10,9 +10,10 @@
 # defensible in a local pre-flight and disqualifying in a merge gate: a gate that passes because a
 # tool was missing is worse than no gate, because it reports the same green.
 #
-# So the steps live here and are STRICT — a missing tool is a failure, an unreachable database is a
-# failure — and check.sh becomes a thin wrapper that calls them. Same commands, same flags, same
-# exit semantics in both places; a CI failure reproduces locally by running the step it names.
+# So the steps live here and are STRICT, everywhere, with no permissive local mode: a missing tool
+# is a failure and an unreachable database is a failure, on a workstation exactly as in CI.
+# check.sh is a thin wrapper that calls them. Same commands, same flags, same exit semantics in
+# both places; a CI failure reproduces locally by running the step it names.
 #
 #   ./scripts/verify.sh <step> [step...]     run steps in order, stop at the first failure
 #   ./scripts/verify.sh --list               what steps exist
@@ -36,31 +37,40 @@ say()  { printf '\n\033[1m== verify:%s ==\033[0m\n' "$1"; }
 die()  { printf '\033[31mverify:%s: FAIL\033[0m — %s\n' "$STEP" "$1" >&2; exit 1; }
 ok()   { printf '\033[32mverify:%s: PASS\033[0m\n' "$STEP"; }
 
-# THREE outcomes, not two. This is the whole point of the file.
+# THREE outcomes, and TWO of them are failures.
 #
-#   exit 0  PASS     the step ran and the code satisfied it
-#   exit 1  FAIL     the step ran and the code did not satisfy it
-#   exit 3  NOT RUN  the step could NOT run here — a tool or a service is absent
+#   exit 0  PASS               the step ran and the code satisfied it
+#   exit 1  FAIL               the step ran and the code did not satisfy it
+#   exit 3  DEPENDENCY MISSING the step could not run — and that is a FAILURE, not a caveat
 #
-# NOT RUN exists because most of this project's work happens in sandboxes where cargo-deny is not
-# installed and Postgres may not be running, and the failure this project has already had once is
-# a gate reporting green for work it never examined. A step that cannot run must be impossible to
-# mistake for one that passed, and equally impossible to just quietly drop from the list — dropping
-# it is how it gets missed.
+# Exit 3 exists only to separate "your code is wrong" from "this machine is not provisioned", so
+# the remedy printed is the right one. It is NEVER a pass, in any environment, under any flag.
 #
-# NOT RUN is only ever available when AMK_PERMIT_NOT_RUN=1, which ONLY scripts/check.sh sets.
-# CI never sets it, so in CI a missing prerequisite is a hard FAIL: every tool is meant to be
-# present there, and its absence is a broken runner, not an environment quirk to tolerate.
-notrun() {
-  if [ "${AMK_PERMIT_NOT_RUN:-0}" = "1" ]; then
-    printf '\033[33mverify:%s: NOT RUN\033[0m — %s\n' "$STEP" "$1" >&2
-    exit 3
-  fi
-  die "$1"
+# This is deliberate and was tightened after an earlier revision let a missing tool exit 0 with an
+# INCOMPLETE banner. That is the same defect this project already shipped once: `check.sh` used to
+# print PASS with no Postgres, having run none of the DB-backed suite. A banner is not a gate. If a
+# dependency is absent the run must go red, because the alternative is a green run that examined
+# less than it appears to have examined.
+#
+# It is safe to be this strict because provisioning is solved rather than assumed. This project
+# targets exactly two environments, and `./scripts/bootstrap.sh` fully provisions both:
+#
+#   the workstation      already carries the toolchain
+#   the Claude sandbox   ships Rust, Python 3 + pip, Node 20/21/22 and PostgreSQL 16 preinstalled
+#                        (Postgres installed but NOT started), on Ubuntu 24.04 as root, with
+#                        `Trusted` network access reaching crates.io, PyPI and npm. cargo-deny is
+#                        the only thing this project needs that is not preinstalled, and bootstrap
+#                        installs it; the environment cache keeps it for later sessions.
+#
+# So "dependency missing" means bootstrap was not run or bootstrap failed. Both are worth a red run.
+dep_missing() {
+  printf '\033[31mverify:%s: DEPENDENCY MISSING\033[0m — %s\n' "$STEP" "$1" >&2
+  printf '  run \033[1m./scripts/bootstrap.sh\033[0m to provision this machine, then re-run.\n' >&2
+  exit 3
 }
 
 need() {
-  command -v "$1" >/dev/null 2>&1 || notrun "required tool '$1' is not installed. $2"
+  command -v "$1" >/dev/null 2>&1 || dep_missing "required tool '$1' is not installed. $2"
 }
 
 db_up() {
@@ -69,11 +79,11 @@ db_up() {
 
 require_db() {
   db_up && return 0
-  notrun "no Postgres at ${DB_HOST}:${DB_PORT}.
+  dep_missing "no Postgres at ${DB_HOST}:${DB_PORT}.
   local:  ./scripts/dev-db.sh up
   CI:     the 'postgres' service container failed to start — check the job's service logs
   Without it every amk-store and amk-http integration test would be skipped, so this step
-  refuses to run at all rather than run a fraction of itself and report success."
+  fails rather than run a fraction of itself and report success."
 }
 
 # ---------------------------------------------------------------------------- steps

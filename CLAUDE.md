@@ -36,11 +36,13 @@ Work runs either on the OVH-adjacent workstation or in Claude's cloud sandbox. T
 repo and nothing else, and several gates degrade **silently** there rather than failing:
 
 - ~~**`./scripts/check.sh` still reports PASS with no Postgres**~~ — **fixed 2026-08-18.**
-  `./scripts/verify.sh test` now hard-FAILS when 127.0.0.1:55432 does not answer, and `check.sh`
-  starts the database itself. A run without the database can no longer report PASS. `dev-db.sh`
-  no longer needs Docker. With no Postgres the `test` step reports **NOT RUN** — it is never
-  dropped from the list, and `check.sh` ends with `INCOMPLETE` naming it, so a sandbox run can
-  never be mistaken for a full one.
+  A missing dependency is now a **FAILURE** everywhere, with no tolerated state and no escape
+  variable: `verify.sh` exits 3 (`DEPENDENCY MISSING`) and `check.sh` goes red. Run
+  `./scripts/bootstrap.sh` first — it provisions both target environments and itself exits
+  non-zero if it could not. In the sandbox the `SessionStart` hook runs it automatically.
+  Postgres 16 IS preinstalled here but is **not running**, and `initdb`/`pg_ctl` are not on
+  `PATH` (`/usr/lib/postgresql/16/bin`); bootstrap handles both. `cargo-deny` is the only tool
+  this project needs that the sandbox does not preinstall.
 - **`sdxd` and `secd` are LAN-only.** No AgentMail key, so the conformance harness, `p1-gate.sh`
   and every live probe are unavailable. Do not fabricate their output.
 - **No OVH box, no k3s cluster, no live AgentMail account.** P6 and every fixture-capturing probe

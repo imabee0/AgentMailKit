@@ -1,125 +1,180 @@
 #!/usr/bin/env bash
-# Provision a working environment for this repository. Idempotent; safe to re-run.
+# Provision a machine so that every check in ./scripts/check.sh can actually run. Idempotent.
 #
-#   ./scripts/bootstrap.sh          provision everything, then report what is runnable
-#   ./scripts/bootstrap.sh --check  report only, change nothing
+#   ./scripts/bootstrap.sh          provision, then verify; EXITS NON-ZERO if anything is missing
+#   ./scripts/bootstrap.sh --check  verify only, change nothing (same exit semantics)
 #
-# WHY THIS IS TRACKED IN THE REPOSITORY. Most work on this project happens in an ephemeral sandbox
-# that starts with the repo and whatever the base image happens to carry. Anything a check needs in
-# order to run must therefore be *in the repo* — a script that installs it — rather than assumed to
-# be lying around. Otherwise `./scripts/check.sh` reports NOT RUN for half its steps, and a step
-# that is chronically NOT RUN is a step nobody is really running.
+# TWO TARGET ENVIRONMENTS, and nothing else is assumed:
 #
-# NOT RUN (scripts/verify.sh) makes a missing prerequisite visible. This script makes it rare.
-# The two are complements: this closes the gap, that one proves the gap is closed.
+#   1. The workstation. Already carries the toolchain; this script is then close to a no-op.
 #
-# Deliberately NOT used by CI. GitHub Actions provisions through the mechanisms its runners are
-# built for — `services:` containers, setup-python, setup-node, a prebuilt cargo-deny — which are
-# faster and cacheable there. This script is for humans and sandboxes.
+#   2. The Claude sandbox (Anthropic-hosted cloud environment). Ubuntu 24.04, running as root,
+#      with sudo. Preinstalled and confirmed against the published environment reference:
+#        Rust      rustc + cargo (rustup present, so rust-toolchain.toml is honoured)
+#        Python    3.x with pip
+#        Node      20, 21 and 22 under /opt/nodeNN, with 22 on PATH
+#        Postgres  16 — INSTALLED BUT NOT RUNNING, and its server binaries (initdb, pg_ctl) live
+#                  under /usr/lib/postgresql/16/bin, which is NOT on PATH. `psql` being present
+#                  therefore does not imply `initdb` is.
+#        Utilities git, jq, ripgrep
+#      Network access is `Trusted` by default, which reaches crates.io, PyPI and npm. Whatever this
+#      script installs is kept by the environment cache, so later sessions start already provisioned.
+#
+#      NOT preinstalled, and the only such thing this project needs: cargo-deny.
+#
+# WHY THIS IS TRACKED IN THE REPOSITORY. The sandbox starts with this repo and whatever the base
+# image happens to carry. Anything a check needs must therefore ship AS A SCRIPT IN THE REPO rather
+# than be assumed present — otherwise the checks that cannot run become the checks nobody runs.
+#
+# WHY IT EXITS NON-ZERO. scripts/verify.sh treats a missing dependency as a FAILURE, never as a
+# tolerated gap, so this script must be able to say plainly that it did not finish. A bootstrap
+# that prints a warning and exits 0 hands the caller a false green, which is the same defect as a
+# gate that passes having examined nothing.
+#
+# CI does NOT use this script. GitHub Actions provisions through mechanisms its runners are built
+# for — `services:` containers, setup-python, setup-node, a prebuilt cargo-deny — which are faster
+# and cacheable there. This is for the workstation and the sandbox.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
 CHECK_ONLY=0
 [ "${1:-}" = "--check" ] && CHECK_ONLY=1
 
-note() { printf '\033[1m==\033[0m %s\n' "$1"; }
+note() { printf '\n\033[1m==\033[0m %s\n' "$1"; }
 have() { command -v "$1" >/dev/null 2>&1; }
-skip() { printf '   already present: %s\n' "$1"; }
+good() { printf '   \033[32mok\033[0m       %s\n' "$1"; }
+bad()  { printf '   \033[31mMISSING\033[0m  %s\n' "$1"; }
+info() { printf '            %s\n' "$1"; }
 
 # ---------------------------------------------------------------- Rust
-# rustup reads rust-toolchain.toml on its own, so simply invoking cargo installs and selects the
-# pinned toolchain and its components. Nothing here names a version — one declaration, one place.
-note "Rust toolchain (pinned by rust-toolchain.toml)"
+# rustup reads rust-toolchain.toml itself, so invoking cargo installs and selects the pinned
+# toolchain and its components. Nothing here names a version — one declaration, one place.
+note "Rust toolchain (version pinned by rust-toolchain.toml)"
 if have rustup; then
   [ "$CHECK_ONLY" -eq 1 ] || rustup show active-toolchain >/dev/null 2>&1 || rustup toolchain install
-  have cargo && cargo --version | sed 's/^/   /'
+  good "$(cargo --version 2>/dev/null || echo 'cargo present')"
+elif have cargo; then
+  good "$(cargo --version)"
+  info "no rustup, so rust-toolchain.toml is NOT honoured — the compiler may differ from CI"
 else
-  printf '   \033[33mrustup MISSING\033[0m — install from https://rustup.rs\n'
+  bad "rustc/cargo — preinstalled in the Claude sandbox, so this is unexpected"
+  info "workstation: install from https://rustup.rs"
 fi
 
 # ---------------------------------------------------------------- cargo-deny
-# The one tool that is genuinely absent from a stock image, and therefore the step most likely to
-# sit at NOT RUN forever. Installed from a prebuilt binary when possible; `cargo install` compiles
-# a large tree and takes minutes.
+# The one tool this project needs that no target environment preinstalls, and therefore the single
+# most likely cause of a red `audit` step.
 note "cargo-deny (supply-chain gate)"
 if have cargo-deny; then
-  skip "$(cargo-deny --version 2>/dev/null)"
+  good "$(cargo-deny --version 2>/dev/null)"
 elif [ "$CHECK_ONLY" -eq 1 ]; then
-  printf '   \033[33mMISSING\033[0m — `verify.sh audit` will report NOT RUN\n'
+  bad "cargo-deny"
 elif have cargo-binstall; then
-  cargo binstall --no-confirm cargo-deny || printf '   \033[33minstall failed\033[0m\n'
+  info "installing via cargo-binstall (prebuilt)"
+  cargo binstall --no-confirm cargo-deny >/dev/null 2>&1 && good "installed" || bad "install failed"
 else
-  printf '   installing (compiles from source; several minutes, once per container)\n'
-  cargo install --locked cargo-deny || printf '   \033[33minstall failed\033[0m\n'
+  # Compiles a large tree the first time. The sandbox's environment cache keeps the result, so
+  # later sessions in the same environment skip this entirely.
+  info "installing via cargo install — several minutes on a cold environment, cached afterwards"
+  cargo install --locked cargo-deny >/dev/null 2>&1 && good "installed" || bad "install failed"
 fi
 
 # ---------------------------------------------------------------- Postgres
-# Debian hides the SERVER binaries under /usr/lib/postgresql/<v>/bin while putting only the client
-# on PATH, so `psql` present does not imply `initdb` present. scripts/dev-db.sh already searches
-# those directories; this puts them on PATH too, so the failure mode is not "initdb: not found".
-note "Postgres"
-PGBIN=$(ls -d /usr/lib/postgresql/*/bin /usr/pgsql-*/bin 2>/dev/null | sort -Vr | head -1)
-if have initdb; then
-  skip "initdb on PATH"
-elif [ -n "$PGBIN" ]; then
-  printf '   server binaries at %s (not on PATH)\n' "$PGBIN"
-  export PATH="$PATH:$PGBIN"
-  # Persist for the rest of a Claude Code session when the hook runs us.
-  if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-    printf 'export PATH="$PATH:%s"\n' "$PGBIN" >> "$CLAUDE_ENV_FILE"
-  fi
+# Ubuntu ships only the CLIENT on PATH; the SERVER binaries sit under a versioned directory. In the
+# Claude sandbox Postgres 16 is installed but not started, so both halves matter here.
+note "Postgres (server binaries and a running cluster on 55432)"
+PGBIN=""
+if have initdb && have pg_ctl; then
+  good "initdb/pg_ctl on PATH"
 else
-  printf '   \033[33mno Postgres server binaries\033[0m — apt-get install postgresql-16 (or any 16+)\n'
+  PGBIN=$(ls -d /usr/lib/postgresql/*/bin /usr/pgsql-*/bin \
+                /opt/homebrew/opt/postgresql*/bin /usr/local/opt/postgresql*/bin 2>/dev/null \
+          | sort -Vr | head -1)
+  if [ -n "$PGBIN" ] && [ -x "$PGBIN/initdb" ]; then
+    export PATH="$PATH:$PGBIN"
+    good "server binaries at $PGBIN (added to PATH)"
+    # Persist for the rest of a Claude Code session when the SessionStart hook runs us.
+    [ -n "${CLAUDE_ENV_FILE:-}" ] && printf 'export PATH="$PATH:%s"\n' "$PGBIN" >> "$CLAUDE_ENV_FILE"
+  else
+    bad "Postgres server binaries (initdb/pg_ctl)"
+    info "sandbox: apt-get update && apt-get install -y postgresql-16"
+  fi
 fi
 
 if [ "$CHECK_ONLY" -eq 0 ]; then
   if timeout 2 bash -c '(exec 3<>/dev/tcp/127.0.0.1/55432) 2>/dev/null'; then
-    skip "dev database already answering on 55432"
+    good "cluster already answering on 55432"
   else
-    printf '   starting the dev cluster\n'
-    ./scripts/dev-db.sh up >/dev/null 2>&1 \
-      || printf '   \033[33mcould not start it\033[0m — `verify.sh test` will report NOT RUN\n'
+    info "starting the dev cluster"
+    # dev-db.sh drives initdb/pg_ctl directly rather than `service postgresql start`, so it lands
+    # on this project's own port/role/database instead of the distribution default on 5432.
+    ./scripts/dev-db.sh up >/dev/null 2>&1 && good "started" || bad "could not start the cluster"
   fi
 fi
 
 # ---------------------------------------------------------------- conformance harness
-# Both virtualenvs and the Node SDK, all version-pinned. p1-gate.sh creates and syncs these itself,
-# but doing it here means the FIRST gate run is not also the run that pays for the installs.
-note "conformance harness (pinned SDKs and schemathesis)"
-if [ "$CHECK_ONLY" -eq 1 ]; then
-  [ -x .venv-gate/bin/python ]        && skip ".venv-gate"        || printf '   .venv-gate absent\n'
-  [ -x .venv-schemathesis/bin/python ] && skip ".venv-schemathesis" || printf '   .venv-schemathesis absent\n'
-  [ -d conformance/node_modules ]     && skip "conformance/node_modules" || printf '   node_modules absent\n'
-elif have python3; then
+note "conformance harness (pinned SDKs, schemathesis)"
+if ! have python3; then
+  bad "python3 — preinstalled in the Claude sandbox, so this is unexpected"
+elif [ "$CHECK_ONLY" -eq 1 ]; then
+  [ -x .venv-gate/bin/python ]         && good ".venv-gate"         || bad ".venv-gate"
+  [ -x .venv-schemathesis/bin/python ] && good ".venv-schemathesis" || bad ".venv-schemathesis"
+else
   [ -x .venv-gate/bin/python ]         || python3 -m venv .venv-gate
   [ -x .venv-schemathesis/bin/python ] || python3 -m venv .venv-schemathesis
-  # Sync every run rather than only on creation — a venv that exists but is stale is the bug that
-  # made sdk_smoke.py fail with ModuleNotFoundError as though the SDK were broken (2026-08-18).
+  # Synced every run, not only on creation: a venv that exists but is stale is the bug that made
+  # sdk_smoke.py fail with ModuleNotFoundError as though the SDK itself were broken (2026-08-18).
   .venv-gate/bin/pip install -q --disable-pip-version-check -r conformance/requirements-gate.txt \
-    || printf '   \033[33mpip install failed (offline?)\033[0m\n'
+    && good ".venv-gate synced" || bad ".venv-gate (pip failed — network access set to None?)"
   .venv-schemathesis/bin/pip install -q --disable-pip-version-check -r conformance/requirements-schemathesis.txt \
-    || printf '   \033[33mpip install failed (offline?)\033[0m\n'
+    && good ".venv-schemathesis synced" || bad ".venv-schemathesis (pip failed)"
 fi
 
-if [ "$CHECK_ONLY" -eq 0 ] && have npm; then
-  # `npm ci` rather than `npm install`: scripts/plan-ledger.sh's p1-gate-sdk-smoke asserts the
-  # EXACT official SDK version in the gate transcript, so the lockfile is the contract and a
-  # resolver free to drift would quietly break that obligation. Determinism beats warm-cache speed.
-  ( cd conformance && npm ci --silent ) || printf '   \033[33mnpm ci failed (offline?)\033[0m\n'
+if ! have npm; then
+  bad "npm — Node 22 is preinstalled at /opt/node22 in the Claude sandbox"
+elif [ "$CHECK_ONLY" -eq 1 ]; then
+  [ -d conformance/node_modules ] && good "conformance/node_modules" || bad "conformance/node_modules"
+else
+  # `npm ci`, not `npm install`: plan-ledger.sh's p1-gate-sdk-smoke asserts the EXACT official SDK
+  # version in the gate transcript, so the lockfile is the contract and a resolver free to drift
+  # would quietly break that obligation. Determinism beats a warm cache here.
+  ( cd conformance && npm ci --silent ) >/dev/null 2>&1 \
+    && good "conformance/node_modules installed" || bad "npm ci failed"
 fi
 
-# ---------------------------------------------------------------- what can actually run now
-note "what ./scripts/check.sh can run here"
-report() {
-  if eval "$2" >/dev/null 2>&1; then printf '   \033[32mready\033[0m    %s\n' "$1"
-  else                               printf '   \033[33mNOT RUN\033[0m  %s — %s\n' "$1" "$3"; fi
+# ---------------------------------------------------------------- verdict
+# Re-derived from the machine, never from what the steps above believe they did. An install that
+# reported success and left nothing behind must still come out MISSING here.
+note "can ./scripts/check.sh run every step?"
+gaps=0
+req() {
+  if eval "$2" >/dev/null 2>&1; then printf '   \033[32mready\033[0m    %-12s %s\n' "$1" "$3"
+  else printf '   \033[31mBLOCKED\033[0m  %-12s %s\n' "$1" "$4"; gaps=$((gaps+1)); fi
 }
-report fmt        "command -v cargo"      "no cargo"
-report clippy     "command -v cargo"      "no cargo"
-report fixtures   "command -v cargo"      "no cargo"
-report test       "timeout 2 bash -c '(exec 3<>/dev/tcp/127.0.0.1/55432) 2>/dev/null'" "no database on 55432"
-report provenance "command -v cargo"      "no cargo"
-report hooks      "true"                  ""
-report audit      "command -v cargo-deny" "cargo-deny not installed"
-report ledger     "true"                  ""
-printf '\nRun \033[1m./scripts/check.sh\033[0m next. Anything still NOT RUN is covered by CI.\n'
+req fmt        "command -v cargo"       "cargo"        "no cargo"
+req clippy     "cargo clippy --version" "clippy"       "clippy component missing"
+req build      "command -v cargo"       "cargo"        "no cargo"
+req test       "timeout 2 bash -c '(exec 3<>/dev/tcp/127.0.0.1/55432) 2>/dev/null'" \
+                                        "database up"  "no Postgres on 55432"
+req fixtures   "command -v cargo"       "cargo"        "no cargo"
+req provenance "command -v cargo"       "cargo"        "no cargo"
+req hooks      "true"                   "no deps"      ""
+req audit      "command -v cargo-deny"  "cargo-deny"   "cargo-deny not installed"
+req ledger     "true"                   "no deps"      ""
+
+# The Lane L gate is heavier and is not part of check.sh; reported separately so its absence never
+# reads as a failure of the everyday loop.
+note "additionally, for ./scripts/verify.sh gate-lane-l"
+for t in psql node python3; do
+  have "$t" && good "$t" || bad "$t"
+done
+[ -d conformance/node_modules ] && good "conformance/node_modules" || bad "conformance/node_modules"
+
+if [ "$gaps" -gt 0 ]; then
+  printf '\n\033[31mbootstrap: INCOMPLETE\033[0m — %d step(s) cannot run. ./scripts/check.sh will FAIL, by design.\n' "$gaps"
+  printf 'Fix the BLOCKED lines above and re-run. A check that cannot run must never report a pass.\n'
+  exit 1
+fi
+
+printf '\n\033[32mbootstrap: READY\033[0m — every ./scripts/check.sh step can run here.\n'
+exit 0
