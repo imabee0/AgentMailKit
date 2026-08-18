@@ -1,0 +1,45 @@
+P2 Lane L (G2) transcript 2026-08-18
+main @ f5934d0 then smtpd. CURRENT_PHASE stays P0.
+
+== derive-implemented-paths ==
+45 operations on 26 path templates. Reconciliation clean.
++4 send operations mounted:
+  POST /v0/inboxes/{inbox_id}/messages/send
+  POST /v0/inboxes/{inbox_id}/messages/{message_id}/reply
+  POST /v0/inboxes/{inbox_id}/messages/{message_id}/reply-all
+  POST /v0/inboxes/{inbox_id}/messages/{message_id}/forward
+
+== cargo test -p amk-http --test send ==
+test result: ok. 10 passed
+
+== cargo test -p amk-cli --test amkd_serve_smtpd_process ==
+test amkd_role_smtpd_data_persists_and_reply_joins_thread ... ok
+  injected inbound + reply on amkd --role smtpd; GET-by-id thread_id matches parent
+
+== scripts/p1-gate.sh (2026-08-18, psql via docker exec shim; kv/agentmail granted) ==
+sdk_smoke.py exit: 0
+  28 checks, 0 failed  (agentmail==0.5.9)
+sdk_smoke.mjs exit: 0
+  26 checks, 0 failed  (agentmail@0.5.19)
+schemathesis exit: 0
+  Schemathesis v4.24.3
+  Operations: 45 selected / 130 total
+  Coverage / Fuzzing / Stateful: passed
+  4864 generated, 4864 passed
+dual_target.py exit: 1
+  19 requests, 16 compared, 3 skipped, 4 with structural diffs
+  (G1 / Lane R — not a G2 conjunct. Diffs: CAND newest pod/inbox carry client_id;
+   REF resolver missed inbox_id. Not THIRD RUN — CLEAN.)
+
+== official SDK send ==
+not a separate agentmail.inboxes.messages.send() script. HTTP send is
+crates/amk-http/tests/send.rs (10). Inbound join is amkd_serve_smtpd_process.
+
+== mutation (smtpd dispatch; scratch rm -rf) ==
+restore Smtpd => Some("not implemented") → killed cases 3–5 (no 220)
+delete local-domain RCPT → case 3 RCPT relay@gmail.com got 250 (expected 550)
+
+G2 Lane L tools from p1-gate: MET (schemathesis + both SDK smokes).
+G2 extra (SDK send as official client): not separately captured.
+G1 Lane R: NOT MET (dual_target exit 1).
+Do not advance CURRENT_PHASE.

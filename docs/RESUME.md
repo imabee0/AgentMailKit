@@ -74,7 +74,7 @@ were run individually in the sandbox:
 
 | conjunct | lane | result |
 |---|---|---|
-| schemathesis over the mounted operations | L | **exit 0** — 2056 cases, Coverage 25/25, Fuzzing 25/25, Stateful 84/84 (re-running now over the 41-operation surface) |
+| schemathesis over the mounted operations | L | **exit 0** — 45/130 ops, 4864 generated, 4864 passed (2026-08-18, fixture 28) |
 | Python SDK smoke (`agentmail==0.5.9`) | L | **28 checks, 0 failed** |
 | Node SDK smoke (`agentmail@0.5.19`) | L | **26 checks, 0 failed** |
 | dual-target conformance diff | **R-key** | **not run — needs the read-only AgentMail key** |
