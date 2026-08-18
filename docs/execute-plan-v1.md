@@ -54,26 +54,28 @@ P3–P6 not started.
   `amk-types` or a fixture, STOP and report.
 - Writable paths are the contract’s list only.
 - Never edit `docs/PLAN.md`, `scripts/hooks/**`, or `crates/amk-types/**`.
-- Mutation both directions on a scratch copy outside the worktree; delete it.
-- Reviewers are the three named lenses, read-only.
-- Report the command and its actual output.
+- Mutation both directions on a scratch copy **outside** the worktree. The report names the
+  scratch path, each mutant as one source line, the test that died, and the `rm -rf` output
+  (`PLAN.md` 319–321). Widen (`is_some_and(pred)` → `is_some()`) as well as delete.
+- Reviewers are the three named lenses, read-only. All three must be clean. One lens is not a panel.
+- Report the command and its actual output. “Tests pass” is not a report.
 
 ## Gate catalog
 
-| ID | Gate | Lane | Command / evidence | Advances |
+| ID | Gate | Lane | Fixture + MET line | Advances |
 |---|---|---|---|---|
-| G1 | P1 dual-target conformance | R-key | `sdxd` + conformance conjunct of `./scripts/p1-gate.sh`; fixture | `CURRENT_PHASE` off P0 only when every P1 conjunct is MET |
-| G2 | P2 Lane L | L | `./scripts/check.sh`; schemathesis + Python/Node SDK smokes over send/ingest mounts | P2 code-complete; P3 code may start |
-| G3 | P2 conformance | R-key | dual-target diff for this phase’s endpoints | P2 gated (with G4) |
-| G4 | P2 inject + Gmail DKIM/SPF | R-phys | `/root/amksend.py` 3-message thread; SDK send to Gmail | P2 gated (with G3) |
-| G5 | P3 Lane L | L | scheduled draft delivers locally; idempotency tests | P3 code-complete |
-| G6 | P3 R-key | R-key | dual-target for P3 endpoints | P3 gated |
-| G7 | P4 Lane L | L | svix lib verifies signatures against localhost; WS test | P4 code-complete |
-| G8 | P4 R-key | R-key | dual-target for P4 endpoints | P4 gated |
-| G9 | P5 Lane L | L | domain types vs `reference/fixtures/C1-domain-shape.txt` | P5 code-complete |
-| G10 | P5 R-phys | R-phys | one real domain; induced bounce | P5 gated (with G12) |
-| G11 | P6 | R-phys | restore drill; `.64` cutover; Stalwart 0; dns-health | V1 acceptance |
-| G12 | P5 dual-target | R-key | dual-target for P5 endpoints | P5 gated (with G10) |
+| G1 | P1 dual-target | R-key | `reference/fixtures/25-p1-gate-conformance.txt` must contain `0 skipped, 0 with structural diffs`, `THIRD RUN — CLEAN`, `dual_target.py exit: 0` | `CURRENT_PHASE` off P0 only when every P1 conjunct is MET |
+| G2 | P2 Lane L | L | `reference/fixtures/28-p2-lane-l.txt`: `check.sh` with **no** DB-skip warning; `schemathesis exit: 0` via `scripts/p1-gate.sh` Lane L invocations (custom checks, not bare `st run`); both `sdk_smoke.* exit: 0` with at least one send and one inbound `thread_id` match; `derive-implemented-paths` +4 send ops; mutation pass named in the fixture | P2 code-complete; P3 code may start |
+| G3 | P2 conformance | R-key | `reference/fixtures/29-p2-conformance.txt`. Manifest **must gain** the four send POSTs (or the PR states why POSTs against the live account are forbidden **and** names the substitute that still diffs those shapes). Re-running the P1 GET-only manifest is **not** MET. `dual_target.py exit: 0` | P2 gated (with G4) |
+| G4 | P2 inject + Gmail | R-phys | `reference/fixtures/30-p2-r-phys.txt`: 3-message `/root/amksend.py` thread + Gmail DKIM/SPF pass | P2 gated (with G3) |
+| G5 | P3 Lane L | L | `reference/fixtures/31-p3-lane-l.txt` + mutation; cases in PR 15 | P3 code-complete |
+| G6 | P3 R-key | R-key | `reference/fixtures/32-p3-conformance.txt`; manifest gains draft/idempotency ops; not the P1 GET list | P3 gated (with G5) |
+| G7 | P4 Lane L | L | `reference/fixtures/33-p4-lane-l.txt`: official svix lib accept **and** forged/truncated reject; WS `message.received`; spam variant XOR `received`; mutation | P4 code-complete |
+| G8 | P4 R-key | R-key | `reference/fixtures/34-p4-conformance.txt`; manifest gains webhook CRUD | P4 gated (with G7) |
+| G9 | P5 Lane L | L | `reference/fixtures/C1-domain-shape.txt` + `35-p5-lane-l.txt`; extra or omitted field fails | P5 code-complete |
+| G10 | P5 R-phys | R-phys | `reference/fixtures/36-p5-r-phys.txt` | P5 gated (with G12) |
+| G11 | P6 | R-phys | `reference/fixtures/38-p6-cutover.txt` | V1 acceptance |
+| G12 | P5 dual-target | R-key | `reference/fixtures/37-p5-conformance.txt`; domain reads, D1-constrained; not the P1 GET list | P5 gated (with G10) |
 
 ## PR Plan
 
@@ -105,21 +107,34 @@ P3–P6 not started.
 ### PR 4: `amk-outbound` SMTP Transport
 
 - **Description:** Implement `mail-send` behind the existing `Transport` trait. Direct-to-MX and
-  smarthost, both configurable. Fail closed with no signing key. Public signatures `amk-types`
-  only. Tests use a recording fake — no real mail. Mutation both directions. Branch published as
-  `amk/p2/outbound`. Three lenses. `./scripts/check.sh` + `shape-provenance.sh` in the report.
-  Contract: `.claude/contracts/amk-outbound.md`. Specs: fixtures 15, 10/10b. Assigned cases 1 and 7
-  from that contract.
+  smarthost, both configurable. Fail closed with no signing key (`OutboundError::NoSigningKey`,
+  no `SignedMessage` on the fake). Public signatures `amk-types` only. Tests use a recording fake
+  — no real mail. Branch `amk/p2/outbound`. Three lenses. `./scripts/check.sh` +
+  `shape-provenance.sh` in the report. Contract: `.claude/contracts/amk-outbound.md`. Specs:
+  fixtures 15, 10/10b. **Assigned:** contract case 1 *sign-side only* (no key → no signed
+  message). Store-side “stores nothing” and case 7 (no local-inbox short-circuit) belong to PR 5.
+  Mutation: remove DKIM signing; passthrough `check_headers` — each must kill a named test.
 - **Files/components affected:** `crates/amk-outbound/**`
 - **Dependencies:** PR 3
 
 ### PR 5: `amk-outbound` HTTP send / reply / reply-all / forward
 
 - **Description:** Mount the four operations. `AppState` carries `Keyring` + `Transport`. Persist
-  through existing `messages::insert`; thread through existing `amk-core::threading`. Reply and
-  reply-all set linkage headers (fixture 21 / C3); forward starts a new thread. Assigned cases 2–8
-  in the outbound contract. Same published branch `amk/p2/outbound`. Three lenses. No `amk-types`
-  edits. Re-run `./scripts/derive-implemented-paths.sh` — mounted set grows by exactly four.
+  through existing `messages::insert`; thread through existing `amk-core::threading`. Same branch
+  `amk/p2/outbound`. Three lenses. No `amk-types` edits. `derive-implemented-paths` grows by
+  exactly four. MIME-only unit tests do **not** discharge HTTP cases.
+  **Assigned (HTTP integration, store/thread observables):**
+  1. No-key send: fail-closed error **and** `messages::get`/list empty (case 1 store half).
+  2. `reply` GET the thread: parent membership, same `thread_id` (not header-only).
+  3. Unbracketed parent `In-Reply-To` still joins (fixture 21 / C3), via GET thread.
+  4. `reply-all` excludes sending inbox, de-duplicates.
+  5. `forward` returned `thread_id` ≠ parent.
+  6. Hostile `headers` map (From, Bcc, CR/LF) plus CR/LF in `to` and `subject` (PLAN.md:246).
+  7. Send to a local inbox still goes through `Transport` (recording fake has one `SignedMessage`)
+     and stored raw carries `DKIM-Signature`.
+  8. Attachment size cap−1 accepted; cap and cap+1 rejected or URL-threshold per toolkit.
+  Mutation: persist-on-error (insert then ignore `NoSigningKey`); mint a new `thread_id` on reply;
+  copy `headers` onto MIME after `build_signed`. Each must kill a named HTTP test.
 - **Files/components affected:** `crates/amk-http/src/handlers/messages.rs`,
   `crates/amk-http/src/lib.rs`, `crates/amk-http/Cargo.toml`, `crates/amk-http/tests/**`,
   `crates/amk-outbound/**` as needed to expose Transport
@@ -128,10 +143,12 @@ P3–P6 not started.
 ### PR 6: Derive and review the `amk-ingest` contract
 
 - **Description:** New contract. First line is `Scope-derivation:` plus the enumeration command and
-  its raw output. Sites from PLAN.md P2 ingest (SMTP daemon on high-port, local-domain RCPT only,
-  mail-auth verdicts → labels, threading, blob store, HTTP ingest fallback) and fixtures 09b, 16,
-  21, 15. `smtp-proto` is parser-only; ingest owns the state machine. Read-only lens on the
-  contract before dispatch. No product code. Orchestrator writes the contract.
+  its raw output. Sites from PLAN.md P2 ingest and fixtures 09b, 16, 21, 15. `smtp-proto` is
+  parser-only; ingest owns the state machine. **Required section `Assigned edge cases`** quotes
+  PLAN.md 243–253 plus fixture 09b (`unauthenticated` label, list exclusion is a storage
+  predicate). Cases must name SMTP/store observables (RCPT 550, labels on the stored row, size
+  reject at cap+1), not parser-internal Ok/Err. Three-lens review of the **contract** before
+  dispatch. No product code. Orchestrator writes the contract.
 - **Files/components affected:** `.claude/contracts/amk-ingest.md`
 - **Dependencies:** PR 2
 
@@ -139,34 +156,48 @@ P3–P6 not started.
 
 - **Description:** Implement the reviewed ingest contract only. Fan-out with PR 4/5 only if all
   four fan-out predicates hold and `fanout.lock` is on. Branch `amk/p2/ingest`. Three lenses. Stop
-  if a type is missing. Do not resolve C2.
+  if a type is missing. Do not resolve C2. **Assigned:** every case in
+  `.claude/contracts/amk-ingest.md` Assigned edge cases (PLAN.md 243–253 + fixture 09b). Tests
+  assert RCPT 550 for non-local, greet-pause before pipelined EHLO, `unauthenticated` on the
+  stored row for SPF=none, size reject at cap+1. Parser Ok/Err is not enough.
+  Mutation: delete local-domain RCPT check; drop greet-pause; never write `unauthenticated`. Each
+  must kill a named test.
 - **Files/components affected:** `crates/amk-ingest/**`, workspace `Cargo.toml` member line only
 - **Dependencies:** PR 6
 
 ### PR 8: P2 Lane L gate (G2)
 
-- **Description:** Run `./scripts/check.sh` (read the DB-skip line), schemathesis, and both SDK
-  smokes over the new send/ingest mounts. Paste output into a new fixture. Do **not** advance
-  `CURRENT_PHASE`. If a conjunct fails, this PR fails; P3 does not start.
+- **Description:** Produce `reference/fixtures/28-p2-lane-l.txt`. Fail the PR if `check.sh` prints
+  the DB-skip warning. Run the Lane L invocations from `scripts/p1-gate.sh` (custom schemathesis
+  checks, not bare `st run`; `sdk_smoke.py` / `sdk_smoke.mjs` at `AMK_BASE=http://127.0.0.1:8111`).
+  Fixture must contain `schemathesis exit: 0`, both `sdk_smoke.* exit: 0`,
+  `derive-implemented-paths` showing +4 send operations, one SDK send and one injected inbound
+  with matching `thread_id`, and the mutation report (path, mutants, killed tests, `rm -rf`).
+  Do **not** advance `CURRENT_PHASE`. If a conjunct fails, this PR fails; P3 does not start.
 - **Files/components affected:** `reference/fixtures/` (P2 Lane L transcript), `docs/RESUME.md`
   (one status paragraph)
 - **Dependencies:** PR 5, PR 7
 
 ### PR 9: P1 Lane R gate (G1)
 
-- **Description:** Dual-target conformance via `sdxd`. Independent of PR 4–8. If the key is
-  absent, report **not run**; leave `CURRENT_PHASE=P0`. Only if every P1 conjunct is MET may the
-  orchestrator move `CURRENT_PHASE`.
-- **Files/components affected:** `reference/fixtures/` (conformance transcript),
+- **Description:** Independent of PR 4–8. Command (keys by reference, never inline):
+  `AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c 'REF_KEY="$AGENTMAIL_API_KEY" python3 conformance/dual_target.py conformance/manifest.json'`.
+  MET only if `reference/fixtures/25-p1-gate-conformance.txt` contains `0 skipped, 0 with
+  structural diffs`, `THIRD RUN — CLEAN`, and `dual_target.py exit: 0`. Else **not run**. Leave
+  `CURRENT_PHASE=P0` unless every P1 conjunct is MET.
+- **Files/components affected:** `reference/fixtures/25-p1-gate-conformance.txt`,
   `scripts/plan-ledger.sh` (`CURRENT_PHASE` only when actually gated)
 - **Dependencies:** PR 1
 
 ### PR 10: P2 R-key gate (G3)
 
-- **Description:** Dual-target conformance for P2 endpoints. **Not run** without the key. Does not
-  unblock P3 code (G2 does). With G4, and only then, P2 is gated and `CURRENT_PHASE` may move.
-  `scripts/plan-ledger.sh` is touched only on that move.
-- **Files/components affected:** `reference/fixtures/` (P2 conformance transcript)
+- **Description:** `reference/fixtures/29-p2-conformance.txt`. Manifest **must list** the four
+  send POSTs (or this PR states live POSTs are forbidden and names the shape-diff substitute).
+  Re-running the P1 18-GET + `DELETE /v0/auth/me` manifest is **not** MET. **Not run** without the
+  key. Does not unblock P3 code (G2 does). With G4, and only then, P2 is gated and
+  `CURRENT_PHASE` may move. `scripts/plan-ledger.sh` only on that move.
+- **Files/components affected:** `reference/fixtures/29-p2-conformance.txt`,
+  `conformance/manifest.json`
 - **Dependencies:** PR 8
 
 ### PR 11: P2 R-phys gate (G4)
@@ -181,8 +212,11 @@ P3–P6 not started.
 ### PR 12: `amk-events`
 
 - **Description:** Webhooks CRUD (3 scopes, write-only headers), Svix-wire delivery + retries
-  (full 8-attempt schedule, fixture 07), inbox events. Contract derived and reviewed first. Branch
-  `amk/p4/events` only when this phase is open; until G2 is green this node stays pending.
+  (full 8-attempt schedule, fixture 07), inbox events. Contract first. Branch `amk/p4/events`
+  after G2. **Assigned (PLAN.md 260–264):** 3xx → failure; 15s hang → fail; `svix-id` stable;
+  exhaustion → `message.attempt.exhausted`; 5-day disable + `EndpointDisabledEvent`; opt-in spam
+  **replaces** `message.received` (assert `received` is NOT also delivered); webhook SSRF matrix;
+  WS subscribe to an unseen inbox / unauthorized `event_type`.
 - **Files/components affected:** `crates/amk-events/**` (after a reviewed contract)
 - **Dependencies:** PR 8
 
@@ -195,16 +229,21 @@ P3–P6 not started.
 
 ### PR 14: P3 drafts, scheduling, idempotency
 
-- **Description:** Drafts CRUD/modes/references, `send_at` jobs, `Idempotency-Key` layer,
-  SSRF-safe url-attachments. Gate G5 after. No types invented.
+- **Description:** Drafts CRUD/modes/references, `send_at` jobs, `Idempotency-Key` layer.
+  **Assigned (PLAN.md 240–241, 255–258, 267–268):** same key + same body → original; same key +
+  different body → 409; empty key → 400; key after 24h TTL; **concurrent** identical keys must not
+  double-send; first-attempt-failed retryable; `client_id` replay; `send_at` past / DST / naive;
+  url-attachment SSRF matrix (127.0.0.1, link-local, private, DNS-to-private, redirect-to-private,
+  unbounded stream, hang, DNS rebinding / pin holds). Gate G5 after. No types invented.
 - **Files/components affected:** per a reviewed P3 contract
 - **Dependencies:** PR 8, PR 13
 
 ### PR 15: P3 Lane L gate (G5)
 
-- **Description:** Scheduled draft delivers locally; duplicate `Idempotency-Key` returns the same
-  body; mismatch is 409. Fixture + `docs/RESUME.md` one line. Do **not** advance `CURRENT_PHASE`.
-  This is the only P3 node that unblocks P4 *code*.
+- **Description:** `reference/fixtures/31-p3-lane-l.txt`. Must include PR 14’s concurrent
+  identical-key case (two POSTs, one send), empty key → 400, and mutation. Sequential duplicate →
+  same body and mismatch → 409 are not enough. Do **not** advance `CURRENT_PHASE`. This is the
+  only P3 node that unblocks P4 *code*.
 - **Files/components affected:** `reference/fixtures/` (P3 Lane L transcript), `docs/RESUME.md`
 - **Dependencies:** PR 14
 
@@ -232,8 +271,10 @@ P3–P6 not started.
 
 ### PR 19: P4 Lane L gate (G7)
 
-- **Description:** Official `svix` Python lib verifies signatures against localhost; SDK websocket
-  receives `message.received`. Fixture. Do **not** advance `CURRENT_PHASE`. Unblocks P5 *code*.
+- **Description:** `reference/fixtures/33-p4-lane-l.txt`. Official lib **accepts** a real
+  signature **and rejects** forged/truncated. WS receives `message.received`. Opt-in spam
+  delivered XOR `message.received`. Mutation. Do **not** advance `CURRENT_PHASE`. Unblocks P5
+  *code*.
 - **Files/components affected:** `reference/fixtures/` (P4 Lane L transcript)
 - **Dependencies:** PR 18
 
@@ -285,7 +326,9 @@ P3–P6 not started.
 ### PR 26: `amk-import` product
 
 - **Description:** LAST product crate. Translation boundary only. Deletable after cutover. Not
-  started before PR 25 is reviewed. No cutover in this PR.
+  started before PR 25 is reviewed. No cutover in this PR. **Assigned:** every DROPPED mapping-table
+  row is absent from store; our threading wins (Stalwart threads not imported); re-import is
+  idempotent.
 - **Files/components affected:** `crates/amk-import/**`
 - **Dependencies:** PR 25
 
