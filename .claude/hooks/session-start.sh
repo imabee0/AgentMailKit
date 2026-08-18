@@ -7,7 +7,7 @@
 #
 # Synchronous, deliberately. Async would start the session sooner, but the first thing a session
 # here does is run ./scripts/check.sh, and a race between that and the Postgres cluster coming up
-# produces a NOT RUN for `test` — the exact gap this hook exists to close.
+# FAILS the `test` step — the exact gap this hook exists to close.
 set -uo pipefail
 
 # Local machines are already provisioned and should not have their dev database started from under
