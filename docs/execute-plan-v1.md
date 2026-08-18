@@ -71,8 +71,9 @@ P3–P6 not started.
 | G7 | P4 Lane L | L | svix lib verifies signatures against localhost; WS test | P4 code-complete |
 | G8 | P4 R-key | R-key | dual-target for P4 endpoints | P4 gated |
 | G9 | P5 Lane L | L | domain types vs `reference/fixtures/C1-domain-shape.txt` | P5 code-complete |
-| G10 | P5 R-phys | R-phys | one real domain; induced bounce | P5 gated (with R-key) |
+| G10 | P5 R-phys | R-phys | one real domain; induced bounce | P5 gated (with G12) |
 | G11 | P6 | R-phys | restore drill; `.64` cutover; Stalwart 0; dns-health | V1 acceptance |
+| G12 | P5 dual-target | R-key | dual-target for P5 endpoints | P5 gated (with G10) |
 
 ## PR Plan
 
@@ -197,46 +198,90 @@ P3–P6 not started.
 - **Files/components affected:** per a reviewed P3 contract
 - **Dependencies:** PR 8, PR 13
 
-### PR 15: P3 Lane L gate (G5) and P3 R-key (G6)
+### PR 15: P3 Lane L gate (G5)
 
-- **Description:** G5: scheduled draft delivers locally; duplicate key identical; mismatch 409.
-  G6: dual-target for P3 endpoints, **not run** without the key.
-- **Files/components affected:** `reference/fixtures/`
+- **Description:** Scheduled draft delivers locally; duplicate `Idempotency-Key` returns the same
+  body; mismatch is 409. Fixture + `docs/RESUME.md` one line. Do **not** advance `CURRENT_PHASE`.
+  This is the only P3 node that unblocks P4 *code*.
+- **Files/components affected:** `reference/fixtures/` (P3 Lane L transcript), `docs/RESUME.md`
 - **Dependencies:** PR 14
 
-### PR 16: `amk-dns` + `amk-mcp` + `reply-extract`
+### PR 16: P3 R-key gate (G6)
+
+- **Description:** Dual-target for P3 endpoints. **Not run** without the key. Sibling of PR 15.
+  Does not parent P4 code. Required (with G5) before calling P3 gated / moving `CURRENT_PHASE`.
+- **Files/components affected:** `reference/fixtures/` (P3 conformance transcript)
+- **Dependencies:** PR 14
+
+### PR 17: `amk-dns` + `amk-mcp` + `reply-extract`
 
 - **Description:** Leaf crates. Fan-out (ceiling 2, then the third). Each has its own derived
-  contract and `amk/p5/…` or parked-parity branch. MCP Gate is later (connectors). Reply extract
-  may stay degraded (`extracted_*` = full body) until the Talon port exists.
+  contract. MCP connector Gate is later. Reply extract may stay degraded (`extracted_*` = full
+  body) until the Talon port exists.
 - **Files/components affected:** `crates/amk-dns/**`, `crates/amk-mcp/**`, `crates/reply-extract/**`
 - **Dependencies:** PR 12, PR 13
 
-### PR 17: P4 events surface + G7/G8
+### PR 18: P4 events HTTP/WS surface
 
-- **Description:** WS hub, metrics, opt-in spam events replace `received`. G7 localhost svix + WS.
-  G8 R-key **not run** without the key.
+- **Description:** WS hub, metrics, opt-in spam events replace `received`. Product only. Depends
+  on the events crate and on P3 **Lane L** (G5), not on G6.
 - **Files/components affected:** `crates/amk-http/**` event mounts, `crates/amk-events/**`
 - **Dependencies:** PR 12, PR 15
 
-### PR 18: P5 domains + G9/G10
+### PR 19: P4 Lane L gate (G7)
 
-- **Description:** Domain CRUD, DNS verify, DKIM keygen/import, `feedback_enabled`. G9: types vs
-  `C1-domain-shape.txt`. G10: one real domain + bounce — **not run** without R-phys. D1 still
-  blocks probing production domains.
-- **Files/components affected:** per a reviewed domain contract
-- **Dependencies:** PR 16, PR 17
-
-### PR 19: Import mapping table (P6, before any import code)
-
-- **Description:** Write and review the Stalwart→AgentMail mapping table from PLAN.md. Any
-  “keep Stalwart’s version” row is a defect. No `amk-import` code in this PR.
-- **Files/components affected:** `.claude/contracts/amk-import.md`
+- **Description:** Official `svix` Python lib verifies signatures against localhost; SDK websocket
+  receives `message.received`. Fixture. Do **not** advance `CURRENT_PHASE`. Unblocks P5 *code*.
+- **Files/components affected:** `reference/fixtures/` (P4 Lane L transcript)
 - **Dependencies:** PR 18
 
-### PR 20: `amk-import` + P6 cutover (G11)
+### PR 20: P4 R-key gate (G8)
+
+- **Description:** Dual-target for P4 endpoints. **Not run** without the key. Sibling of PR 19.
+  Does not parent P5 code.
+- **Files/components affected:** `reference/fixtures/` (P4 conformance transcript)
+- **Dependencies:** PR 18
+
+### PR 21: P5 domains product
+
+- **Description:** Domain CRUD, DNS verify, DKIM keygen/import, `feedback_enabled`. Product only.
+  Depends on P4 Lane L (G7) and leaf crates, not on G8/G10/G12. D1 still blocks probing production
+  domains.
+- **Files/components affected:** per a reviewed domain contract
+- **Dependencies:** PR 17, PR 19
+
+### PR 22: P5 Lane L gate (G9)
+
+- **Description:** Domain types vs `reference/fixtures/C1-domain-shape.txt`. Any extra or omitted
+  field fails. Do **not** advance `CURRENT_PHASE`. Unblocks the import mapping table.
+- **Files/components affected:** `reference/fixtures/` (P5 Lane L transcript)
+- **Dependencies:** PR 21
+
+### PR 23: P5 R-phys gate (G10)
+
+- **Description:** One real domain verified end-to-end; induced bounce → `message.bounced`.
+  **Not run** without R-phys. Sibling of G9/G12. Does not parent import-table work.
+- **Files/components affected:** `reference/fixtures/` (P5 R-phys transcript)
+- **Dependencies:** PR 21
+
+### PR 24: P5 R-key gate (G12)
+
+- **Description:** Dual-target for P5 domain endpoints (read-only listing of the reference account
+  where D1 permits). **Not run** without the key. Sibling of G9/G10. Required with G10 to call P5
+  gated / move `CURRENT_PHASE`.
+- **Files/components affected:** `reference/fixtures/` (P5 conformance transcript)
+- **Dependencies:** PR 21
+
+### PR 25: Import mapping table (P6, before any import code)
+
+- **Description:** Write and review the Stalwart→AgentMail mapping table from PLAN.md. Any
+  “keep Stalwart’s version” row is a defect. No `amk-import` code. Depends on P5 **Lane L** (G9).
+- **Files/components affected:** `.claude/contracts/amk-import.md`
+- **Dependencies:** PR 22
+
+### PR 26: `amk-import` + P6 cutover (G11)
 
 - **Description:** LAST. Translation boundary only. Deletable after cutover. G11: restore drill,
-  `.64` swap, Stalwart 0, dns-health. R-phys. Not started before PR 19 is reviewed.
+  `.64` swap, Stalwart 0, dns-health. R-phys. Not started before PR 25 is reviewed.
 - **Files/components affected:** `crates/amk-import/**`, `deploy/k3s/**`
-- **Dependencies:** PR 19
+- **Dependencies:** PR 25
