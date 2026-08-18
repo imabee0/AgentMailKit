@@ -3,7 +3,7 @@
 Where the last session stopped, so a fresh one — on this workstation or in Claude's cloud sandbox —
 can continue without re-deriving it. Update this file in the commit that invalidates it.
 
-**Last updated:** 2026-08-18, after `amk-outbound` send HTTP and `amk-ingest` SMTP persist landed.
+**Last updated:** 2026-08-18, after `amkd --role smtpd` was wired (three-lens CLEAN @ `28e6afa`).
 
 Grok now has a project harness on this tree: `AGENTS.md` (identity + commands, pointer here and
 to `docs/PLAN.md` / `docs/OPERATING-RULES.md`), `.grok/config.toml` in ask-mode with the deny
@@ -87,7 +87,7 @@ gate, and advancing on Lane L alone is exactly the "gate its own evidence contra
 **P2: message/thread reads plus send + ingest.** Router is 45 operations (`derive-implemented-paths`
 +4 send/reply/reply-all/forward). `amk-outbound` SMTP Transport and the four HTTP POSTs are on
 `main` (three-lens CLEAN @ `8c5d3d7`). `amk-ingest` SMTP state machine + persist is on `main`
-(three-lens CLEAN @ `45ad7ae`). `amkd --role smtpd` is still rejected. P1 Lane R conformance is
+(three-lens CLEAN @ `45ad7ae`). `amkd --role smtpd` is wired (CLEAN @ `28e6afa`). P1 Lane R conformance is
 still **not run**. `CURRENT_PHASE` stays P0. See "P2 progress" below.
 
 ## The extractor-rejection work item: DONE and MERGED (`main` @ 0d0631c), still ungated
@@ -314,7 +314,7 @@ reproduced**, not as explained away.
 Keyring (fail closed). Tests use `RecordingTransport`. No real mail.
 
 **`amk-ingest` is on `main`** (three-lens CLEAN @ `45ad7ae`). SMTP state machine + `accept`
-persist. `amkd --role smtpd` is still rejected. No HTTP ingest route.
+persist. `amkd --role smtpd` is wired (CLEAN @ `28e6afa`). No HTTP ingest route.
 
 Next in write order: `amk-events` + `amk-jobs`, then `amk-dns` + `amk-mcp` + `reply-extract`,
 then `amk-import` (P6 only). P2 Lane L gate (G2) needs fixture 28 after `smtpd` is wired.
