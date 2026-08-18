@@ -271,7 +271,10 @@ impl ReplyToMessageRequest {
     /// PLAN.md / SDK: `reply_all` is mutually exclusive with to/cc/bcc.
     pub fn reply_all_conflicts_with_recipients(&self) -> bool {
         self.reply_all == Some(true)
-            && [&self.to, &self.cc, &self.bcc].into_iter().flatten().any(|a| !a.is_empty())
+            && [&self.to, &self.cc, &self.bcc]
+                .into_iter()
+                .flatten()
+                .any(|a| !a.is_empty())
     }
 }
 
@@ -369,7 +372,10 @@ mod tests {
             reply_all: Some(true),
             text: Some("t".into()),
             html: Some("h".into()),
-            attachments: vec![SendAttachment { content: Some("Zg==".into()), ..Default::default() }],
+            attachments: vec![SendAttachment {
+                content: Some("Zg==".into()),
+                ..Default::default()
+            }],
             headers: Some(BTreeMap::from([("X".into(), "1".into())])),
         };
         let v = serde_json::to_value(&req).unwrap();
@@ -377,10 +383,24 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            ["attachments", "bcc", "cc", "headers", "html", "labels", "reply_all", "reply_to", "text", "to"],
+            [
+                "attachments",
+                "bcc",
+                "cc",
+                "headers",
+                "html",
+                "labels",
+                "reply_all",
+                "reply_to",
+                "text",
+                "to"
+            ],
             "must be the openapi property set; subject is not one of them",
         );
-        assert_eq!(serde_json::to_value(&ReplyToMessageRequest::default()).unwrap(), serde_json::json!({}));
+        assert_eq!(
+            serde_json::to_value(ReplyToMessageRequest::default()).unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]
@@ -390,15 +410,31 @@ mod tests {
             reply_to: Some(Addresses::One("a@b.c".into())),
             text: Some("t".into()),
             html: Some("h".into()),
-            attachments: vec![SendAttachment { content: Some("Zg==".into()), ..Default::default() }],
+            attachments: vec![SendAttachment {
+                content: Some("Zg==".into()),
+                ..Default::default()
+            }],
             headers: Some(BTreeMap::from([("X".into(), "1".into())])),
         };
         let v = serde_json::to_value(&req).unwrap();
         let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, ["attachments", "headers", "html", "labels", "reply_to", "text"]);
+        assert_eq!(
+            keys,
+            [
+                "attachments",
+                "headers",
+                "html",
+                "labels",
+                "reply_to",
+                "text"
+            ]
+        );
         assert!(v.get("to").is_none() && v.get("cc").is_none() && v.get("bcc").is_none());
-        assert_eq!(serde_json::to_value(&ReplyAllMessageRequest::default()).unwrap(), serde_json::json!({}));
+        assert_eq!(
+            serde_json::to_value(ReplyAllMessageRequest::default()).unwrap(),
+            serde_json::json!({})
+        );
     }
 
     #[test]
