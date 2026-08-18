@@ -224,6 +224,8 @@ P3–P6 not started.
 
 - **Description:** Postgres `jobs` table + tokio workers. Fan-out with PR 12 if predicates hold.
   Branch `amk/p3/jobs` when P3 is open (drafts/`send_at` need it). Contract first.
+  **Assigned (PLAN.md:274):** worker crash mid-send → no double-send on restart (SKIP LOCKED
+  tested, not assumed).
 - **Files/components affected:** `crates/amk-jobs/**`
 - **Dependencies:** PR 8
 
@@ -249,9 +251,11 @@ P3–P6 not started.
 
 ### PR 16: P3 R-key gate (G6)
 
-- **Description:** Dual-target for P3 endpoints. **Not run** without the key. Sibling of PR 15.
-  Does not parent P4 code. Required (with G5) before calling P3 gated / moving `CURRENT_PHASE`.
-- **Files/components affected:** `reference/fixtures/` (P3 conformance transcript)
+- **Description:** `reference/fixtures/32-p3-conformance.txt` must contain `dual_target.py exit: 0`.
+  Manifest gains draft/idempotency ops; P1 GET list is not MET. **Not run** without the key.
+  Sibling of PR 15. Does not parent P4 code. Required (with G5) before P3 gated / `CURRENT_PHASE`.
+- **Files/components affected:** `reference/fixtures/32-p3-conformance.txt`,
+  `conformance/manifest.json`
 - **Dependencies:** PR 14
 
 ### PR 17: `amk-dns` + `amk-mcp` + `reply-extract`
@@ -280,10 +284,11 @@ P3–P6 not started.
 
 ### PR 20: P4 R-key gate (G8)
 
-- **Description:** Dual-target for P4 endpoints. **Not run** without the key. Sibling of PR 19.
-  Does not parent P5 code. With G7, and only then, P4 is gated and `CURRENT_PHASE` may move.
-  `scripts/plan-ledger.sh` is touched only on that move.
-- **Files/components affected:** `reference/fixtures/` (P4 conformance transcript)
+- **Description:** `reference/fixtures/34-p4-conformance.txt` must contain `dual_target.py exit: 0`.
+  Manifest gains webhook CRUD. **Not run** without the key. Sibling of PR 19. Does not parent P5
+  code. With G7, then P4 gated / `CURRENT_PHASE`. `scripts/plan-ledger.sh` only on that move.
+- **Files/components affected:** `reference/fixtures/34-p4-conformance.txt`,
+  `conformance/manifest.json`
 - **Dependencies:** PR 18
 
 ### PR 21: P5 domains product
@@ -296,24 +301,28 @@ P3–P6 not started.
 
 ### PR 22: P5 Lane L gate (G9)
 
-- **Description:** Domain types vs `reference/fixtures/C1-domain-shape.txt`. Any extra or omitted
-  field fails. Do **not** advance `CURRENT_PHASE`. Unblocks the import mapping table.
-- **Files/components affected:** `reference/fixtures/` (P5 Lane L transcript)
+- **Description:** `reference/fixtures/35-p5-lane-l.txt` plus `C1-domain-shape.txt`. Any extra or
+  omitted field fails. Mutation both directions on the domain-shape compare (drop a fixture field
+  / add an invented one — each must kill the gate). Do **not** advance `CURRENT_PHASE`. Unblocks
+  the import mapping table.
+- **Files/components affected:** `reference/fixtures/35-p5-lane-l.txt`
 - **Dependencies:** PR 21
 
 ### PR 23: P5 R-phys gate (G10)
 
-- **Description:** One real domain verified end-to-end; induced bounce → `message.bounced`.
-  **Not run** without R-phys. Sibling of G9/G12. Does not parent import-table work.
-- **Files/components affected:** `reference/fixtures/` (P5 R-phys transcript)
+- **Description:** `reference/fixtures/36-p5-r-phys.txt` must contain a 200 on the verified
+  domain GET and a `message.bounced` event id after the induced bounce. **Not run** without
+  R-phys. Sibling of G9/G12. Does not parent import-table work.
+- **Files/components affected:** `reference/fixtures/36-p5-r-phys.txt`
 - **Dependencies:** PR 21
 
 ### PR 24: P5 R-key gate (G12)
 
-- **Description:** Dual-target for P5 domain endpoints (read-only listing of the reference account
-  where D1 permits). **Not run** without the key. Sibling of G9/G10. Required with G10 to call P5
-  gated / move `CURRENT_PHASE`.
-- **Files/components affected:** `reference/fixtures/` (P5 conformance transcript)
+- **Description:** `reference/fixtures/37-p5-conformance.txt` must contain `dual_target.py exit: 0`.
+  Domain reads only, D1-constrained. **Not run** without the key. Sibling of G9/G10. With G10,
+  then P5 gated / `CURRENT_PHASE`.
+- **Files/components affected:** `reference/fixtures/37-p5-conformance.txt`,
+  `conformance/manifest.json`
 - **Dependencies:** PR 21
 
 ### PR 25: Import mapping table (P6, before any import code)
@@ -334,9 +343,9 @@ P3–P6 not started.
 
 ### PR 27: P6 cutover gate (G11)
 
-- **Description:** Restore drill; `.64` swap; Stalwart 0; dns-health. R-phys. **Not run** without
-  the cluster. Does not write import code. `CURRENT_PHASE` / V1 acceptance only when this fixture
-  exists.
-- **Files/components affected:** `deploy/k3s/**` (cutover manifests only), `reference/fixtures/`
-  (P6 gate transcript)
+- **Description:** `reference/fixtures/38-p6-cutover.txt` must contain restore-drill exit 0,
+  outside banner from `.64`, `replicas: 0` on Stalwart, and `dns-health.py` green. Existence of
+  the file is not MET. **Not run** without the cluster. Does not write import code.
+- **Files/components affected:** `deploy/k3s/**` (cutover manifests only),
+  `reference/fixtures/38-p6-cutover.txt`
 - **Dependencies:** PR 26
