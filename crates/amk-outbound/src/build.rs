@@ -24,7 +24,8 @@ pub const INLINE_ATTACHMENT_MAX_BYTES: usize = 5_950_000;
 pub struct SendContext {
     /// The sending inbox. `inbox_id` IS the address (fixture 03).
     pub from: String,
-    /// Set on a reply: the parent's Message-ID, already bracketed.
+    /// Set on a reply: the parent's Message-ID as stored. The MIME writer is the one
+    /// re-bracket site (C3); persist reads the header back off the signed bytes.
     pub in_reply_to: Option<String>,
     /// Set on a reply: the parent's `References` chain plus the parent itself.
     pub references: Vec<String>,

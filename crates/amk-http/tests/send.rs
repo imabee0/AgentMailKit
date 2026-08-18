@@ -122,6 +122,10 @@ async fn reply_joins_the_parent_thread() {
 }
 
 /// 3. Unbracketed parent still joins (fixture 21 / C3), via GET thread.
+///
+/// A decoy in another thread is seeded first so `items[0]` is the wrong join. Persist must
+/// use the IRT that actually went on the MIME — a second independent `MessageId::bracketed`
+/// of the stored parent still joins when the inbox has only the parent.
 #[tokio::test]
 async fn unbracketed_parent_reply_still_joins() {
     let Some(pool) = support::pool().await else {
@@ -130,11 +134,14 @@ async fn unbracketed_parent_reply_still_joins() {
     let org = support::seed_org(&pool).await;
     let pod = support::seed_pod(&pool, &org).await;
     let inbox = support::seed_inbox(&pool, &org, pod, "bare").await;
+    let decoy_id = format!("<decoy-{}@example.test>", support::unique_suffix());
+    let (decoy_thread, _) = seed_named_parent(&pool, &org, pod, &inbox, &decoy_id).await;
     let bare = format!("amkc3-root-{}@example.test", support::unique_suffix());
     let (parent_thread, parent_mid) = seed_named_parent(&pool, &org, pod, &inbox, &bare).await;
     assert!(!parent_mid.is_bracketed());
+    assert_ne!(decoy_thread, parent_thread);
     let key = support::org_key(&pool, &org).await;
-    let (router, _rec) = support::send_router(pool, support::fixture_keyring("example.test"));
+    let (router, rec) = support::send_router(pool, support::fixture_keyring("example.test"));
     let seg = inbox.to_path_segment();
 
     let resp = support::post(
@@ -145,26 +152,51 @@ async fn unbracketed_parent_reply_still_joins() {
     )
     .await;
     assert_eq!(resp.status, 200, "{}", resp.body);
-    assert_eq!(resp.json.unwrap()["thread_id"].as_str().unwrap(), parent_thread.to_string());
+    let body = resp.json.unwrap();
+    let reply_thread = body["thread_id"].as_str().unwrap();
+    assert_eq!(
+        reply_thread,
+        parent_thread.to_string(),
+        "must join the parent, not a new thread"
+    );
+    assert_ne!(
+        reply_thread,
+        decoy_thread.to_string(),
+        "must not fall back to the first inbox row (the decoy)"
+    );
+
+    let sent = rec.sent();
+    assert_eq!(sent.len(), 1);
+    let raw = String::from_utf8_lossy(&sent[0].raw);
+    let wire_irt = format!("In-Reply-To: <{}>", parent_mid.as_str());
+    assert!(raw.contains(&wire_irt), "MIME IRT is the bracketed parent: {raw}");
+
+    let mid = body["message_id"].as_str().unwrap().to_owned();
+    let got = support::get(
+        &router,
+        &format!("/v0/inboxes/{seg}/messages/{}", encode_mid(&mid)),
+        Some(&key),
+    )
+    .await;
+    assert_eq!(got.status, 200, "{}", got.body);
+    let stored = got.json.unwrap();
+    assert_eq!(
+        stored["thread_id"].as_str().unwrap(),
+        parent_thread.to_string(),
+        "GET thread_id is the parent, not the decoy"
+    );
+    assert_ne!(stored["thread_id"].as_str().unwrap(), decoy_thread.to_string());
+    assert_eq!(
+        stored["in_reply_to"].as_str().unwrap(),
+        format!("<{}>", parent_mid.as_str()),
+        "GET in_reply_to is the re-bracketed parent (the MIME IRT)"
+    );
 
     let thread =
         support::get(&router, &format!("/v0/inboxes/{seg}/threads/{parent_thread}"), Some(&key))
             .await;
     let t = thread.json.unwrap();
     assert_eq!(t["message_count"], 2, "C3: unbracketed parent still joins: {t}");
-    let reply = t["messages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|m| m["message_id"].as_str() != Some(parent_mid.as_str()))
-        .expect("reply member");
-    assert_eq!(reply["thread_id"].as_str().unwrap(), parent_thread.to_string());
-    let irt = reply["in_reply_to"].as_str().unwrap();
-    assert_eq!(
-        irt,
-        format!("<{}>", parent_mid.as_str()),
-        "GET in_reply_to is the re-bracketed parent"
-    );
 }
 
 /// 4. `reply-all` excludes sending inbox, de-duplicates.
@@ -395,16 +427,21 @@ async fn send_to_a_local_inbox_still_goes_through_transport_and_is_signed() {
     assert_eq!(sent.len(), 1, "no local-inbox short-circuit");
     let raw = String::from_utf8_lossy(&sent[0].raw);
     let dkim_at = raw.find("DKIM-Signature:").expect("DKIM-Signature in raw");
-    let xtrace_at = raw.find("X-Trace:").expect("X-Trace in raw");
     let from_at = raw.find("From:").expect("From in raw");
-    assert!(
-        dkim_at < xtrace_at && dkim_at < from_at,
-        "DKIM-Signature must precede caller X-Trace and From: {raw}"
-    );
+    assert!(dkim_at < from_at, "DKIM-Signature must precede From: {raw}");
     assert_eq!(
-        raw.matches("X-Trace:").count(),
+        raw.lines()
+            .filter(|l| l
+                .split_once(':')
+                .is_some_and(|(n, _)| n.eq_ignore_ascii_case("X-Trace")))
+            .count(),
         1,
         "header once, inside the signed bytes: {raw}"
+    );
+    let h_tag = dkim_h_headers(&raw);
+    assert!(
+        h_tag.iter().any(|n| n.eq_ignore_ascii_case("x-trace")),
+        "DKIM h= must list x-trace (append-after-sign leaves it out): {h_tag:?} in {raw}"
     );
 
     let mid = resp.json.unwrap()["message_id"]
@@ -540,6 +577,44 @@ async fn reply_all_true_with_to_is_a_validation_error() {
 
 fn b64(n: usize) -> String {
     base64::engine::general_purpose::STANDARD.encode(vec![b'A'; n])
+}
+
+/// Unfold the first `DKIM-Signature` header and return the `h=` names.
+fn dkim_h_headers(raw: &str) -> Vec<String> {
+    let header_block = raw.split("\r\n\r\n").next().unwrap_or(raw);
+    let mut dkim = String::new();
+    let mut in_dkim = false;
+    for line in header_block.split("\r\n") {
+        if in_dkim && line.starts_with([' ', '\t']) {
+            dkim.push_str(line.trim());
+            continue;
+        }
+        if in_dkim {
+            break;
+        }
+        if let Some(rest) = line
+            .split_once(':')
+            .filter(|(n, _)| n.eq_ignore_ascii_case("DKIM-Signature"))
+            .map(|(_, v)| v)
+        {
+            dkim.push_str(rest.trim());
+            in_dkim = true;
+        }
+    }
+    for tag in dkim.split(';') {
+        let tag = tag.trim();
+        let Some((name, value)) = tag.split_once('=') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("h") {
+            return value
+                .split(':')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+    Vec::new()
 }
 
 async fn seed_named_parent(

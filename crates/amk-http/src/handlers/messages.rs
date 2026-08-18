@@ -302,25 +302,19 @@ pub async fn forward(
 }
 
 fn reply_context(parent: &Message) -> SendContext {
-    let parent_id = MessageId::bracketed(parent.item.message_id.as_str());
+    // Stored form, not a second re-bracket. `build_signed` is the one site that puts
+    // the C3-bracketed IRT on the MIME; persist and assign read that header back.
+    let parent_id = parent.item.message_id.as_str().to_owned();
     let mut references: Vec<String> = parent
         .item
         .references
         .as_ref()
-        .map(|v| {
-            v.iter()
-                .map(|m| MessageId::bracketed(m.as_str()).as_str().to_owned())
-                .collect()
-        })
+        .map(|v| v.iter().map(|m| m.as_str().to_owned()).collect())
         .unwrap_or_default();
-    if !references.iter().any(|r| r == parent_id.as_str()) {
-        references.push(parent_id.as_str().to_owned());
+    if !references.iter().any(|r| r == &parent_id) {
+        references.push(parent_id.clone());
     }
-    SendContext {
-        from: String::new(),
-        in_reply_to: Some(parent_id.as_str().to_owned()),
-        references,
-    }
+    SendContext { from: String::new(), in_reply_to: Some(parent_id), references }
 }
 
 async fn load_parent(
@@ -361,10 +355,41 @@ async fn send_prepared(
         .await
         .map_err(outbound_to_app)?;
 
+    // IRT/References that actually went on the MIME — one re-bracket site (the builder).
+    let headers = headers_from_raw(&signed.raw);
+    let in_reply_to = header_ci(headers.as_ref(), "In-Reply-To").map(|v| MessageId::new(v.trim()));
+    let references = header_ci(headers.as_ref(), "References")
+        .map(|v| {
+            v.split_whitespace()
+                .filter(|t| !t.is_empty())
+                .map(MessageId::new)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     let mid = MessageId::new(signed.message_id.clone());
-    let (thread_id, is_new) =
-        assign_outbound_thread(&state.pool, &filter, &inbox.inbox_id, &send_ctx, &mid).await?;
-    persist_sent(state, &inbox, &req, &send_ctx, &signed, thread_id, is_new).await?;
+    let (thread_id, is_new) = assign_outbound_thread(
+        &state.pool,
+        &filter,
+        &inbox.inbox_id,
+        in_reply_to.as_ref(),
+        &references,
+        &mid,
+    )
+    .await?;
+    persist_sent(
+        state,
+        &inbox,
+        &req,
+        &send_ctx,
+        &signed,
+        thread_id,
+        is_new,
+        in_reply_to,
+        references,
+        headers,
+    )
+    .await?;
     Ok(Json(SendMessageResponse {
         message_id: MessageId::new(signed.message_id.clone()),
         thread_id,
@@ -417,6 +442,13 @@ fn outbound_to_app(err: OutboundError) -> AppError {
     }
 }
 
+fn header_ci<'a>(headers: Option<&'a BTreeMap<String, String>>, name: &str) -> Option<&'a str> {
+    headers?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
 fn headers_from_raw(raw: &[u8]) -> Option<BTreeMap<String, String>> {
     let text = String::from_utf8_lossy(raw);
     let header_block = text.split("\r\n\r\n").next().unwrap_or("");
@@ -466,14 +498,16 @@ fn sent_labels(user: &[String]) -> Vec<String> {
     labels
 }
 
-/// Assign a thread via [`ReferenceChainThreading`] over a store-backed index. Re-bracketed
-/// `in_reply_to` is what the index is queried with (C3). Unbracketed stored parent ids are
-/// also keyed under their bracketed form so that lookup can hit.
+/// Assign a thread via [`ReferenceChainThreading`] over a store-backed index.
+///
+/// `in_reply_to` / `references` are the values that went on the MIME (C3). Unbracketed
+/// stored parent ids are also keyed under their bracketed form so `canonical_link` can hit.
 async fn assign_outbound_thread(
     pool: &sqlx::PgPool,
     filter: &amk_core::scope::ScopeFilter,
     inbox_id: &InboxId,
-    send_ctx: &SendContext,
+    in_reply_to: Option<&MessageId>,
+    references: &[MessageId],
     message_id: &MessageId,
 ) -> Result<(ThreadId, bool), AppError> {
     let page = messages::list(
@@ -491,21 +525,12 @@ async fn assign_outbound_thread(
             index.insert(item.inbox_id, &bracketed, item.thread_id);
         }
     }
-    let irt = send_ctx
-        .in_reply_to
-        .as_ref()
-        .map(|s| MessageId::bracketed(s.as_str()));
-    let refs: Vec<MessageId> = send_ctx
-        .references
-        .iter()
-        .map(|s| MessageId::bracketed(s.as_str()))
-        .collect();
     let mut candidate = ThreadCandidate::new(inbox_id).with_message_id(message_id);
-    if let Some(ref parent) = irt {
+    if let Some(parent) = in_reply_to {
         candidate = candidate.with_in_reply_to(parent);
     }
-    if !refs.is_empty() {
-        candidate = candidate.with_references(&refs);
+    if !references.is_empty() {
+        candidate = candidate.with_references(references);
     }
     match ReferenceChainThreading.assign(&index, &candidate) {
         ThreadAssignment::Existing { thread_id, .. } => Ok((thread_id, false)),
@@ -521,6 +546,9 @@ async fn persist_sent(
     signed: &SignedMessage,
     thread_id: ThreadId,
     is_new: bool,
+    in_reply_to: Option<MessageId>,
+    references: Vec<MessageId>,
+    headers: Option<BTreeMap<String, String>>,
 ) -> Result<(), AppError> {
     let now = Timestamp::now();
     let message_id = MessageId::new(signed.message_id.clone());
@@ -530,19 +558,7 @@ async fn persist_sent(
     let labels = sent_labels(&req.labels);
     let preview = preview_of(req.text.as_deref());
     let size = signed.raw.len() as u64;
-    let in_reply_to = send_ctx.in_reply_to.as_ref().map(MessageId::bracketed);
-    let references = if send_ctx.references.is_empty() {
-        None
-    } else {
-        Some(
-            send_ctx
-                .references
-                .iter()
-                .map(MessageId::bracketed)
-                .collect(),
-        )
-    };
-    let headers = headers_from_raw(&signed.raw);
+    let references = (!references.is_empty()).then_some(references);
     let smtp_id = Some(uuid::Uuid::new_v4().simple().to_string());
 
     if is_new {
