@@ -50,6 +50,32 @@ async fn go(
     pod: PodId,
     inbox: &InboxId,
 ) -> Result<amk_ingest::Accepted, IngestError> {
+    match accept(
+        pool,
+        auth,
+        AcceptRequest {
+            raw,
+            envelope: envelope(mail_from),
+            dest: dest(org, pod, inbox),
+            max_message_bytes: CAP,
+        },
+    )
+    .await?
+    {
+        Some(accepted) => Ok(accepted),
+        None => panic!("expected a stored message, got SPF-hardfail discard"),
+    }
+}
+
+async fn go_opt(
+    pool: &PgPool,
+    auth: &Authenticator,
+    raw: &[u8],
+    mail_from: &str,
+    org: &OrganizationId,
+    pod: PodId,
+    inbox: &InboxId,
+) -> Result<Option<amk_ingest::Accepted>, IngestError> {
     accept(
         pool,
         auth,
@@ -78,7 +104,7 @@ async fn spf_none_no_dkim_is_stored_unauthenticated_and_hidden_from_list() {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let id = mid("unauth");
     let raw =
         MimeSpec::simple("Alice Probe <alice@probe.test>", inbox.as_str(), "hello", &id, "body")
@@ -112,6 +138,61 @@ async fn spf_none_no_dkim_is_stored_unauthenticated_and_hidden_from_list() {
     .await
     .unwrap();
     assert_eq!(page.items.len(), 0, "list without include flags hides unauthenticated");
+
+    let text = got.text.as_deref().expect("text");
+    assert!(text.ends_with('\n'), "text keeps trailing newline, got {text:?}");
+    let without_nl = text
+        .strip_suffix('\n')
+        .and_then(|s| s.strip_suffix('\r').or(Some(s)));
+    assert_eq!(
+        got.extracted_text.as_deref(),
+        without_nl,
+        "extracted_text is text minus the trailing newline"
+    );
+    assert!(got.extracted_html.is_none(), "no HTML → omit extracted_html");
+    assert!(
+        got.item
+            .preview
+            .as_deref()
+            .is_some_and(|p| p.ends_with('\n')),
+        "preview keeps trailing newline"
+    );
+}
+
+/// 09b branch 2: SPF hardfail → DATA/accept 250-equivalent, store nothing. No `spam`.
+#[tokio::test]
+async fn spf_hardfail_is_accepted_and_stores_nothing() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
+    let auth = Authenticator::spf_fail();
+    let id = mid("hardfail");
+    let raw =
+        MimeSpec::simple("Probe <probe@example.net>", inbox.as_str(), "hf", &id, "x").render();
+
+    let out = go_opt(&pool, &auth, &raw, "probe@example.net", &org, pod, &inbox)
+        .await
+        .expect("hardfail is not a 5xx");
+    assert!(out.is_none(), "hardfail stores nothing");
+
+    let f = filter(&org, pod, &inbox);
+    assert!(
+        messages::get(&pool, &f, &inbox, &MessageId::new(&id), &[])
+            .await
+            .unwrap()
+            .is_none(),
+        "GET-by-id empty"
+    );
+    let page = messages::list(
+        &pool,
+        &f,
+        &[],
+        ListMessagesQuery { limit: 50, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 0, "list empty");
 }
 
 /// Case 6: unbracketed parent In-Reply-To joins the parent thread; structured
@@ -122,7 +203,7 @@ async fn unbracketed_in_reply_to_joins_and_preserves_wire_header() {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let sfx = unique_suffix();
     let root_inner = format!("amkc3-root-{sfx}@appsynergy.io");
     let root_id = format!("<{root_inner}>");
@@ -166,6 +247,13 @@ async fn unbracketed_in_reply_to_joins_and_preserves_wire_header() {
         .and_then(|h| h.get("In-Reply-To"))
         .map(String::as_str);
     assert_eq!(wire, Some(root_inner.as_str()), "headers.In-Reply-To stays the bare wire value");
+    let keys: BTreeSet<&str> = child
+        .item
+        .headers
+        .as_ref()
+        .map(|h| h.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(keys, BTreeSet::from(["In-Reply-To"]), "headers map is only In-Reply-To");
 }
 
 /// Case 7: subject is not a grouping key; empty → None; `Re:` stored; 10 KB kept;
@@ -176,7 +264,7 @@ async fn subjects_do_not_thread_and_normalize_as_specified() {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let f = filter(&org, pod, &inbox);
 
     let a = mid("subj-a");
@@ -236,6 +324,28 @@ async fn subjects_do_not_thread_and_normalize_as_specified() {
         .unwrap();
     assert_eq!(re_row.item.subject.as_deref(), Some("Re:"));
     assert_ne!(re.thread_id, ta.thread_id);
+
+    let strip_id = mid("ws");
+    go(
+        &pool,
+        &auth,
+        &MimeSpec::simple("a@probe.test", inbox.as_str(), "foo   ", &strip_id, "x").render(),
+        "a@probe.test",
+        &org,
+        pod,
+        &inbox,
+    )
+    .await
+    .unwrap();
+    let strip_row = messages::get(&pool, &f, &inbox, &MessageId::new(&strip_id), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        strip_row.item.subject.as_deref(),
+        Some("foo"),
+        "R5: trailing subject whitespace is stripped"
+    );
 
     let long_id = mid("long");
     let long_subj = "x".repeat(10 * 1024);
@@ -310,7 +420,7 @@ async fn in_reply_to_unknown_id_opens_a_new_thread() {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let root = mid("known");
     let orphan = mid("orphan");
     let parent = go(
@@ -341,16 +451,36 @@ async fn self_references_and_long_references_chain() {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
 
-    let loop_id = mid("loop");
-    let mut r#loop = MimeSpec::simple("a@probe.test", inbox.as_str(), "loop", &loop_id, "x");
-    r#loop.references = Some(format!("{loop_id} {loop_id}"));
-    r#loop.in_reply_to = Some(loop_id.clone());
-    let first = go(&pool, &auth, &r#loop.render(), "a@probe.test", &org, pod, &inbox)
+    let parent_id = mid("pref");
+    let child_id = mid("cref");
+    let parent = go(
+        &pool,
+        &auth,
+        &MimeSpec::simple("a@probe.test", inbox.as_str(), "parent", &parent_id, "x").render(),
+        "a@probe.test",
+        &org,
+        pod,
+        &inbox,
+    )
+    .await
+    .unwrap();
+    let mut child = MimeSpec::simple("a@probe.test", inbox.as_str(), "child", &child_id, "x");
+    child.references = Some(format!("{child_id} {parent_id}"));
+    let joined = go(&pool, &auth, &child.render(), "a@probe.test", &org, pod, &inbox)
         .await
         .unwrap();
-    assert!(!first.thread_id.to_string().is_empty());
+    let f = filter(&org, pod, &inbox);
+    let child_row = messages::get(&pool, &f, &inbox, &MessageId::new(&child_id), &[])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        child_row.item.thread_id, parent.thread_id,
+        "References naming self and parent still join the parent"
+    );
+    assert_eq!(joined.thread_id, parent.thread_id);
 
     let long_id = mid("refs500");
     let refs: String = (0..500)
@@ -367,7 +497,6 @@ async fn self_references_and_long_references_chain() {
         "500-entry References must not hang (elapsed {:?})",
         start.elapsed()
     );
-    let f = filter(&org, pod, &inbox);
     let row = messages::get(&pool, &f, &inbox, &MessageId::new(&long_id), &[])
         .await
         .unwrap()
@@ -385,7 +514,7 @@ async fn same_message_id_in_a_second_inbox_is_that_inboxs_own_thread() {
     let pod = seed_pod(&pool, &org).await;
     let a = seed_inbox_at(&pool, &org, pod, &format!("a-{}@local.test", unique_suffix())).await;
     let b = seed_inbox_at(&pool, &org, pod, &format!("b-{}@local.test", unique_suffix())).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let id = mid("shared");
     let raw = MimeSpec::simple("eve@probe.test", a.as_str(), "e", &id, "x").render();
 
@@ -419,7 +548,7 @@ async fn missing_and_duplicate_message_id_are_554_and_leave_store() {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let f = filter(&org, pod, &inbox);
 
     let mut missing = MimeSpec::simple("a@probe.test", inbox.as_str(), "x", "<unused@x>", "x");
@@ -466,22 +595,25 @@ async fn envelope_from_is_not_stored_missing_to_is_empty_multiple_from_is_554() 
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::envelope_spf_pass("pass.test");
     let f = filter(&org, pod, &inbox);
 
     let id = mid("env");
     let raw =
-        MimeSpec::simple("Alice Probe <alice@probe.test>", inbox.as_str(), "s", &id, "x").render();
-    go(&pool, &auth, &raw, "other@elsewhere.test", &org, pod, &inbox)
+        MimeSpec::simple("Alice Probe <alice@pass.test>", inbox.as_str(), "s", &id, "x").render();
+    go(&pool, &auth, &raw, "other@probe.test", &org, pod, &inbox)
         .await
         .unwrap();
     let row = messages::get(&pool, &f, &inbox, &MessageId::new(&id), &[])
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(row.item.from, "Alice Probe <alice@probe.test>");
+    assert_eq!(row.item.from, "Alice Probe <alice@pass.test>");
     let set: BTreeSet<&str> = row.item.labels.iter().map(String::as_str).collect();
-    assert!(set.contains(labels::UNAUTHENTICATED));
+    assert!(
+        set.contains(labels::UNAUTHENTICATED),
+        "SPF follows envelope MAIL FROM (probe.test = none), not header From (pass.test)"
+    );
 
     let no_to_id = mid("noto");
     let mut no_to = MimeSpec::simple("a@probe.test", inbox.as_str(), "s", &no_to_id, "x");
@@ -539,7 +671,7 @@ async fn crlf_field(field: &str, tweak: impl FnOnce(&mut MimeSpec)) {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let id = mid(&format!("crlf-{}", field.to_ascii_lowercase()));
     let mut spec = MimeSpec::simple("a@probe.test", inbox.as_str(), "s", &id, "x");
     tweak(&mut spec);
@@ -565,7 +697,7 @@ async fn hostile_mime_is_554_and_store_empty() {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let f = filter(&org, pod, &inbox);
 
     let cases: &[(&str, Vec<u8>)] = &[
@@ -599,7 +731,7 @@ async fn attachment_filename_traversal_and_nul_rejected_200_char_kept() {
         return;
     };
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
-    let auth = Authenticator::unresolved_is_none().expect("auth");
+    let auth = Authenticator::unresolved_is_none();
     let f = filter(&org, pod, &inbox);
 
     let trav = mid("trav");

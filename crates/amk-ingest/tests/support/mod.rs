@@ -122,7 +122,7 @@ impl Persist for CountingPersist {
         _envelope: &Envelope,
         _dest: &Delivery,
         _max_message_bytes: usize,
-    ) -> Result<Accepted, IngestError> {
+    ) -> Result<Option<Accepted>, IngestError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Err(IngestError::rejected(554, "persist must not run"))
     }

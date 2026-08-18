@@ -99,7 +99,7 @@ async fn size_cap_minus_one_and_cap_accepted_cap_plus_one_rejected() {
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
     let mut lookup = FixedInboxLookup::new();
     lookup.insert(inbox.clone(), org.clone(), pod);
-    let auth = amk_ingest::Authenticator::unresolved_is_none().expect("auth");
+    let auth = amk_ingest::Authenticator::unresolved_is_none();
     let persist = StorePersist { pool: pool.clone(), auth };
     const CAP: usize = 400;
     let addr = spawn_smtp(short_pause_config(&["local.test"], CAP), lookup, persist).await;
@@ -160,7 +160,7 @@ async fn missing_message_id_data_is_554_and_store_empty() {
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
     let mut lookup = FixedInboxLookup::new();
     lookup.insert(inbox.clone(), org.clone(), pod);
-    let auth = amk_ingest::Authenticator::unresolved_is_none().expect("auth");
+    let auth = amk_ingest::Authenticator::unresolved_is_none();
     let persist = StorePersist { pool: pool.clone(), auth };
     let addr = spawn_smtp(short_pause_config(&["local.test"], 64 * 1024), lookup, persist).await;
 
@@ -185,6 +185,34 @@ async fn missing_message_id_data_is_554_and_store_empty() {
     .await
     .unwrap();
     assert!(listed.items.is_empty(), "store must stay empty");
+}
+
+/// 09b branch 2 over SMTP: SPF hardfail is DATA 250, store empty. Not a 5xx.
+#[tokio::test]
+async fn spf_hardfail_data_is_250_and_store_empty() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
+    let mut lookup = FixedInboxLookup::new();
+    lookup.insert(inbox.clone(), org.clone(), pod);
+    let persist = StorePersist { pool: pool.clone(), auth: amk_ingest::Authenticator::spf_fail() };
+    let addr = spawn_smtp(short_pause_config(&["local.test"], 64 * 1024), lookup, persist).await;
+
+    let id = mid("hf-smtp");
+    let raw = MimeSpec::simple("p@example.net", inbox.as_str(), "hf", &id, "x").render();
+    let (mut c, _) = SmtpClient::connect_after_banner(addr).await;
+    assert_eq!(reply_code(&c.cmd("EHLO client.test").await), 250);
+    assert_eq!(reply_code(&c.cmd("MAIL FROM:<p@example.net>").await), 250);
+    assert_eq!(reply_code(&c.cmd(&format!("RCPT TO:<{}>", inbox.as_str())).await), 250);
+    let data = c.data(&raw).await;
+    assert_eq!(reply_code(&data), 250, "hardfail is 250 not 5xx, got {data:?}");
+
+    let filter = inbox_filter(&org, pod, &inbox);
+    assert!(messages::get(&pool, &filter, &inbox, &MessageId::new(&id), &[])
+        .await
+        .unwrap()
+        .is_none());
 }
 
 fn sized_message(message_id: &str, to: &str, len: usize) -> Vec<u8> {

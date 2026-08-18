@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::IpAddr;
-use std::time::Instant as StdInstant;
 
 use amk_core::scope::{Mount, Resolved, Scope};
 use amk_core::threading::{
@@ -22,10 +21,7 @@ use amk_types::message::Attachment;
 use amk_types::Timestamp;
 use chrono::{DateTime, Utc};
 use mail_auth::spf::verify::SpfParameters;
-use mail_auth::{
-    AuthenticatedMessage, DkimResult, DnsError, Error as AuthError, MessageAuthenticator,
-    Parameters, ResolverCache, SpfResult, Txt,
-};
+use mail_auth::{AuthenticatedMessage, DkimResult, MessageAuthenticator, SpfResult};
 use mail_parser::{HeaderName, Message, MessageParser, MimeHeaders, PartType};
 use sqlx::PgPool;
 
@@ -64,20 +60,57 @@ pub struct AcceptRequest<'a> {
     pub max_message_bytes: usize,
 }
 
-/// SPF/DKIM via `mail-auth`. Converted at this edge: no `mail_auth::` type is public.
+/// SPF/DKIM via `mail-auth`, or a test stub. No `mail_auth::` type is public.
 #[derive(Clone)]
 pub struct Authenticator {
-    resolver: MessageAuthenticator,
-    /// When set, every TXT lookup is a miss — SPF=none, no DKIM pass. Tests inject this
-    /// so case 5 does not depend on live DNS. Production uses [`Self::live`].
-    unresolved_is_none: bool,
+    inner: AuthInner,
+}
+
+#[derive(Clone)]
+enum AuthInner {
+    Live {
+        resolver: Box<MessageAuthenticator>,
+    },
+    /// Always SPF=none, no DKIM pass.
+    StubNone,
+    /// Always SPF hardfail (09b branch 2): DATA 250, store nothing.
+    StubFail,
+    /// SPF pass iff **envelope** MAIL FROM domain equals `pass_domain`.
+    /// Never inspects header From — that is the case-12 pin.
+    StubEnvelope {
+        pass_domain: String,
+    },
+}
+
+/// Internal verdict. `Fail` is 09b hardfail, not a label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthOutcome {
+    Pass,
+    None,
+    Hardfail,
 }
 
 impl std::fmt::Debug for Authenticator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Authenticator")
-            .field("unresolved_is_none", &self.unresolved_is_none)
-            .finish()
+        match &self.inner {
+            AuthInner::Live { .. } => f
+                .debug_struct("Authenticator")
+                .field("mode", &"live")
+                .finish(),
+            AuthInner::StubNone => f
+                .debug_struct("Authenticator")
+                .field("mode", &"none")
+                .finish(),
+            AuthInner::StubFail => f
+                .debug_struct("Authenticator")
+                .field("mode", &"fail")
+                .finish(),
+            AuthInner::StubEnvelope { pass_domain } => f
+                .debug_struct("Authenticator")
+                .field("mode", &"envelope")
+                .field("pass_domain", pass_domain)
+                .finish(),
+        }
     }
 }
 
@@ -86,78 +119,83 @@ impl Authenticator {
         let resolver = MessageAuthenticator::new_system_conf()
             .or_else(|_| MessageAuthenticator::new_cloudflare())
             .map_err(|e| IngestError::Io(format!("mail-auth resolver: {e}")))?;
-        Ok(Self { resolver, unresolved_is_none: false })
+        Ok(Self { inner: AuthInner::Live { resolver: Box::new(resolver) } })
     }
 
-    /// TXT lookups resolve as "no record" (SPF=none, no DKIM pass). Still calls `mail-auth`.
-    pub fn unresolved_is_none() -> Result<Self, IngestError> {
-        let resolver = MessageAuthenticator::new_cloudflare()
-            .or_else(|_| MessageAuthenticator::new_system_conf())
-            .map_err(|e| IngestError::Io(format!("mail-auth resolver: {e}")))?;
-        Ok(Self { resolver, unresolved_is_none: true })
+    /// SPF=none, no DKIM pass. Tests inject this so case 5 does not depend on live DNS.
+    pub fn unresolved_is_none() -> Self {
+        Self { inner: AuthInner::StubNone }
     }
 
-    async fn is_authenticated(&self, raw: &[u8], envelope: &Envelope) -> bool {
+    /// SPF hardfail stub. Fixture 09b branch 2: gateway 250, store nothing.
+    pub fn spf_fail() -> Self {
+        Self { inner: AuthInner::StubFail }
+    }
+
+    /// SPF pass only when envelope MAIL FROM's domain is `pass_domain` (ASCII-folded).
+    /// Header From is not consulted.
+    pub fn envelope_spf_pass(pass_domain: impl Into<String>) -> Self {
+        Self { inner: AuthInner::StubEnvelope { pass_domain: pass_domain.into() } }
+    }
+
+    fn stub_outcome(&self, envelope: &Envelope) -> Option<AuthOutcome> {
+        match &self.inner {
+            AuthInner::Live { .. } => None,
+            AuthInner::StubNone => Some(AuthOutcome::None),
+            AuthInner::StubFail => Some(AuthOutcome::Hardfail),
+            AuthInner::StubEnvelope { pass_domain } => {
+                let domain = envelope_mail_from_domain(&envelope.mail_from);
+                if domain.eq_ignore_ascii_case(pass_domain) {
+                    Some(AuthOutcome::Pass)
+                } else {
+                    Some(AuthOutcome::None)
+                }
+            }
+        }
+    }
+
+    async fn outcome(&self, raw: &[u8], envelope: &Envelope) -> AuthOutcome {
+        if let Some(stub) = self.stub_outcome(envelope) {
+            return stub;
+        }
+        let AuthInner::Live { resolver } = &self.inner else {
+            return AuthOutcome::None;
+        };
         let sender = envelope.mail_from.as_str();
         let ehlo = if envelope.ehlo_host.is_empty() {
             "localhost"
         } else {
             envelope.ehlo_host.as_str()
         };
-        let host = "localhost";
-        let params = SpfParameters::verify_mail_from(envelope.client_ip, ehlo, host, sender);
-        let spf = if self.unresolved_is_none {
-            let cache = NxTxt;
-            self.resolver
-                .verify_spf(Parameters::new(params).with_txt_cache(&cache))
-                .await
-        } else {
-            self.resolver.verify_spf(params).await
-        };
+        let params = SpfParameters::verify_mail_from(envelope.client_ip, ehlo, "localhost", sender);
+        let spf = resolver.verify_spf(params).await;
+        if matches!(spf.result(), SpfResult::Fail) {
+            return AuthOutcome::Hardfail;
+        }
         let spf_pass = matches!(spf.result(), SpfResult::Pass);
-
         let dkim_pass = match AuthenticatedMessage::parse(raw) {
-            Some(msg) => {
-                let cache = NxTxt;
-                let outputs = if self.unresolved_is_none {
-                    self.resolver
-                        .verify_dkim(Parameters::new(&msg).with_txt_cache(&cache))
-                        .await
-                } else {
-                    self.resolver.verify_dkim(&msg).await
-                };
-                outputs.iter().any(|o| o.result() == &DkimResult::Pass)
-            }
+            Some(msg) => resolver
+                .verify_dkim(&msg)
+                .await
+                .iter()
+                .any(|o| o.result() == &DkimResult::Pass),
             None => false,
         };
-        spf_pass || dkim_pass
+        if spf_pass || dkim_pass {
+            AuthOutcome::Pass
+        } else {
+            AuthOutcome::None
+        }
     }
 }
 
-/// Cache that answers every TXT lookup as "no usable record" without touching the network.
-struct NxTxt;
-
-impl ResolverCache<Box<str>, Txt> for NxTxt {
-    fn get<Q>(&self, _: &Q) -> Option<Txt>
-    where
-        Box<str>: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        Some(Txt::Error(AuthError::Dns(DnsError::InvalidRecordType)))
-    }
-
-    fn remove<Q>(&self, _: &Q) -> Option<Txt>
-    where
-        Box<str>: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
-    {
-        None
-    }
-
-    fn insert(&self, _: Box<str>, _: Txt, _: StdInstant) {}
+fn envelope_mail_from_domain(mail_from: &str) -> &str {
+    mail_from.rsplit_once('@').map(|(_, d)| d).unwrap_or("")
 }
 
 /// Persist seam so SMTP session tests that never reach DATA do not need a pool.
+///
+/// `Ok(None)` is SPF hardfail: the session still answers 250 and stores nothing.
 pub trait Persist: Send + Sync {
     fn persist(
         &self,
@@ -165,7 +203,7 @@ pub trait Persist: Send + Sync {
         envelope: &Envelope,
         dest: &Delivery,
         max_message_bytes: usize,
-    ) -> impl Future<Output = Result<Accepted, IngestError>> + Send;
+    ) -> impl Future<Output = Result<Option<Accepted>, IngestError>> + Send;
 }
 
 /// [`accept`] against a real pool.
@@ -182,7 +220,7 @@ impl Persist for StorePersist {
         envelope: &Envelope,
         dest: &Delivery,
         max_message_bytes: usize,
-    ) -> Result<Accepted, IngestError> {
+    ) -> Result<Option<Accepted>, IngestError> {
         accept(
             &self.pool,
             &self.auth,
@@ -202,11 +240,13 @@ fn reject(message: &str) -> IngestError {
 }
 
 /// Parse + auth + persist. Size `cap` is accepted; `cap + 1` is rejected.
+///
+/// `Ok(None)` is 09b SPF hardfail: accepted at the gateway, not stored.
 pub async fn accept(
     pool: &PgPool,
     auth: &Authenticator,
     req: AcceptRequest<'_>,
-) -> Result<Accepted, IngestError> {
+) -> Result<Option<Accepted>, IngestError> {
     if req.raw.len() > req.max_message_bytes {
         return Err(IngestError::rejected(552, "Message size exceeds limit"));
     }
@@ -261,15 +301,13 @@ pub async fn accept(
 
     let in_reply_to = structured_in_reply_to(&parsed);
     let references = structured_references(&parsed);
-    let headers = if raw_headers.is_empty() {
-        None
-    } else {
-        Some(raw_headers)
-    };
+    let headers = inbound_header_map(&raw_headers);
 
-    let text = parsed.body_text(0).as_deref().and_then(nonempty);
-    let html = parsed.body_html(0).as_deref().and_then(nonempty);
-    let preview = parsed.body_preview(200).as_deref().and_then(nonempty);
+    let text = keep_body(parsed.body_text(0).as_deref());
+    let html = keep_body(parsed.body_html(0).as_deref());
+    let preview = keep_body(parsed.body_preview(200).as_deref());
+    let extracted_text = extracted_from_body(text.as_deref());
+    let extracted_html = None;
     let cc = nonempty_list(address_list(parsed.cc()));
     let bcc = nonempty_list(address_list(parsed.bcc()));
     let reply_to = nonempty_list(address_list(parsed.reply_to()));
@@ -280,8 +318,11 @@ pub async fn accept(
         .map(Timestamp::from)
         .unwrap_or_else(Timestamp::now);
 
-    let authenticated = auth.is_authenticated(req.raw, &req.envelope).await;
-    let msg_labels = inbound_labels(authenticated);
+    let outcome = auth.outcome(req.raw, &req.envelope).await;
+    if outcome == AuthOutcome::Hardfail {
+        return Ok(None);
+    }
+    let msg_labels = inbound_labels(outcome == AuthOutcome::Pass);
 
     let filter = dest_filter(&req.dest);
     if messages::get(pool, &filter, &req.dest.inbox_id, &message_id, &[])
@@ -364,14 +405,14 @@ pub async fn accept(
             reply_to,
             text,
             html,
-            extracted_text: None,
-            extracted_html: None,
+            extracted_text,
+            extracted_html,
         },
     )
     .await;
 
     match insert_result {
-        Ok(()) => Ok(Accepted { message_id, thread_id, inbox_id: req.dest.inbox_id.clone() }),
+        Ok(()) => Ok(Some(Accepted { message_id, thread_id, inbox_id: req.dest.inbox_id.clone() })),
         Err(e) if is_unique_violation(&e) => Err(reject("Duplicate Message-ID")),
         Err(e) => Err(e.into()),
     }
@@ -559,13 +600,33 @@ fn header_value_has_crlf(headers: &BTreeMap<String, String>, name: &str) -> bool
         .any(|(k, v)| k.eq_ignore_ascii_case(name) && has_crlf(v))
 }
 
-fn nonempty(s: &str) -> Option<String> {
-    let s = s.trim_end();
-    if s.is_empty() {
+/// Keep the parsed body byte-for-byte, including a trailing newline. Omit only `""`.
+fn keep_body(s: Option<&str>) -> Option<String> {
+    s.filter(|s| !s.is_empty()).map(ToOwned::to_owned)
+}
+
+/// Fixture 21: `extracted_text` is the body without the trailing newline; `text` keeps it.
+fn extracted_from_body(text: Option<&str>) -> Option<String> {
+    let t = text?;
+    let stripped = t.strip_suffix('\n').unwrap_or(t);
+    let stripped = stripped.strip_suffix('\r').unwrap_or(stripped);
+    if stripped.is_empty() {
         None
     } else {
-        Some(s.to_owned())
+        Some(stripped.to_owned())
     }
+}
+
+/// Live inbound `headers` is `In-Reply-To` when present. From/To/Subject/Message-ID/
+/// Content-Type stay off this map — they have first-class fields.
+fn inbound_header_map(raw: &BTreeMap<String, String>) -> Option<BTreeMap<String, String>> {
+    raw.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("In-Reply-To"))
+        .map(|(k, v)| {
+            let mut map = BTreeMap::new();
+            map.insert(k.clone(), v.clone());
+            map
+        })
 }
 
 fn nonempty_list(v: Vec<String>) -> Option<Vec<String>> {
