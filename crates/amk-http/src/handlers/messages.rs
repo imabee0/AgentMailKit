@@ -383,11 +383,7 @@ async fn send_prepared(
         &req,
         &send_ctx,
         &signed,
-        thread_id,
-        is_new,
-        in_reply_to,
-        references,
-        headers,
+        PersistSent { thread_id, is_new, in_reply_to, references, headers },
     )
     .await?;
     Ok(Json(SendMessageResponse {
@@ -538,18 +534,23 @@ async fn assign_outbound_thread(
     }
 }
 
+struct PersistSent {
+    thread_id: ThreadId,
+    is_new: bool,
+    in_reply_to: Option<MessageId>,
+    references: Vec<MessageId>,
+    headers: Option<BTreeMap<String, String>>,
+}
+
 async fn persist_sent(
     state: &AppState,
     inbox: &amk_types::Inbox,
     req: &SendMessageRequest,
     send_ctx: &SendContext,
     signed: &SignedMessage,
-    thread_id: ThreadId,
-    is_new: bool,
-    in_reply_to: Option<MessageId>,
-    references: Vec<MessageId>,
-    headers: Option<BTreeMap<String, String>>,
+    persist: PersistSent,
 ) -> Result<(), AppError> {
+    let PersistSent { thread_id, is_new, in_reply_to, references, headers } = persist;
     let now = Timestamp::now();
     let message_id = MessageId::new(signed.message_id.clone());
     let to = flatten_opt(req.to.as_ref());
