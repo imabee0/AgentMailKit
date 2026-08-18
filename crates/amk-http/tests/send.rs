@@ -5,10 +5,41 @@
 
 mod support;
 
+use amk_core::scope::{Mount, Resolved, Scope};
 use amk_outbound::INLINE_ATTACHMENT_MAX_BYTES;
-use amk_types::ids::MessageId;
+use amk_store::messages::{self, ListMessagesQuery};
+use amk_store::pagination::SortDirection;
+use amk_types::ids::{InboxId, MessageId, OrganizationId, PodId};
 use base64::Engine as _;
 use serde_json::json;
+
+fn inbox_scope(org: &OrganizationId, pod: PodId, inbox: &InboxId) -> amk_core::scope::ScopeFilter {
+    let scope = Scope::Inbox { organization_id: org.clone(), pod_id: pod, inbox_id: inbox.clone() };
+    match scope
+        .resolve(&Mount::Organization)
+        .expect("inbox scope resolves")
+    {
+        Resolved::Ready(f) => f,
+        Resolved::Probe(_) => panic!("expected a settled inbox window"),
+    }
+}
+
+async fn store_rows_for_inbox(
+    pool: &sqlx::PgPool,
+    org: &OrganizationId,
+    pod: PodId,
+    inbox: &InboxId,
+) -> usize {
+    let page = messages::list(
+        pool,
+        &inbox_scope(org, pod, inbox),
+        &[],
+        ListMessagesQuery { limit: 100, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await
+    .expect("store list");
+    page.items.len()
+}
 
 fn encode_mid(id: &str) -> String {
     MessageId::new(id).to_path_segment()
@@ -24,7 +55,7 @@ async fn no_key_send_stores_nothing() {
     let pod = support::seed_pod(&pool, &org).await;
     let inbox = support::seed_inbox(&pool, &org, pod, "nokey").await;
     let key = support::org_key(&pool, &org).await;
-    let router = support::test_router(pool);
+    let router = support::test_router(pool.clone());
     let seg = inbox.to_path_segment();
 
     let resp = support::post(
@@ -39,7 +70,12 @@ async fn no_key_send_stores_nothing() {
 
     let listed = support::get(&router, &format!("/v0/inboxes/{seg}/messages"), Some(&key)).await;
     assert_eq!(listed.status, 200, "{}", listed.body);
-    assert_eq!(listed.json.unwrap()["count"], 0, "store must be empty after a refused send");
+    assert_eq!(listed.json.unwrap()["count"], 0, "HTTP list must be empty after a refused send");
+    assert_eq!(
+        store_rows_for_inbox(&pool, &org, pod, &inbox).await,
+        0,
+        "store must hold zero rows even under no label exclusion (trash persist would hide from list)"
+    );
 }
 
 /// 2. `reply` GET the thread: parent membership, same `thread_id`.
@@ -120,9 +156,15 @@ async fn unbracketed_parent_reply_still_joins() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|m| m["message_id"].as_str() != Some(parent_mid.as_str()));
-    let irt = reply.unwrap()["in_reply_to"].as_str().unwrap();
-    assert!(irt.starts_with('<') && irt.ends_with('>'), "re-bracketed on store: {irt}");
+        .find(|m| m["message_id"].as_str() != Some(parent_mid.as_str()))
+        .expect("reply member");
+    assert_eq!(reply["thread_id"].as_str().unwrap(), parent_thread.to_string());
+    let irt = reply["in_reply_to"].as_str().unwrap();
+    assert_eq!(
+        irt,
+        format!("<{}>", parent_mid.as_str()),
+        "GET in_reply_to is the re-bracketed parent"
+    );
 }
 
 /// 4. `reply-all` excludes sending inbox, de-duplicates.
@@ -188,6 +230,38 @@ async fn reply_all_excludes_us_and_dedupes() {
         support::get(&router, &format!("/v0/inboxes/{seg}/threads/{parent_thread}"), Some(&key))
             .await;
     assert_eq!(thread.json.unwrap()["message_count"], 2);
+
+    let mid = resp.json.unwrap()["message_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let got = support::get(
+        &router,
+        &format!("/v0/inboxes/{seg}/messages/{}", encode_mid(&mid)),
+        Some(&key),
+    )
+    .await;
+    assert_eq!(got.status, 200, "{}", got.body);
+    let stored = got.json.unwrap();
+    let stored_to: Vec<&str> = stored["to"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let stored_cc: Vec<&str> = stored
+        .get("cc")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().map(|v| v.as_str().unwrap()).collect())
+        .unwrap_or_default();
+    assert_eq!(stored_to, ["alice@other.test", "bob@other.test"]);
+    assert_eq!(stored_cc, ["carol@other.test"]);
+    assert!(!stored_to
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(inbox.as_str())));
+    assert!(!stored_cc
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case(inbox.as_str())));
 }
 
 /// 5. `forward` returned `thread_id` ≠ parent.
@@ -213,13 +287,28 @@ async fn forward_opens_a_new_thread() {
     )
     .await;
     assert_eq!(resp.status, 200, "{}", resp.body);
-    let fwd_thread = resp.json.unwrap()["thread_id"].as_str().unwrap().to_owned();
+    let body = resp.json.unwrap();
+    let fwd_thread = body["thread_id"].as_str().unwrap().to_owned();
+    let fwd_mid = body["message_id"].as_str().unwrap().to_owned();
     assert_ne!(fwd_thread, parent_thread.to_string());
 
     let parent =
         support::get(&router, &format!("/v0/inboxes/{seg}/threads/{parent_thread}"), Some(&key))
             .await;
     assert_eq!(parent.json.unwrap()["message_count"], 1, "forward must not join the parent");
+
+    let created =
+        support::get(&router, &format!("/v0/inboxes/{seg}/threads/{fwd_thread}"), Some(&key)).await;
+    assert_eq!(created.status, 200, "{}", created.body);
+    let t = created.json.unwrap();
+    assert_eq!(t["message_count"], 1, "{t}");
+    let members: Vec<&str> = t["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["message_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(members, [fwd_mid.as_str()], "forwarded message is the sole member: {members:?}");
 }
 
 /// 6. Hostile `headers` (From, Bcc, CR/LF) plus CR/LF in `to` and `subject`.
@@ -261,6 +350,14 @@ async fn hostile_headers_and_crlf_in_to_or_subject_are_rejected() {
         let resp = support::post(&router, &uri, Some(&key), body).await;
         assert_eq!(resp.status, 400, "{label}: {}", resp.body);
         assert_eq!(resp.code(), Some("validation_error"), "{label}: {}", resp.body);
+        let path = resp.first_error().and_then(|e| e.get("path"));
+        if label.contains("to") && !label.contains("header") {
+            assert_eq!(path, Some(&json!(["to"])), "{label}: {}", resp.body);
+        } else if label.contains("subject") {
+            assert_eq!(path, Some(&json!(["subject"])), "{label}: {}", resp.body);
+        } else {
+            assert_eq!(path, Some(&json!(["headers"])), "{label}: {}", resp.body);
+        }
     }
     assert!(rec.sent().is_empty(), "hostile input must not reach the transport");
 
@@ -297,7 +394,13 @@ async fn send_to_a_local_inbox_still_goes_through_transport_and_is_signed() {
     let sent = rec.sent();
     assert_eq!(sent.len(), 1, "no local-inbox short-circuit");
     let raw = String::from_utf8_lossy(&sent[0].raw);
-    assert!(raw.contains("DKIM-Signature:"), "{raw}");
+    let dkim_at = raw.find("DKIM-Signature:").expect("DKIM-Signature in raw");
+    let xtrace_at = raw.find("X-Trace:").expect("X-Trace in raw");
+    let from_at = raw.find("From:").expect("From in raw");
+    assert!(
+        dkim_at < xtrace_at && dkim_at < from_at,
+        "DKIM-Signature must precede caller X-Trace and From: {raw}"
+    );
     assert_eq!(
         raw.matches("X-Trace:").count(),
         1,
@@ -315,7 +418,10 @@ async fn send_to_a_local_inbox_still_goes_through_transport_and_is_signed() {
     )
     .await;
     assert_eq!(got.status, 200, "{}", got.body);
-    let headers = got.json.unwrap()["headers"].clone();
+    let body = got.json.unwrap();
+    let smtp_id = body["smtp_id"].as_str().unwrap_or("");
+    assert!(!smtp_id.is_empty(), "smtp_id must be emitted: {body}");
+    let headers = body["headers"].clone();
     let dkim = headers.as_object().and_then(|o| {
         o.iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("dkim-signature"))
@@ -373,6 +479,37 @@ async fn attachment_size_cap_is_enforced_on_both_sides() {
         assert_eq!(resp.code(), Some("validation_error"), "{n}: {}", resp.body);
     }
     assert_eq!(rec.sent().len(), 1, "only the under-cap send is delivered");
+}
+
+/// URL attachments are refused (fetch is P3 SSRF) and store nothing.
+#[tokio::test]
+async fn url_attachment_is_rejected_and_stores_nothing() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let org = support::seed_org(&pool).await;
+    let pod = support::seed_pod(&pool, &org).await;
+    let inbox = support::seed_inbox(&pool, &org, pod, "urlatt").await;
+    let key = support::org_key(&pool, &org).await;
+    let (router, rec) =
+        support::send_router(pool.clone(), support::fixture_keyring("example.test"));
+    let seg = inbox.to_path_segment();
+
+    let resp = support::post(
+        &router,
+        &format!("/v0/inboxes/{seg}/messages/send"),
+        Some(&key),
+        json!({
+            "to": "you@other.test",
+            "subject": "url",
+            "attachments": [{"url": "https://example.test/file.bin"}]
+        }),
+    )
+    .await;
+    assert_eq!(resp.status, 400, "{}", resp.body);
+    assert_eq!(resp.code(), Some("validation_error"), "{}", resp.body);
+    assert!(rec.sent().is_empty());
+    assert_eq!(store_rows_for_inbox(&pool, &org, pod, &inbox).await, 0);
 }
 
 #[tokio::test]

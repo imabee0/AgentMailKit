@@ -15,13 +15,16 @@ use axum::Json;
 use amk_core::labels::{excluded_labels, system_label_violations, LabelAccess};
 use amk_core::permissions;
 use amk_core::scope::ResourceKind;
+use amk_core::threading::{
+    InMemoryThreadIndex, ReferenceChainThreading, ThreadAssigner, ThreadAssignment, ThreadCandidate,
+};
 use amk_outbound::{
     mailbox_addr, reply_all_recipients, reply_subject, sign_and_deliver, OutboundError,
     SendContext, SignedMessage,
 };
 use amk_store::inboxes;
 use amk_store::messages::{self, ListMessagesQuery, NewMessage};
-use amk_store::pagination::MessageCursor;
+use amk_store::pagination::{MessageCursor, SortDirection};
 use amk_store::threads::{self, NewThread, ThreadMember};
 use amk_store::StoreError;
 use amk_types::ids::{InboxId, MessageId, ThreadId};
@@ -193,11 +196,6 @@ pub async fn delete(
 
 // ---- send / reply / reply-all / forward -------------------------------------------------------
 
-enum ThreadPlan {
-    New,
-    Join(ThreadId),
-}
-
 pub async fn send(
     State(state): State<AppState>,
     ctx: AuthContext,
@@ -208,7 +206,7 @@ pub async fn send(
         Ok(s) => InboxId::new(s),
         Err(_) => return Err(amk_core::scope::ScopeDenial::new(ResourceKind::Message).into()),
     };
-    send_prepared(&state, &ctx, &inbox_id, req, SendContext::default(), ThreadPlan::New).await
+    send_prepared(&state, &ctx, &inbox_id, req, SendContext::default()).await
 }
 
 pub async fn reply(
@@ -226,13 +224,17 @@ pub async fn reply(
     }
     let sending = inbox_id.as_str();
     let (to, cc, bcc) = if req.reply_all == Some(true) {
-        let recips = reply_all_recipients(
+        let (to, cc) = reply_all_recipients(
             &parent.item.from,
             &parent.item.to,
             parent.item.cc.as_deref().unwrap_or(&[]),
             sending,
         );
-        (Some(Addresses::Many(recips)), None, None)
+        (
+            (!to.is_empty()).then_some(Addresses::Many(to)),
+            (!cc.is_empty()).then_some(Addresses::Many(cc)),
+            None,
+        )
     } else if [&req.to, &req.cc, &req.bcc]
         .into_iter()
         .flatten()
@@ -255,15 +257,7 @@ pub async fn reply(
         headers: req.headers,
     };
     let send_ctx = reply_context(&parent);
-    send_prepared(
-        &state,
-        &ctx,
-        &inbox_id,
-        send_req,
-        send_ctx,
-        ThreadPlan::Join(parent.item.thread_id),
-    )
-    .await
+    send_prepared(&state, &ctx, &inbox_id, send_req, send_ctx).await
 }
 
 pub async fn reply_all(
@@ -274,15 +268,15 @@ pub async fn reply_all(
 ) -> Result<Json<SendMessageResponse>, AppError> {
     let (inbox_id, parent_id) = ids_from_path(&raw_inbox_id, &raw_message_id)?;
     let parent = load_parent(&state, &ctx, &inbox_id, &parent_id).await?;
-    let recips = reply_all_recipients(
+    let (to, cc) = reply_all_recipients(
         &parent.item.from,
         &parent.item.to,
         parent.item.cc.as_deref().unwrap_or(&[]),
         inbox_id.as_str(),
     );
     let send_req = SendMessageRequest {
-        to: Some(Addresses::Many(recips)),
-        cc: None,
+        to: (!to.is_empty()).then_some(Addresses::Many(to)),
+        cc: (!cc.is_empty()).then_some(Addresses::Many(cc)),
         bcc: None,
         reply_to: req.reply_to,
         subject: Some(reply_subject(parent.item.subject.as_deref())),
@@ -293,15 +287,7 @@ pub async fn reply_all(
         headers: req.headers,
     };
     let send_ctx = reply_context(&parent);
-    send_prepared(
-        &state,
-        &ctx,
-        &inbox_id,
-        send_req,
-        send_ctx,
-        ThreadPlan::Join(parent.item.thread_id),
-    )
-    .await
+    send_prepared(&state, &ctx, &inbox_id, send_req, send_ctx).await
 }
 
 pub async fn forward(
@@ -312,7 +298,7 @@ pub async fn forward(
 ) -> Result<Json<SendMessageResponse>, AppError> {
     let (inbox_id, parent_id) = ids_from_path(&raw_inbox_id, &raw_message_id)?;
     let _parent = load_parent(&state, &ctx, &inbox_id, &parent_id).await?;
-    send_prepared(&state, &ctx, &inbox_id, req, SendContext::default(), ThreadPlan::New).await
+    send_prepared(&state, &ctx, &inbox_id, req, SendContext::default()).await
 }
 
 fn reply_context(parent: &Message) -> SendContext {
@@ -359,7 +345,6 @@ async fn send_prepared(
     inbox_id: &InboxId,
     req: SendMessageRequest,
     mut send_ctx: SendContext,
-    thread: ThreadPlan,
 ) -> Result<Json<SendMessageResponse>, AppError> {
     let filter = settle_inbox_mount(&state.pool, &ctx.scope, inbox_id).await?;
     permissions::require(&ctx.grants, "message_send")?;
@@ -369,22 +354,36 @@ async fn send_prepared(
         inboxes::get(&state.pool, filter.organization_id(), filter.pod_id().copied(), inbox_id)
             .await?
             .ok_or_else(|| amk_core::scope::ScopeDenial::new(ResourceKind::Message))?;
-    send_ctx.from = inbox.inbox_id.as_str().to_owned();
+    send_ctx.from = formatted_from(&inbox);
 
     let message_id = mint_message_id(&send_ctx.from);
     let signed = sign_and_deliver(&req, &send_ctx, &state.keyring, &message_id, &state.transport)
         .await
         .map_err(outbound_to_app)?;
 
-    let thread_id = persist_sent(state, &inbox, &req, &send_ctx, &signed, thread).await?;
+    let mid = MessageId::new(signed.message_id.clone());
+    let (thread_id, is_new) =
+        assign_outbound_thread(&state.pool, &filter, &inbox.inbox_id, &send_ctx, &mid).await?;
+    persist_sent(state, &inbox, &req, &send_ctx, &signed, thread_id, is_new).await?;
     Ok(Json(SendMessageResponse {
         message_id: MessageId::new(signed.message_id.clone()),
         thread_id,
     }))
 }
 
+fn formatted_from(inbox: &amk_types::Inbox) -> String {
+    match inbox.display_name.as_deref() {
+        Some(name) if !name.is_empty() => format!("{name} <{}>", inbox.inbox_id.as_str()),
+        _ => inbox.inbox_id.as_str().to_owned(),
+    }
+}
+
 fn mint_message_id(from: &str) -> String {
-    let domain = from.rsplit_once('@').map(|(_, d)| d).unwrap_or("localhost");
+    let mailbox = mailbox_addr(from);
+    let domain = mailbox
+        .rsplit_once('@')
+        .map(|(_, d)| d)
+        .unwrap_or("localhost");
     format!("<{}@{}>", uuid::Uuid::new_v4(), domain)
 }
 
@@ -395,8 +394,14 @@ fn outbound_to_app(err: OutboundError) -> AppError {
             format!("no DKIM key configured for domain {d}"),
         ),
         OutboundError::ForbiddenHeader(name) => {
-            let mut issue = ValidationIssue::custom(format!("header {name} is not permitted"));
-            issue.path = vec![serde_json::Value::String(name)];
+            // Envelope fields (`to`/`subject`/…) name themselves. A reserved or injected
+            // name came from the request `headers` map — fixture 27 `path` is that field.
+            let path = match name.as_str() {
+                "to" | "cc" | "bcc" | "reply_to" | "subject" | "filename" => name,
+                _ => "headers".to_owned(),
+            };
+            let mut issue = ValidationIssue::custom(format!("header {path} is not permitted"));
+            issue.path = vec![serde_json::Value::String(path)];
             validation_error(issue)
         }
         OutboundError::Assembly(msg) => {
@@ -461,14 +466,62 @@ fn sent_labels(user: &[String]) -> Vec<String> {
     labels
 }
 
+/// Assign a thread via [`ReferenceChainThreading`] over a store-backed index. Re-bracketed
+/// `in_reply_to` is what the index is queried with (C3). Unbracketed stored parent ids are
+/// also keyed under their bracketed form so that lookup can hit.
+async fn assign_outbound_thread(
+    pool: &sqlx::PgPool,
+    filter: &amk_core::scope::ScopeFilter,
+    inbox_id: &InboxId,
+    send_ctx: &SendContext,
+    message_id: &MessageId,
+) -> Result<(ThreadId, bool), AppError> {
+    let page = messages::list(
+        pool,
+        filter,
+        &[],
+        ListMessagesQuery { limit: 10_000, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await?;
+    let mut index = InMemoryThreadIndex::new();
+    for item in page.items {
+        index.insert(item.inbox_id.clone(), &item.message_id, item.thread_id);
+        let bracketed = MessageId::bracketed(item.message_id.as_str());
+        if bracketed.as_str() != item.message_id.as_str() {
+            index.insert(item.inbox_id, &bracketed, item.thread_id);
+        }
+    }
+    let irt = send_ctx
+        .in_reply_to
+        .as_ref()
+        .map(|s| MessageId::bracketed(s.as_str()));
+    let refs: Vec<MessageId> = send_ctx
+        .references
+        .iter()
+        .map(|s| MessageId::bracketed(s.as_str()))
+        .collect();
+    let mut candidate = ThreadCandidate::new(inbox_id).with_message_id(message_id);
+    if let Some(ref parent) = irt {
+        candidate = candidate.with_in_reply_to(parent);
+    }
+    if !refs.is_empty() {
+        candidate = candidate.with_references(&refs);
+    }
+    match ReferenceChainThreading.assign(&index, &candidate) {
+        ThreadAssignment::Existing { thread_id, .. } => Ok((thread_id, false)),
+        ThreadAssignment::New(_) => Ok((ThreadId::new_random(), true)),
+    }
+}
+
 async fn persist_sent(
     state: &AppState,
     inbox: &amk_types::Inbox,
     req: &SendMessageRequest,
     send_ctx: &SendContext,
     signed: &SignedMessage,
-    thread: ThreadPlan,
-) -> Result<ThreadId, AppError> {
+    thread_id: ThreadId,
+    is_new: bool,
+) -> Result<(), AppError> {
     let now = Timestamp::now();
     let message_id = MessageId::new(signed.message_id.clone());
     let to = flatten_opt(req.to.as_ref());
@@ -490,40 +543,35 @@ async fn persist_sent(
         )
     };
     let headers = headers_from_raw(&signed.raw);
-    let joining = matches!(thread, ThreadPlan::Join(_));
+    let smtp_id = Some(uuid::Uuid::new_v4().simple().to_string());
 
-    let thread_id = match thread {
-        ThreadPlan::New => {
-            let thread_id = ThreadId::new_random();
-            threads::insert(
-                &state.pool,
-                NewThread {
-                    thread_id,
-                    organization_id: inbox.organization_id.clone().expect("inbox always has org"),
-                    pod_id: inbox.pod_id,
-                    inbox_id: inbox.inbox_id.clone(),
-                    labels: labels.clone(),
-                    timestamp: now,
-                    received_timestamp: None,
-                    sent_timestamp: Some(now),
-                    senders: vec![send_ctx.from.clone()],
-                    recipients: {
-                        let mut r = to.clone();
-                        r.extend(cc.clone());
-                        r
-                    },
-                    subject: req.subject.clone(),
-                    preview: preview.clone(),
-                    last_message_id: message_id.clone(),
-                    message_count: 1,
-                    size,
+    if is_new {
+        threads::insert(
+            &state.pool,
+            NewThread {
+                thread_id,
+                organization_id: inbox.organization_id.clone().expect("inbox always has org"),
+                pod_id: inbox.pod_id,
+                inbox_id: inbox.inbox_id.clone(),
+                labels: labels.clone(),
+                timestamp: now,
+                received_timestamp: None,
+                sent_timestamp: Some(now),
+                senders: vec![send_ctx.from.clone()],
+                recipients: {
+                    let mut r = to.clone();
+                    r.extend(cc.clone());
+                    r
                 },
-            )
-            .await?;
-            thread_id
-        }
-        ThreadPlan::Join(thread_id) => thread_id,
-    };
+                subject: req.subject.clone(),
+                preview: preview.clone(),
+                last_message_id: message_id.clone(),
+                message_count: 1,
+                size,
+            },
+        )
+        .await?;
+    }
 
     messages::insert(
         &state.pool,
@@ -545,7 +593,7 @@ async fn persist_sent(
             in_reply_to,
             references,
             headers,
-            smtp_id: None,
+            smtp_id,
             size,
             reply_to: {
                 let v = flatten_opt(req.reply_to.as_ref());
@@ -559,7 +607,7 @@ async fn persist_sent(
     )
     .await?;
 
-    if joining {
+    if !is_new {
         let recorded = threads::record_member(
             &state.pool,
             thread_id,
@@ -582,5 +630,5 @@ async fn persist_sent(
             return Err(amk_core::scope::ScopeDenial::new(ResourceKind::Thread).into());
         }
     }
-    Ok(thread_id)
+    Ok(())
 }

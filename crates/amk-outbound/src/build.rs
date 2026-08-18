@@ -10,8 +10,9 @@ use crate::assemble::{check_field, check_headers};
 use crate::signing::Keyring;
 use crate::{OutboundError, SignedMessage};
 
-/// `[SPEC:repo agentmail-toolkit]` via PLAN.md:250 and `amk_http::config` — the inline
-/// attachment / URL threshold. Size `cap - 1` is accepted; `cap` and `cap + 1` are rejected.
+/// **`[INFERRED]`** from PLAN.md:250 ≈5.95MB (`[SPEC:repo agentmail-toolkit]` via
+/// `amk_http::config`). The integer is the plan figure, not a live-probed boundary. Size
+/// `cap - 1` is accepted; `cap` and `cap + 1` are rejected.
 pub const INLINE_ATTACHMENT_MAX_BYTES: usize = 5_950_000;
 
 /// What a send needs beyond the caller's request: who is sending, and the threading position.
@@ -60,8 +61,10 @@ pub fn build_signed(
         check_field("subject", subject)?;
     }
 
-    let domain = ctx
-        .from
+    // `from` may be `Display Name <addr>` (fixture 21). DKIM domain and MAIL FROM are the
+    // addr-spec; the display form still goes on the MIME `From:` line.
+    let mailbox = mailbox_addr(&ctx.from);
+    let domain = mailbox
         .rsplit_once('@')
         .map(|(_, d)| d.to_ascii_lowercase())
         .ok_or_else(|| OutboundError::Assembly(format!("sender {:?} has no domain", ctx.from)))?;
@@ -156,7 +159,7 @@ pub fn build_signed(
 
     Ok(SignedMessage {
         message_id: message_id.to_owned(),
-        envelope_from: ctx.from.clone(),
+        envelope_from: mailbox.to_owned(),
         envelope_to,
         raw: signed,
     })
@@ -219,33 +222,39 @@ pub fn mailbox_addr(addr: &str) -> &str {
         .trim()
 }
 
-/// Recipients for a reply-all: everyone on the parent except the sender itself.
+/// Recipients for a reply-all, split the way the MIME `To`/`Cc` fields are stored.
 ///
-/// **`[INFERRED]`** — no fixture captures the reference's reply-all derivation. What is implemented
-/// is the conventional rule: the parent's `from` plus its `to` and `cc`, minus the sending inbox,
-/// de-duplicated, case-folded for the comparison because an address that differs only in case is
-/// the same mailbox. If a capture ever contradicts this, it is one function to change.
+/// **`[INFERRED]`** — no fixture captures the reference's reply-all derivation. Membership is
+/// unchanged from the earlier flat list: parent `from` + `to` + `cc`, minus the sending inbox,
+/// de-duplicated case-folded. The split is: `to` = parent.from + parent.to (minus us); `cc` =
+/// parent.cc (minus us and anyone already in `to`).
 pub fn reply_all_recipients(
     parent_from: &str,
     parent_to: &[String],
     parent_cc: &[String],
     sending_inbox: &str,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<String>) {
     let me = mailbox_addr(sending_inbox).to_ascii_lowercase();
-    let mut out: Vec<String> = Vec::new();
+    let mut to: Vec<String> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    for addr in std::iter::once(parent_from)
-        .chain(parent_to.iter().map(String::as_str))
-        .chain(parent_cc.iter().map(String::as_str))
-    {
+    for addr in std::iter::once(parent_from).chain(parent_to.iter().map(String::as_str)) {
         let folded = mailbox_addr(addr).to_ascii_lowercase();
         if folded == me || seen.contains(&folded) {
             continue;
         }
         seen.push(folded);
-        out.push(mailbox_addr(addr).to_owned());
+        to.push(mailbox_addr(addr).to_owned());
     }
-    out
+    let mut cc: Vec<String> = Vec::new();
+    for addr in parent_cc {
+        let folded = mailbox_addr(addr).to_ascii_lowercase();
+        if folded == me || seen.contains(&folded) {
+            continue;
+        }
+        seen.push(folded);
+        cc.push(mailbox_addr(addr).to_owned());
+    }
+    (to, cc)
 }
 
 #[cfg(test)]
@@ -392,24 +401,36 @@ mod tests {
 
     #[test]
     fn reply_all_excludes_the_sender_dedupes_and_folds_case() {
-        let out = reply_all_recipients(
+        let (to, cc) = reply_all_recipients(
             "alice@other.test",
             &["ME@example.test".into(), "bob@other.test".into()],
             &["Bob@other.test".into(), "carol@other.test".into()],
             "me@example.test",
         );
-        assert_eq!(out, vec!["alice@other.test", "bob@other.test", "carol@other.test"]);
+        assert_eq!(to, vec!["alice@other.test", "bob@other.test"]);
+        assert_eq!(cc, vec!["carol@other.test"]);
     }
 
     #[test]
     fn reply_all_on_a_message_only_to_us_still_replies_to_the_sender() {
-        let out = reply_all_recipients(
+        let (to, cc) = reply_all_recipients(
             "alice@other.test",
             &["me@example.test".into()],
             &[],
             "me@example.test",
         );
-        assert_eq!(out, vec!["alice@other.test"]);
+        assert_eq!(to, vec!["alice@other.test"]);
+        assert!(cc.is_empty());
+    }
+
+    #[test]
+    fn a_display_name_from_still_signs_for_the_mailbox_domain() {
+        let c = SendContext { from: "AmkTest <me@example.test>".into(), ..Default::default() };
+        let m = build_signed(&req(), &c, &keyring(), "<dn@example.test>").unwrap();
+        assert_eq!(m.envelope_from, "me@example.test");
+        let text = as_text(&m);
+        assert!(text.starts_with("DKIM-Signature:"), "{text}");
+        assert!(text.contains("me@example.test"), "{text}");
     }
 
     #[test]
