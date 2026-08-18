@@ -14,8 +14,11 @@ against this server by changing only the base URL. **No billing surface.**
 ## Commands
 
 ```bash
-./scripts/check.sh               # THE verify command: fmt + clippy + tests + provenance + ledger
-./scripts/check.sh --fast        # same minus clippy (what the Stop hook runs)
+./scripts/bootstrap.sh           # provision this machine/sandbox so every step can run
+./scripts/verify.sh --list       # THE step definitions — CI runs these, one per job
+./scripts/verify.sh clippy       # reproduce a CI failure exactly: same step name as the job
+./scripts/check.sh               # local pre-flight: starts the DB, then runs the steps in order
+./scripts/check.sh --fast        # same minus clippy and audit (what the Stop hook runs)
 cargo test --workspace           # unit + fixture-regression tests alone
 ./scripts/shape-provenance.sh    # dependency direction + naming + boundary-type gate
 ./scripts/plan-ledger.sh         # the plan's obligations, mechanically
@@ -32,10 +35,12 @@ AGENTMAIL_API_KEY='sdxd:agentmail' sdxd run -- bash -c \
 Work runs either on the OVH-adjacent workstation or in Claude's cloud sandbox. The sandbox has the
 repo and nothing else, and several gates degrade **silently** there rather than failing:
 
-- **`./scripts/check.sh` still reports PASS with no Postgres**, having skipped every DB-backed
-  `amk-store` and `amk-http` integration test. It sets `AMK_REQUIRE_DB=1` only when 127.0.0.1:55432
-  answers, and prints a one-line warning when it does not. Read that line before believing a PASS.
-  `./scripts/dev-db.sh up` needs Docker.
+- ~~**`./scripts/check.sh` still reports PASS with no Postgres**~~ — **fixed 2026-08-18.**
+  `./scripts/verify.sh test` now hard-FAILS when 127.0.0.1:55432 does not answer, and `check.sh`
+  starts the database itself. A run without the database can no longer report PASS. `dev-db.sh`
+  no longer needs Docker. With no Postgres the `test` step reports **NOT RUN** — it is never
+  dropped from the list, and `check.sh` ends with `INCOMPLETE` naming it, so a sandbox run can
+  never be mistaken for a full one.
 - **`sdxd` and `secd` are LAN-only.** No AgentMail key, so the conformance harness, `p1-gate.sh`
   and every live probe are unavailable. Do not fabricate their output.
 - **No OVH box, no k3s cluster, no live AgentMail account.** P6 and every fixture-capturing probe
@@ -125,9 +130,14 @@ Long form and the failures that bought each: `docs/OPERATING-RULES.md`.
   so dispatching before a restart runs under default model/effort/tools and nothing inside the
   dispatch can see that. `memory:` is deliberately absent — an unsupported key deregisters silently.
 
-No CI: gating is `./scripts/check.sh` plus the hooks, on the machine running them — a user decision
-with its cost recorded in the plan. `scripts/plan-ledger.sh` asserts no workflow directory exists;
-adding GitHub Actions is a deliberate plan change, not a migration side effect.
+**CI is the authoritative gate** — `.github/workflows/ci.yml`, reversing the 2026-08-15 no-CI
+decision on 2026-08-18 by user instruction. `scripts/plan-ledger.sh` now *requires* the pipeline
+(`ci-layer-github-actions`) where it previously forbade it. Local `check.sh` is a pre-flight; the
+Stop hook is a pre-flight; neither decides whether code merges. Full execution layer — job graph,
+change detection, caching, artifact promotion — is `docs/CI-CD.md`.
+
+CI runs **Lane L only**. The reference credential is deliberately never present in Actions, so
+`CURRENT_PHASE` still advances only on operator-run Lane R evidence.
 
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
 writing to `amk-types`, to `docs/PLAN.md`, outside its dispatched `.amk-scope`, or introducing a

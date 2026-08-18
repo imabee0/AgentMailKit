@@ -18,6 +18,22 @@ set -uo pipefail
 # caller cwd, so `.. ` from `scripts/` is always the repository root THIS script is part of.
 cd "$(dirname "$0")/.."
 
+# LANE SPLIT. Every conjunct below runs against OUR server and needs no credential except the root
+# key this script mints itself — except one: the dual-target conformance diff, which calls
+# api.agentmail.to and therefore needs a live third-party API key via `sdxd`.
+#
+# `--lane-l` runs everything except that diff. It exists so continuous integration can run the
+# whole uncredentialed gate on every pull request WITHOUT a reference credential ever being present
+# in a runner. A pull request from a fork can read any secret its workflow is given; the correct
+# number of places a live AgentMail key can appear is zero, and Lane R stays a deliberate,
+# operator-run step on a trusted machine.
+#
+# A Lane L run is NOT the P1 gate and must never be recorded as one. It prints its own lane, and
+# `scripts/plan-ledger.sh`'s `p1-gate-conformance` reads fixture 25 for the diff's own summary
+# line, which no Lane L run can produce.
+LANE_L_ONLY=0
+[ "${1:-}" = "--lane-l" ] && LANE_L_ONLY=1
+
 DB=amk_p1gate
 PORT=55432
 BIND=127.0.0.1:8111
@@ -153,6 +169,12 @@ for r in pods inboxes api-keys; do
 done
 
 echo
+if [ "$LANE_L_ONLY" -eq 1 ]; then
+  echo "== dual-target conformance diff: SKIPPED (Lane R) =="
+  echo "   --lane-l was passed: this run holds no reference credential and did not call"
+  echo "   api.agentmail.to. This run is NOT the P1 gate."
+  GATE_EXIT=0
+else
 echo "== dual-target conformance diff: api.agentmail.to vs localhost =="
 # The real gate: conformance/dual_target.py's own structural diff, not the ad hoc key-set probe
 # that established the four divergences in the first place (that was a debugging aid run by hand;
@@ -163,6 +185,7 @@ AGENTMAIL_API_KEY='sdxd:agentmail' CAND_KEY="$CAND_KEY" sdxd run -- bash -c '
     python3 conformance/dual_target.py conformance/manifest.json'
 GATE_EXIT=$?
 echo "dual_target.py exit: $GATE_EXIT"
+fi
 
 echo
 echo "== P1 gate, second half: the unmodified official Python SDK against the same server =="
@@ -170,10 +193,15 @@ echo "== P1 gate, second half: the unmodified official Python SDK against the sa
 # actually USE them — deserialize into its own typed models, page, round-trip a full CRUD cycle.
 # A response can be structurally identical and still break a typed client (a pydantic validator, a
 # required field the model insists on), so neither half subsumes the other.
-if [ ! -x .venv-gate/bin/python ]; then
-  python3 -m venv .venv-gate
-  .venv-gate/bin/pip install -q -r conformance/requirements-gate.txt
-fi
+# Create the venv if absent, then ALWAYS sync it to the pinned requirements. The guard used to be
+# `if [ ! -x .venv-gate/bin/python ]` around both lines, which never repaired a venv that existed
+# but was incomplete — a half-built venv, or one cached from an earlier pin set, was reused
+# silently and the smoke failed with ModuleNotFoundError as if the SDK were broken. Observed
+# exactly that on 2026-08-18. `pip install -r` is a no-op in about a second when already
+# satisfied, so syncing unconditionally costs nothing and removes the whole failure class. This
+# also makes a restored CI cache safe: a stale cache is corrected, never trusted.
+[ -x .venv-gate/bin/python ] || python3 -m venv .venv-gate
+.venv-gate/bin/pip install -q --disable-pip-version-check -r conformance/requirements-gate.txt
 AMK_BASE="http://${BIND}" AMK_KEY="$CAND_KEY" .venv-gate/bin/python conformance/sdk_smoke.py
 SMOKE_EXIT=$?
 echo "sdk_smoke.py exit: $SMOKE_EXIT"
@@ -246,10 +274,9 @@ echo "== P1 gate, fourth part: schemathesis over the implemented paths =="
 # diffs ours against the LIVE reference's for every request. What is kept is what the spec is good
 # at — response shapes, content types, no 5xx — plus three checks of our own carrying the
 # invariants no OpenAPI document can express (conformance/schemathesis_checks.py).
-if [ ! -x .venv-schemathesis/bin/st ]; then
-  python3 -m venv .venv-schemathesis
-  .venv-schemathesis/bin/pip install -q -r conformance/requirements-schemathesis.txt
-fi
+# Same reasoning as .venv-gate above: create if absent, sync every run.
+[ -x .venv-schemathesis/bin/python ] || python3 -m venv .venv-schemathesis
+.venv-schemathesis/bin/pip install -q --disable-pip-version-check -r conformance/requirements-schemathesis.txt
 # `SCOPE_EXIT=$?` after a `mapfile < <(...)` reads MAPFILE's status, not the script's — which is
 # always 0, so a router/spec disagreement would have been announced and then ignored. Capture the
 # script's own exit through a command substitution, which propagates it.
@@ -273,8 +300,20 @@ PYTHONPATH=. SCHEMATHESIS_HOOKS=conformance.schemathesis_checks AMK_KEY="$CAND_K
 ST_EXIT=$?
 echo "schemathesis exit: $ST_EXIT"
 
-# All four must pass. Reporting only the diff's verdict would let a broken client ship behind a
-# clean diff, which is the exact gap the SDK halves exist to close.
+echo
+if [ "$LANE_L_ONLY" -eq 1 ]; then
+  echo "== lane: L (local only) =="
+  echo "   Ran: schemathesis, Python SDK smoke, Node SDK smoke, scope reconciliation."
+  echo "   Did NOT run: the dual-target conformance diff (Lane R, needs the reference key)."
+  echo "   This result cannot satisfy p1-gate-conformance."
+else
+  echo "== lane: L + R (full P1 gate) =="
+fi
+
+# All conjuncts must pass. Reporting only the diff's verdict would let a broken client ship behind
+# a clean diff, which is the exact gap the SDK halves exist to close. Under --lane-l, GATE_EXIT is
+# forced to 0 above because the diff did not run — the lane banner, not this conjunction, is what
+# tells a reader which checks are actually behind this exit code.
 [ "$GATE_EXIT" -eq 0 ] && [ "$SMOKE_EXIT" -eq 0 ] && [ "$NODE_EXIT" -eq 0 ] \
   && [ "$ST_EXIT" -eq 0 ] && [ "$SCOPE_EXIT" -eq 0 ]
 exit $?

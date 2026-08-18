@@ -1,0 +1,15 @@
+# Pinned so a developer's laptop, the Stop hook and GitHub Actions all compile with the SAME
+# compiler. Without this, "works locally, fails in CI" is a toolchain difference nobody can see —
+# and `-D warnings` makes it worse, because a newer clippy invents lints and reddens an untouched
+# tree on a day nobody changed any Rust.
+#
+# 1.94.1 is not a preference, it is the floor the locked dependency set imposes: sqlx 0.9.0 and
+# sqlx-core 0.9.0 declare `rust-version = 1.94.0`, and hickory-*, icu-* and time need 1.86–1.88.
+# Pinning this file to 1.85 (matching Cargo.toml's then-stated MSRV) made `cargo test --locked`
+# refuse to build at all — which is how the contradiction below was found.
+#
+# Bump deliberately, in its own commit, with ./scripts/check.sh green before and after.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

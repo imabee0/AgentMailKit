@@ -3,7 +3,7 @@
     "$comment": [
       "Claude attribution is OFF, by user instruction 2026-08-17. Empty strings suppress the commit",
       "trailer and the PR-body footer; sessionUrl:false drops the Claude-Session link that web and",
-      "Remote Control sessions otherwise append. This is the supported control for it — the harness",
+      "Remote Control sessions otherwise append. This is the supported control for it \u2014 the harness",
       "reads these keys, so nothing is left to per-commit discipline."
     ],
     "commit": "",
@@ -13,18 +13,18 @@
   "$comment": [
     "Harness enforcement for AgentMailKit. The plan's anti-drift rules are prompts until they are",
     "bound here: the model does not decide whether a hook runs.",
-    "Hooks complement permissions, CI and branch protection — they replace none of them.",
+    "Hooks complement permissions, CI and branch protection \u2014 they replace none of them.",
     "",
     "PERMISSIONS PRINCIPLE: the plan is the authority on what is routine. Anything the plan",
-    "mandates as normal work — the verify command, the crate write/test loop, committing and",
-    "pushing to Gitea, worktree lifecycle — is ALLOWED and must not interrupt the user. Anything",
+    "mandates as normal work \u2014 the verify command, the crate write/test loop, committing and",
+    "pushing to Gitea, worktree lifecycle \u2014 is ALLOWED and must not interrupt the user. Anything",
     "that leaves the repo, spends money, touches production, or could disclose a secret is ASK or",
     "DENY. An allow-list that is too narrow is not 'safe': it trains the user to approve without",
     "reading, which is strictly worse than a correct list.",
     "",
     "`sdxd run` is ALLOWED for that reason: it is the only sanctioned way a credential reaches a",
     "command here, it injects by reference and the value is never read, and the conformance harness",
-    "needs it as routine work. `sdxd get` — the one form that PRINTS a secret — is DENIED, and deny",
+    "needs it as routine work. `sdxd get` \u2014 the one form that PRINTS a secret \u2014 is DENIED, and deny",
     "outranks allow.",
     "",
     "FORGE MIGRATED TO GITHUB 2026-08-17 by explicit user instruction, superseding the global",
@@ -57,6 +57,17 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/session-start.sh",
+            "timeout": 600
+          }
+        ]
+      }
     ]
   },
   "permissions": {
@@ -68,14 +79,12 @@
       "Bash(cargo clippy:*)",
       "Bash(cargo metadata:*)",
       "Bash(cargo tree:*)",
-
       "Bash(./scripts/check.sh:*)",
       "Bash(./scripts/shape-provenance.sh:*)",
       "Bash(./scripts/dev-db.sh:*)",
       "Bash(./scripts/hooks/guard.test.sh:*)",
       "Bash(./scripts/hooks/guard.sh:*)",
       "Bash(./scripts/plan-ledger.sh:*)",
-
       "Bash(git status:*)",
       "Bash(git log:*)",
       "Bash(git diff:*)",
@@ -104,7 +113,6 @@
       "Bash(git worktree:*)",
       "Bash(git restore:*)",
       "Bash(git stash list:*)",
-
       "Bash(grep:*)",
       "Bash(rg:*)",
       "Bash(ls:*)",

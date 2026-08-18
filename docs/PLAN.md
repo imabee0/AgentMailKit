@@ -474,17 +474,40 @@ it.
 ### Stop hook — deterministic phase gate
 A Stop hook runs a script and blocks the turn from ending until it passes: failing tests, unformatted/unlinted tree, or a shape-provenance violation all block. **Noted explicitly: Claude Code overrides after 8 consecutive blocks — a Stop hook is a strong gate, not an absolute one; the check must be fast and terminating, and CI remains the authoritative gate.**
 
-**DECIDED 2026-08-15 by the user — there is no CI layer. ~~CI remains the authoritative gate~~ is
-struck: nothing runs on the forge.** `./scripts/check.sh` plus the PreToolUse and Stop hooks are
-the only gates, and the departure is recorded here rather than left as an open item. What that
-costs, stated rather than implied: every gate in this project now runs on the same machine, under
-the same session, as the agent it is gating — the Stop hook is overridden after 8 consecutive
-blocks, hooks and permissions are local files an agent with write access could edit, and a merge
-pushed without running the check has nothing downstream to catch it. The mitigations that remain
-are the ones already built: `scripts/hooks/guard.sh` freezes `scripts/hooks/**` during a fan-out
-so a dispatched agent cannot disable the guard, and `scripts/plan-ledger.sh` fails the build on a
-due-but-unmet obligation. Neither is independent of this machine. Revisit if the repository ever
-takes contributions from anyone but the orchestrator.
+~~**DECIDED 2026-08-15 by the user — there is no CI layer.** `./scripts/check.sh` plus the
+PreToolUse and Stop hooks are the only gates.~~ **REVERSED 2026-08-18 by the user. CI is the
+authoritative gate again, and it is `.github/workflows/ci.yml`.** The struck text is kept because
+the decision was real and its cost was correctly predicted — by the thing that eventually reversed
+it.
+
+That cost, as written at the time: *"every gate in this project now runs on the same machine, under
+the same session, as the agent it is gating … a merge pushed without running the check has nothing
+downstream to catch it."* On 2026-08-18 an audit found exactly that. `main` was red — the workspace
+suite failed because `reference/fixtures/28-p2-lane-l.txt` was committed without being wired into
+the fixture registry — while `scripts/plan-ledger.sh` on the same tree printed `PASS`. Nothing
+outside the operator's own session had re-run the suite on the merged result, because nothing
+existed that could.
+
+What the local layer keeps, and what moved:
+
+| Gate | Before | Now |
+|---|---|---|
+| PreToolUse guard (`guard.sh`) | the write boundary | unchanged — a hook is still the only thing that can block a write *as it happens* |
+| Stop hook | pretended to be the merge gate | a pre-flight; it may be overridden after 8 blocks and no longer has to carry that weight |
+| `scripts/check.sh` | defined the checks, degraded silently | a thin local wrapper over `scripts/verify.sh` |
+| `scripts/verify.sh` | did not exist | **the** definition of every step; strict, and what CI runs |
+| GitHub Actions | forbidden by ledger check `ci-layer-local-only` | required by ledger check `ci-layer-github-actions` |
+
+The full execution layer — job graph, change detection, caching, artifact promotion, when each
+class of check runs — is `docs/CI-CD.md`. This file stays the contract: what must be true. That
+file is how it is proven.
+
+**The lane split is unchanged and is the reason CI does not close a phase.** CI runs Lane L in
+full. Lane R-key (the dual-target conformance diff) and Lane R-phys (mail from the OVH box, Gmail
+DKIM/SPF, a real domain, the restore drill, the cutover) remain operator-run. CI going green means
+Lane L is satisfied; `CURRENT_PHASE` still advances only on the gate transcripts in
+`reference/fixtures/`. Keeping the reference credential out of Actions entirely is a deliberate
+security decision — a pull request can read any secret its workflow is given.
 
 ### Permissions layer
 `.claude/settings.json` with explicit allow AND deny rules per subagent role, plus `--allowedTools` scoping for any unattended run. The deny list is recorded explicitly — never rely on the `tools:` frontmatter alone. Hooks complement permissions, CI, and branch protection; they replace none of them.

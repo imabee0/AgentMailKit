@@ -1,0 +1,45 @@
+name: Setup Rust
+description: >
+  Toolchain + cargo cache, identical in every Rust job. A composite action rather than a reusable
+  workflow on purpose: reusable workflows are billed and scheduled as separate JOBS, so using one
+  for four lines of setup would add a runner spin-up to every job it served. Composite actions
+  inline into the calling job and cost nothing.
+
+inputs:
+  cache-key:
+    description: >
+      Shared cache identity. Jobs that pass the same value read the SAME target/ directory, which
+      is the point: `build` populates it, and clippy/test/gate restore it instead of recompiling.
+    required: false
+    default: workspace
+  save-cache:
+    description: >
+      Only ONE job may save, or parallel jobs race to write near-identical multi-hundred-MB caches
+      and evict each other. `build` saves; everything downstream reads.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # No toolchain input and no version here on purpose: rust-toolchain.toml is the single
+    # declaration, so a bump is one commit that moves CI and every laptop together. A `toolchain:`
+    # key here would be a second place to change and the two would drift.
+    - name: Install the pinned toolchain
+      shell: bash
+      run: |
+        rustup show active-toolchain || rustup toolchain install
+        rustc --version
+        cargo --version
+
+    # Keyed on Cargo.lock + the toolchain file + the cache identity. Those are the actual inputs to
+    # a compile: a dependency change (Cargo.lock), a compiler change (rust-toolchain.toml), or a
+    # different target set. Keying on the commit SHA would miss every hit; keying only on the OS
+    # would serve stale artifacts after a toolchain bump.
+    - name: Cache cargo registry and target
+      uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.cache-key }}
+        save-if: ${{ inputs.save-cache }}
+        # Cache the workspace target dir; the action already handles ~/.cargo internally.
+        cache-all-crates: "true"

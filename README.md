@@ -49,13 +49,25 @@ docs/PLAN.md         the full plan, phase gates and open registers
 Requires Rust 1.85+. Postgres 17 is needed for the storage and HTTP integration tests.
 
 ```bash
-./scripts/dev-db.sh up      # Postgres on 127.0.0.1:55432 (needs Docker)
-./scripts/check.sh          # fmt + clippy + tests + shape provenance + plan ledger
+./scripts/bootstrap.sh      # one-time: toolchain, cargo-deny, venvs, Node SDK, dev database
+./scripts/check.sh          # the local pre-flight — runs every step, reports what could not run
 ```
 
-`check.sh` is the only verify command; the Stop hook runs `--fast` (same, minus clippy). Without a
-reachable database it still exits PASS having **skipped** the DB-backed tests, and says so on one
-line — read that line.
+`scripts/verify.sh` holds the step definitions and is what **CI runs, one step per job**, so a CI
+failure reproduces locally by name:
+
+```bash
+./scripts/verify.sh --list
+./scripts/verify.sh clippy      # exactly what the "clippy" job runs
+./scripts/verify.sh test        # exactly what the "test" job runs
+```
+
+Steps are strict: a missing tool or an unreachable database is a **failure**, never a silent skip.
+`check.sh` is the local convenience wrapper (it starts the database and orders steps
+cheapest-first); the Stop hook runs `--fast`. Neither is the gate — `.github/workflows/ci.yml` is.
+See `docs/CI-CD.md`.
+
+The toolchain is pinned in `rust-toolchain.toml`, so your compiler and CI's are the same one.
 
 ## Evidence discipline
 
@@ -70,9 +82,13 @@ key *metadata* only; the `am_us_000…` strings are a deliberately-invalid probe
 
 ## Contributing
 
-This is a single-operator project with no CI — gating runs locally via `scripts/check.sh` and the
-hooks in `scripts/hooks/`. Outside contributions are not being accepted while the API surface is
-still being derived.
+Outside contributions are not being accepted yet, while the API surface is still being derived.
+
+That is a scope decision, not a tooling one: as of 2026-08-18 the project does have CI
+(`.github/workflows/ci.yml`), so a pull request from outside would be gated the same way any
+internal change is. What is still missing before the repository could genuinely take
+contributions is a `LICENSE` file (the AGPL-3.0-or-later text — the licence is declared in
+`Cargo.toml` and here, but the text is absent), a `SECURITY.md`, and a `CONTRIBUTING.md`.
 
 ## License
 

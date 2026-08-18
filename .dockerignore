@@ -1,0 +1,16 @@
+# Keep the build context small and — more importantly — keep anything that could carry a
+# credential or a local database out of an image layer entirely.
+.git
+.github
+.claude
+.grok
+target
+.amk-dev-db
+.venv-gate
+.venv-schemathesis
+node_modules
+conformance/node_modules
+docs
+reference
+*.md
+!README.md

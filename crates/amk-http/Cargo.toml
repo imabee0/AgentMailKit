@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "The axum HTTP surface: auth layer, scope resolution, error envelope, P0/P1 handlers."
 
 [dependencies]

@@ -1,0 +1,467 @@
+name: CI
+
+# WHAT RUNS WHEN, in one place, because the answer used to live in six documents.
+#
+#   pull_request   the fast lane — everything a reviewer needs before merging, nothing that needs
+#                  a credential or hardware. Expensive jobs run only if their inputs changed.
+#   push to main   the same, plus the full gate unconditionally, plus a container image built once
+#                  and promoted by digest through staging and production.
+#   schedule       the supply-chain audit alone. Advisories land without this repository changing,
+#                  so a gate that only runs on push cannot see them.
+#   workflow_dispatch  a manual full run, including jobs change-detection would otherwise skip.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Daily, 06:14 UTC. Off the hour deliberately — GitHub queues scheduled runs hardest at :00.
+    - cron: "14 6 * * *"
+  workflow_dispatch:
+
+# Least privilege at the top; jobs that need more say so themselves. Without this line the
+# workflow inherits the repository default, which on older repositories is write-all.
+permissions:
+  contents: read
+
+# One in-flight run per ref. A new push to a PR makes the previous run's answer irrelevant, so
+# cancel it and stop paying for it. NEVER cancel on main: those runs publish artifacts and deploy,
+# and a half-finished promotion is worse than a slow one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # A CI machine gains nothing from incremental compilation — every job starts from a restored
+  # cache and never recompiles the same crate twice — and it costs cache size and IO.
+  CARGO_INCREMENTAL: "0"
+  # Fail fast on a network hiccup instead of hanging a job for its full timeout.
+  CARGO_NET_RETRY: "3"
+  RUSTUP_MAX_RETRIES: "10"
+
+jobs:
+  # ---------------------------------------------------------------- what changed
+  # Everything downstream keys off this. The filters name INPUTS, not directories for their own
+  # sake: `rust` includes Cargo.lock and rust-toolchain.toml because both change what a compile
+  # produces, and deny.toml because it changes what the audit accepts.
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      migrations: ${{ steps.filter.outputs.migrations }}
+      conformance: ${{ steps.filter.outputs.conformance }}
+      harness: ${{ steps.filter.outputs.harness }}
+      fixtures: ${{ steps.filter.outputs.fixtures }}
+      docker: ${{ steps.filter.outputs.docker }}
+      # Derived once rather than repeated as a long `if:` on five jobs. True for a merge to main
+      # and for a manual run — the contexts where skipping a check to save minutes is the wrong
+      # trade. Deliberately NOT true on `schedule`: the nightly run exists for the supply-chain
+      # audit alone, and rebuilding the workspace every night to learn nothing is exactly the
+      # redundant work this pipeline is meant to avoid.
+      full: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v4
+      # Skipped on `schedule`, which has no meaningful base commit to diff against — the action
+      # would either error or compare against something arbitrary. Skipped, its outputs are empty,
+      # so every change-gated job below evaluates false and only `audit` runs.
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'rustfmt.toml'
+              - 'deny.toml'
+            migrations:
+              - 'crates/amk-store/migrations/**'
+            conformance:
+              - 'conformance/**'
+              - 'reference/openapi.json'
+            harness:
+              - 'scripts/**'
+              - '.claude/settings.json'
+              - '.claude/contracts/**'
+              - '.github/**'
+            fixtures:
+              - 'reference/fixtures/**'
+            docker:
+              - 'Dockerfile'
+              - '.dockerignore'
+
+  # ---------------------------------------------------------------- cheap, no compile
+  # These need no cargo build, so they run in parallel with everything and return in under a
+  # minute. Putting them behind `build` would be pure latency.
+
+  fmt:
+    name: fmt
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: lint
+      - run: ./scripts/verify.sh fmt
+
+  # The ledger reads files, never compiles. It also gates the harness and this pipeline's own
+  # configuration, so it runs on EVERY event — a change that touches nothing but .github/ still
+  # has to satisfy it.
+  ledger:
+    name: plan ledger
+    needs: changes
+    # Every event except the nightly audit. It reads files and gates the harness AND this
+    # pipeline's own configuration, so a change touching nothing but .github/ still faces it.
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/verify.sh ledger
+
+  hooks:
+    name: write-guard tests
+    needs: changes
+    if: needs.changes.outputs.harness == 'true' || needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/verify.sh hooks
+
+  # ---------------------------------------------------------------- compile once
+  # THE artifact producer. Compiles the workspace and every test target, saves the only cache any
+  # job writes, and uploads the binaries that the gate and the container image consume. Nothing
+  # downstream runs `cargo build` on the same code again.
+  build:
+    name: build
+    needs: changes
+    if: >-
+      needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.fixtures == 'true' ||
+      needs.changes.outputs.conformance == 'true' ||
+      needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: workspace
+          save-cache: "true"
+      - run: ./scripts/verify.sh build
+      # Only the two binaries, not target/ — the cache already carries intermediates, and an
+      # artifact is for crossing the job boundary, not for storage.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amk-binaries
+          path: |
+            target/debug/amk
+            target/debug/amkd
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------- compile-dependent, parallel
+  # All three restore build's cache, so each is a link step rather than a rebuild. They are
+  # independent of one another and deliberately not chained.
+
+  clippy:
+    name: clippy
+    needs: [changes, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: workspace
+      - run: ./scripts/verify.sh clippy
+
+  test:
+    name: test
+    needs: [changes, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Provisioned as a service container rather than by scripts/dev-db.sh. The script exists to
+    # avoid a Docker dependency on machines that lack one; a GitHub runner has Docker and a warm
+    # image, so this is faster. What is REUSED is the contract the tests actually bind to — the
+    # port, role, password and database name — not the provisioning mechanism.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: amk
+          POSTGRES_PASSWORD: amk-dev-local
+          POSTGRES_DB: amk
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: workspace
+      # verify.sh hard-fails without a reachable database, which is the whole point: a green test
+      # job here can never mean "the DB-backed suite was skipped".
+      - run: ./scripts/verify.sh test
+
+  fixtures:
+    name: fixture reconciliation
+    needs: [changes, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: workspace
+      - run: ./scripts/verify.sh fixtures
+
+  provenance:
+    name: shape provenance
+    needs: [changes, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: workspace
+      - run: ./scripts/verify.sh provenance
+
+  # ---------------------------------------------------------------- supply chain
+  # Runs on dependency changes AND nightly, because an advisory is published against code that has
+  # not changed. Needs no compile, so it does not wait for build.
+  audit:
+    name: supply chain
+    needs: changes
+    if: >-
+      needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.full == 'true' ||
+      github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: lint
+      # A prebuilt binary; compiling cargo-deny from source would cost more than the check.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: ./scripts/verify.sh audit
+
+  # ---------------------------------------------------------------- the expensive gate
+  # Lane L of the phase gate: schemathesis over every implemented path, plus both official SDKs
+  # driving a real served amkd. Minutes, not seconds — so on a pull request it runs only when
+  # something it could actually catch has changed, and on main it always runs.
+  #
+  # It consumes build's BINARY ARTIFACT and never compiles. It holds no credential: `--lane-l`
+  # omits the dual-target diff, which is the only conjunct that calls api.agentmail.to.
+  gate-lane-l:
+    name: gate (Lane L)
+    needs: [changes, build]
+    if: >-
+      needs.changes.outputs.rust == 'true' ||
+      needs.changes.outputs.conformance == 'true' ||
+      needs.changes.outputs.migrations == 'true' ||
+      needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: amk
+          POSTGRES_PASSWORD: amk-dev-local
+          POSTGRES_DB: amk
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: amk-binaries
+          path: target/debug
+      - run: chmod +x target/debug/amk target/debug/amkd
+
+      # The gate shells out to psql for its throwaway database.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            conformance/requirements-gate.txt
+            conformance/requirements-schemathesis.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: conformance/package-lock.json
+
+      # The two virtualenvs p1-gate.sh expects. Keyed on the requirements files themselves, so a
+      # pin change invalidates and nothing else does.
+      - name: Cache conformance virtualenvs
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv-gate
+            .venv-schemathesis
+          key: venvs-${{ runner.os }}-py3.12-${{ hashFiles('conformance/requirements-gate.txt', 'conformance/requirements-schemathesis.txt') }}
+
+      - name: Install the official Node SDK
+        working-directory: conformance
+        run: npm ci
+
+      # p1-gate.sh creates either virtualenv if it is absent, so a cache miss is slower, never
+      # broken. Both are pinned, so a hit is exact.
+      - name: Run the Lane L gate
+        run: ./scripts/verify.sh gate-lane-l
+
+  # ---------------------------------------------------------------- container image
+  # Built ONCE, on main only, and identified by DIGEST from here on. Every later stage promotes
+  # that exact digest; nothing rebuilds from source per environment, because an image rebuilt for
+  # production is not the image that was tested in staging.
+  image:
+    name: build image
+    needs: [changes, clippy, test, fixtures, provenance, ledger, audit, gate-lane-l]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      # For build provenance attestation — proves this digest came from this workflow and commit.
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      image: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=main
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub's own cache backend, scoped to this repository. `max` keeps intermediate
+          # stages so a dependency-only change reuses the compiled-dependency layer.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+  # ---------------------------------------------------------------- promote the same digest
+  # Staging first, unconditionally. Production is a separate call to the SAME reusable workflow
+  # with a different environment, and GitHub's environment protection rules are what hold the
+  # manual approval — not an `if:` a contributor could edit in a pull request.
+  deploy-staging:
+    name: deploy staging
+    needs: image
+    # Opt-in. Until the cluster credentials exist, deployment is OFF rather than silently
+    # succeeding: set the repository variable DEPLOY_ENABLED=true when the environments are
+    # provisioned. A no-op deploy that reports green is the same defect as a skipped test that
+    # reports green, and this project has already been bitten by the second one.
+    if: vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      image: ${{ needs.image.outputs.image }}
+      digest: ${{ needs.image.outputs.digest }}
+    secrets: inherit
+
+  deploy-production:
+    name: deploy production
+    needs: [image, deploy-staging]
+    if: vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+      image: ${{ needs.image.outputs.image }}
+      digest: ${{ needs.image.outputs.digest }}
+    secrets: inherit
+
+  # ---------------------------------------------------------------- the required check
+  # Branch protection points at THIS job and nothing else.
+  #
+  # Why it has to exist: a required check that was SKIPPED reports success to branch protection.
+  # So if `test` were required directly, a pull request that tricked change-detection into
+  # skipping it would merge green having run nothing. This job always runs, and fails unless every
+  # job it names either succeeded or was legitimately skipped by change detection — which it can
+  # tell apart, because a skipped job's result is 'skipped' and a failed one's is 'failure'.
+  gate:
+    name: gate
+    needs:
+      - changes
+      - fmt
+      - ledger
+      - hooks
+      - build
+      - clippy
+      - test
+      - fixtures
+      - provenance
+      - audit
+      - gate-lane-l
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Assert no required job failed or was cancelled
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS"
+          # Any failure or cancellation fails the gate. 'skipped' is allowed ONLY because change
+          # detection is the thing that skips, and it is reviewed in this repository like any other
+          # code. 'success' and 'skipped' are the only acceptable terminal states.
+          bad=$(echo "$RESULTS" | python3 -c "
+          import json,sys
+          n=json.load(sys.stdin)
+          print(' '.join(k for k,v in n.items() if v['result'] not in ('success','skipped')))
+          ")
+          if [ -n "$bad" ]; then
+            echo "::error::required jobs did not pass: $bad"
+            exit 1
+          fi
+          echo "all required jobs passed or were skipped by change detection"

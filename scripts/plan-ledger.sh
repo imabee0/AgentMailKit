@@ -102,14 +102,42 @@ check harness-agent-frontmatter yes \
 # prevent: the two disagree eventually, and the one that disagrees quietly wins. `.github/` may now
 # hold non-CI GitHub metadata (issue templates, CODEOWNERS); `.github/workflows/` may not.
 
-# CI layer: DECIDED 2026-08-15 by the user — local-only, no forge CI. This is a deliberate
-# departure from the plan's "CI remains the authoritative gate", recorded there with what it costs.
-# Kept as a check rather than an attestation so the decision cannot be reversed by accident: a
-# workflow file appearing here means someone added CI without reopening the decision. It survived
-# the GitHub migration unchanged: moving forge does not reopen the CI decision.
-check ci-layer-local-only yes \
-  "no forge CI — local-only gating, decided" \
-  bash -c '[ ! -d .gitea/workflows ] && [ ! -d .github/workflows ]'
+# CI layer: REVERSED 2026-08-18 by explicit user instruction. The previous obligation was
+# `ci-layer-local-only` — "no forge CI, local-only gating, DECIDED 2026-08-15" — asserting that
+# neither .gitea/workflows nor .github/workflows existed. It is replaced, not deleted: the decision
+# it guarded was real, and a check that vanishes is indistinguishable later from one that never
+# existed. What reversed it, stated plainly so nobody has to reconstruct it:
+#
+#   Local-only gating made the machine running the agent the same machine certifying its work, and
+#   an audit on 2026-08-18 found `main` red (fixture 28 unwired, the workspace suite failing) while
+#   `plan-ledger.sh` on that same tree printed PASS. Nothing outside the operator's session ever
+#   re-ran the suite on the merged result. That is the gap CI closes and hooks structurally cannot.
+#
+# The obligation now runs the other way: the pipeline must EXIST, every workflow must name its
+# permissions at the top level, and no workflow may grant blanket write.
+check ci-layer-github-actions yes \
+  "GitHub Actions is the authoritative gate; every workflow names least-privilege permissions" \
+  bash -c '
+    [ -f .github/workflows/ci.yml ] || exit 1
+    # A workflow with no top-level `permissions:` inherits the repository default, which on older
+    # repositories is write-all. Naming it is the whole control, so its absence is a failure.
+    for w in .github/workflows/*.yml; do
+      grep -q "^permissions:" "$w" || { echo "    no top-level permissions: in $w" >&2; exit 1; }
+      grep -qE "^permissions:[[:space:]]*write-all" "$w" && { echo "    write-all in $w" >&2; exit 1; }
+    done
+    exit 0'
+
+# SHA pinning is the other half of that control and is NOT yet done. A `uses: foo/bar@v4` resolves
+# a mutable tag at run time, so whoever can move that tag runs arbitrary code inside a job that
+# holds a GHCR token. This is recorded as an open obligation rather than asserted, because the
+# environment these workflows were authored in could not reach api.github.com to resolve the tags
+# to commits, and a fabricated SHA fails every run while looking rigorous.
+#
+# To close it, from a machine with network:
+#   gh api repos/actions/checkout/commits/v4 --jq .sha    # for each `uses:` in .github/
+# then rewrite each `uses: owner/repo@tag` as `uses: owner/repo@<sha> # tag`, and turn this `pend`
+# into a `check` asserting every non-local `uses:` ends in 40 hex characters.
+pend ci-actions-sha-pinned  "third-party actions pinned by commit SHA, not by mutable tag"
 
 # ---------------------------------------------------------------- dispatch contracts
 # 'Every implementer dispatch states, explicitly and in full' six things. Four of six is skipped.
@@ -159,6 +187,7 @@ DEFERRALS=$(cat <<'EOF'
 24-p0-gate-sdk-authme.txt|P0 gate transcript, asserted by plan-ledger
 25-p1-gate-conformance.txt|P1 gate diff, asserted by the conformance run
 26-p1-gate-sdk-smoke.txt|P1 gate SDK smoke, asserted by plan-ledger
+28-p2-lane-l.txt|P2 Lane L gate transcript, asserted by plan-ledger
 C1-domain-shape.txt|amk-types domain shapes, P5
 EOF
 )
@@ -335,6 +364,22 @@ check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pin
     [ -n "$py" ] && [ -n "$nd" ] &&
     grep -q "agentmail==$py" "$f" &&
     grep -q "agentmail@$nd" "$f"'
+# P2 Lane L. The transcript's own conjunct exit lines, read verbatim — the same pattern as the P1
+# checks above, and the reason `28-p2-lane-l.txt` can sit in the fixture test's DEFERRED table
+# claiming "asserted by plan-ledger" without that being a lie.
+#
+# Deliberately reads ONLY the Lane L conjuncts. Fixture 28 also records `dual_target.py exit: 1`,
+# which is Lane R's business and is gated by `p1-gate-conformance` against fixture 25. Asserting a
+# Lane R result here would give one obligation two records — the failure mode this ledger exists to
+# prevent, since the two disagree eventually and the quiet one wins.
+check p2-gate-lane-l no "P2 Lane L: schemathesis + both official SDK smokes, against our own server" \
+  bash -c '
+    f=reference/fixtures/28-p2-lane-l.txt
+    [ -f "$f" ] || exit 1
+    grep -q "schemathesis exit: 0" "$f" &&
+    grep -q "sdk_smoke.py exit: 0" "$f" &&
+    grep -q "sdk_smoke.mjs exit: 0" "$f"'
+
 pend p6-restore-drill        "P6: restore drill passes from backups alone, before any cutover step"
 
 # ---------------------------------------------------------------- cannot be machine-checked

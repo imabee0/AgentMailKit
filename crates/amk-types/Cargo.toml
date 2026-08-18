@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Wire types for the AgentMail-compatible API surface. Shapes derive from AgentMail's own artifacts (openapi.json, official SDKs, live fixtures) — never from Stalwart."
 
 [dependencies]

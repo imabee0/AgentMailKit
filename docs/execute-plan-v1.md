@@ -1,3 +1,15 @@
+> **SUPERSEDED 2026-08-18 — archival. Do not plan from this file.**
+>
+> Its job — sequencing the remaining work as a dependency graph — is now done by the real pipeline
+> in `.github/workflows/ci.yml`, explained in `docs/CI-CD.md`. Its "Current position" section below
+> is **factually wrong** as of this date: it says `amk-ingest` does not exist and the send endpoints
+> are unwired; both are merged on `main` (2,602 lines and four mounted POSTs respectively).
+>
+> It is kept rather than deleted because three merged dispatch contracts cite it as a `[SPEC:]`
+> source — `.claude/contracts/amk-{ingest,outbound,smtpd}.md` — and those citations are the
+> provenance record for work already on `main`. Deleting the file would break the evidence trail
+> for code that shipped. Read it only to resolve one of those citations.
+
 # AgentMailKit — remaining V1 as an execute-plan DAG
 
 Derived from `docs/PLAN.md` and `docs/RESUME.md`. Not a second plan: `docs/PLAN.md` stays the

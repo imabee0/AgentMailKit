@@ -13,8 +13,19 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+# Corrected 2026-08-18 from "1.85", which the locked dependency set had already contradicted:
+# sqlx 0.9.0 / sqlx-core 0.9.0 declare rust-version 1.94.0, and hickory-*, icu-*, time and zip
+# need 1.86–1.88. `cargo test --locked` on a 1.85 toolchain refuses to build the workspace, so the
+# old value was not a supported floor — it was a claim nothing checked. rust-toolchain.toml pins
+# the one version actually gated on; this is the minimum the manifest promises.
+rust-version = "1.94"
 license = "AGPL-3.0-or-later"
+# These are the internal crates of a server binary, not libraries for anyone to depend on, and
+# nothing here is meant to reach crates.io. Declaring it also satisfies cargo-deny's `wildcards`
+# rule honestly: `allow-wildcard-paths` deliberately does not cover publishable crates, because
+# crates.io forbids path dependencies — so a publishable crate with a path dep really is a defect.
+# Saying "not publishable" is the accurate fix; relaxing the rule would have been the convenient one.
+publish = false
 repository = "https://github.com/Appsynergy-io/AgentMailKit"
 
 # Pins verified in P-1 item 15 (reference/fixtures/15-compile-spike.txt): every

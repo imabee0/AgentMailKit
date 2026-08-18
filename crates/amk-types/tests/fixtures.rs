@@ -607,6 +607,12 @@ fn every_fixture_is_either_asserted_or_explicitly_deferred() {
         ("24-p0-gate-sdk-authme.txt", "P0 gate transcript, asserted by plan-ledger"),
         ("25-p1-gate-conformance.txt", "P1 gate diff, asserted by the conformance run"),
         ("26-p1-gate-sdk-smoke.txt", "P1 gate SDK smoke, asserted by plan-ledger"),
+        // Landed in 0e7d345 without this entry, which is exactly what this test exists to catch —
+        // and it caught it: the workspace suite was red on `main` until this line. Same category
+        // as 24/25/26: a gate transcript, not a wire shape, so plan-ledger reads it rather than a
+        // Rust assertion. Its obligation is `p2-gate-lane-l`, which greps this file for the three
+        // Lane L conjunct exit lines.
+        ("28-p2-lane-l.txt", "P2 Lane L gate transcript, asserted by plan-ledger"),
         ("C1-domain-shape.txt", "amk-types domain shapes, P5"),
     ];
 

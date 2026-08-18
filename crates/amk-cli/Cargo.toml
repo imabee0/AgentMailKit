@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "The `amk` (init/migrate/doctor) and `amkd` (--role api|smtpd|worker|all) binaries. See .claude/contracts/amk-bins.md."
 
 [[bin]]

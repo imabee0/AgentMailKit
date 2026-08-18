@@ -20,6 +20,13 @@
 # Throwaway venv for the SDK phase gates; see conformance/requirements-gate.txt
 .venv-gate/
 
+# The schemathesis venv. Listed explicitly even though Python 3.11+ writes a self-ignoring
+# `.gitignore` containing `*` inside every venv it creates — that file is generated, not tracked,
+# and an older interpreter does not write it. Depending on it means this directory's exclusion
+# is ambient rather than declared, and `scripts/bootstrap.sh` may build it with whatever python3
+# the sandbox happens to ship.
+.venv-schemathesis/
+
 # The Node half of the same gates. conformance/package.json and its lockfile ARE tracked — the
 # pin is the gate — but the installed tree is not.
 conformance/node_modules/

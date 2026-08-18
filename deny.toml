@@ -1,0 +1,59 @@
+# cargo-deny policy. Run by `./scripts/verify.sh audit`, in CI on every dependency change and
+# nightly on a schedule — because an advisory is published against code that has not changed, so a
+# gate that only fires on push cannot see it.
+
+[graph]
+targets = [{ triple = "x86_64-unknown-linux-gnu" }]
+all-features = true
+
+[advisories]
+# RUSTSEC advisories. `deny` for both: an unmaintained transitive dependency in a server that
+# terminates SMTP from the public internet is a finding, not a note.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# AGPL-3.0-or-later for this workspace, which is compatible with permissive dependency licences
+# but NOT with copyleft ones we cannot relicense under. Anything outside this list is a decision
+# for a human, so the build stops rather than guessing.
+confidence-threshold = 0.9
+allow = [
+    # This workspace's own crates. Omitting it made cargo-deny reject all seven of them on the
+    # first real run — the allow list had been written for dependencies and forgot the subject.
+    "AGPL-3.0-or-later",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    # webpki-roots ships the Mozilla CA bundle under a data licence rather than a code one.
+    "CDLA-Permissive-2.0",
+    # The stalwart-labs parser crates (mail-parser, mail-auth, mail-send, smtp-proto) are dual
+    # licensed Apache-2.0/MIT, which is why they are usable here at all — see the plan's
+    # shape-provenance rule for the separate architectural constraint on where their TYPES may go.
+]
+
+[bans]
+# A duplicate major version of a dependency is usually harmless and occasionally means two copies
+# of a TLS or crypto stack with different patch levels. Warn so it is visible in the log, rather
+# than fail on something that is frequently outside our control.
+multiple-versions = "warn"
+wildcards = "deny"
+# `amk-http = { path = "../amk-http" }` is a wildcard by cargo-deny's definition, and every
+# intra-workspace dependency in this repository is written that way. The rule exists to catch
+# `foo = "*"` against a REGISTRY, where an unpinned upstream can change under you; a path
+# dependency resolves inside this repository and is reviewed in the same diff.
+allow-wildcard-paths = true
+# Belt-and-braces against the one dependency direction the plan forbids outright. This is a
+# supply-chain expression of the same rule scripts/shape-provenance.sh enforces structurally.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
