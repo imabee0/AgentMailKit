@@ -6,6 +6,8 @@
 //! with the reason it is deferred rather than forgotten — `PATCH`/`DELETE` because the store has no
 //! update or delete, which would invert the amk-store -> amk-http write order.
 
+use std::collections::BTreeMap;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -13,17 +15,27 @@ use axum::Json;
 use amk_core::labels::{excluded_labels, system_label_violations, LabelAccess};
 use amk_core::permissions;
 use amk_core::scope::ResourceKind;
-use amk_store::messages::{self, ListMessagesQuery};
-use amk_store::pagination::MessageCursor;
-use amk_store::StoreError;
-use amk_types::ids::{InboxId, MessageId};
-use amk_types::message::{
-    Addresses, ListMessagesResponse, UpdateMessageRequest, UpdateMessageResponse,
+use amk_core::threading::{
+    InMemoryThreadIndex, ReferenceChainThreading, ThreadAssigner, ThreadAssignment, ThreadCandidate,
 };
-use amk_types::{Message, ValidationIssue};
+use amk_outbound::{
+    mailbox_addr, reply_all_recipients, reply_subject, sign_and_deliver, OutboundError,
+    SendContext, SignedMessage,
+};
+use amk_store::inboxes;
+use amk_store::messages::{self, ListMessagesQuery, NewMessage};
+use amk_store::pagination::{MessageCursor, SortDirection};
+use amk_store::threads::{self, NewThread, ThreadMember};
+use amk_store::StoreError;
+use amk_types::ids::{InboxId, MessageId, ThreadId};
+use amk_types::message::{
+    Addresses, ListMessagesResponse, ReplyAllMessageRequest, ReplyToMessageRequest,
+    SendMessageRequest, SendMessageResponse, UpdateMessageRequest, UpdateMessageResponse,
+};
+use amk_types::{ErrorCode, Message, Timestamp, ValidationIssue};
 
 use crate::auth::AuthContext;
-use crate::body::{validation_error_many, JsonBody, QueryParams};
+use crate::body::{validation_error, validation_error_many, JsonBody, QueryParams};
 use crate::error::AppError;
 use crate::ids::decode_segment;
 use crate::pagination::ListMailQuery;
@@ -180,4 +192,459 @@ pub async fn delete(
         true => Ok(StatusCode::NO_CONTENT),
         false => Err(amk_core::scope::ScopeDenial::new(ResourceKind::Message).into()),
     }
+}
+
+// ---- send / reply / reply-all / forward -------------------------------------------------------
+
+pub async fn send(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path(raw_inbox_id): Path<String>,
+    JsonBody(req): JsonBody<SendMessageRequest>,
+) -> Result<Json<SendMessageResponse>, AppError> {
+    let inbox_id = match decode_segment(&raw_inbox_id) {
+        Ok(s) => InboxId::new(s),
+        Err(_) => return Err(amk_core::scope::ScopeDenial::new(ResourceKind::Message).into()),
+    };
+    send_prepared(&state, &ctx, &inbox_id, req, SendContext::default()).await
+}
+
+pub async fn reply(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path((raw_inbox_id, raw_message_id)): Path<(String, String)>,
+    JsonBody(req): JsonBody<ReplyToMessageRequest>,
+) -> Result<Json<SendMessageResponse>, AppError> {
+    let (inbox_id, parent_id) = ids_from_path(&raw_inbox_id, &raw_message_id)?;
+    let parent = load_parent(&state, &ctx, &inbox_id, &parent_id).await?;
+    if req.reply_all_conflicts_with_recipients() {
+        return Err(validation_error(ValidationIssue::custom(
+            "reply_all is mutually exclusive with to, cc, and bcc",
+        )));
+    }
+    let sending = inbox_id.as_str();
+    let (to, cc, bcc) = if req.reply_all == Some(true) {
+        let (to, cc) = reply_all_recipients(
+            &parent.item.from,
+            &parent.item.to,
+            parent.item.cc.as_deref().unwrap_or(&[]),
+            sending,
+        );
+        (
+            (!to.is_empty()).then_some(Addresses::Many(to)),
+            (!cc.is_empty()).then_some(Addresses::Many(cc)),
+            None,
+        )
+    } else if [&req.to, &req.cc, &req.bcc]
+        .into_iter()
+        .flatten()
+        .any(|a| !a.is_empty())
+    {
+        (req.to, req.cc, req.bcc)
+    } else {
+        (Some(Addresses::One(mailbox_addr(&parent.item.from).to_owned())), None, None)
+    };
+    let send_req = SendMessageRequest {
+        to,
+        cc,
+        bcc,
+        reply_to: req.reply_to,
+        subject: Some(reply_subject(parent.item.subject.as_deref())),
+        text: req.text,
+        html: req.html,
+        labels: req.labels,
+        attachments: req.attachments,
+        headers: req.headers,
+    };
+    let send_ctx = reply_context(&parent);
+    send_prepared(&state, &ctx, &inbox_id, send_req, send_ctx).await
+}
+
+pub async fn reply_all(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path((raw_inbox_id, raw_message_id)): Path<(String, String)>,
+    JsonBody(req): JsonBody<ReplyAllMessageRequest>,
+) -> Result<Json<SendMessageResponse>, AppError> {
+    let (inbox_id, parent_id) = ids_from_path(&raw_inbox_id, &raw_message_id)?;
+    let parent = load_parent(&state, &ctx, &inbox_id, &parent_id).await?;
+    let (to, cc) = reply_all_recipients(
+        &parent.item.from,
+        &parent.item.to,
+        parent.item.cc.as_deref().unwrap_or(&[]),
+        inbox_id.as_str(),
+    );
+    let send_req = SendMessageRequest {
+        to: (!to.is_empty()).then_some(Addresses::Many(to)),
+        cc: (!cc.is_empty()).then_some(Addresses::Many(cc)),
+        bcc: None,
+        reply_to: req.reply_to,
+        subject: Some(reply_subject(parent.item.subject.as_deref())),
+        text: req.text,
+        html: req.html,
+        labels: req.labels,
+        attachments: req.attachments,
+        headers: req.headers,
+    };
+    let send_ctx = reply_context(&parent);
+    send_prepared(&state, &ctx, &inbox_id, send_req, send_ctx).await
+}
+
+pub async fn forward(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path((raw_inbox_id, raw_message_id)): Path<(String, String)>,
+    JsonBody(req): JsonBody<SendMessageRequest>,
+) -> Result<Json<SendMessageResponse>, AppError> {
+    let (inbox_id, parent_id) = ids_from_path(&raw_inbox_id, &raw_message_id)?;
+    let _parent = load_parent(&state, &ctx, &inbox_id, &parent_id).await?;
+    send_prepared(&state, &ctx, &inbox_id, req, SendContext::default()).await
+}
+
+fn reply_context(parent: &Message) -> SendContext {
+    // Stored form, not a second re-bracket. `build_signed` is the one site that puts
+    // the C3-bracketed IRT on the MIME; persist and assign read that header back.
+    let parent_id = parent.item.message_id.as_str().to_owned();
+    let mut references: Vec<String> = parent
+        .item
+        .references
+        .as_ref()
+        .map(|v| v.iter().map(|m| m.as_str().to_owned()).collect())
+        .unwrap_or_default();
+    if !references.iter().any(|r| r == &parent_id) {
+        references.push(parent_id.clone());
+    }
+    SendContext { from: String::new(), in_reply_to: Some(parent_id), references }
+}
+
+async fn load_parent(
+    state: &AppState,
+    ctx: &AuthContext,
+    inbox_id: &InboxId,
+    message_id: &MessageId,
+) -> Result<Message, AppError> {
+    let filter = settle_inbox_mount(&state.pool, &ctx.scope, inbox_id).await?;
+    permissions::require(&ctx.grants, "message_read")?;
+    let access = LabelAccess::by_id(&ctx.grants);
+    let excluded = excluded_labels(&access);
+    match messages::get(&state.pool, &filter, inbox_id, message_id, &excluded).await? {
+        Some(m) => Ok(m),
+        None => Err(amk_core::scope::ScopeDenial::new(ResourceKind::Message).into()),
+    }
+}
+
+async fn send_prepared(
+    state: &AppState,
+    ctx: &AuthContext,
+    inbox_id: &InboxId,
+    req: SendMessageRequest,
+    mut send_ctx: SendContext,
+) -> Result<Json<SendMessageResponse>, AppError> {
+    let filter = settle_inbox_mount(&state.pool, &ctx.scope, inbox_id).await?;
+    permissions::require(&ctx.grants, "message_send")?;
+    reject_system_labels(&req.labels, &[])?;
+
+    let inbox =
+        inboxes::get(&state.pool, filter.organization_id(), filter.pod_id().copied(), inbox_id)
+            .await?
+            .ok_or_else(|| amk_core::scope::ScopeDenial::new(ResourceKind::Message))?;
+    send_ctx.from = formatted_from(&inbox);
+
+    let message_id = mint_message_id(&send_ctx.from);
+    let signed = sign_and_deliver(&req, &send_ctx, &state.keyring, &message_id, &state.transport)
+        .await
+        .map_err(outbound_to_app)?;
+
+    // IRT/References that actually went on the MIME — one re-bracket site (the builder).
+    let headers = headers_from_raw(&signed.raw);
+    let in_reply_to = header_ci(headers.as_ref(), "In-Reply-To").map(|v| MessageId::new(v.trim()));
+    let references = header_ci(headers.as_ref(), "References")
+        .map(|v| {
+            v.split_whitespace()
+                .filter(|t| !t.is_empty())
+                .map(MessageId::new)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mid = MessageId::new(signed.message_id.clone());
+    let (thread_id, is_new) = assign_outbound_thread(
+        &state.pool,
+        &filter,
+        &inbox.inbox_id,
+        in_reply_to.as_ref(),
+        &references,
+        &mid,
+    )
+    .await?;
+    persist_sent(
+        state,
+        &inbox,
+        &req,
+        &send_ctx,
+        &signed,
+        thread_id,
+        is_new,
+        in_reply_to,
+        references,
+        headers,
+    )
+    .await?;
+    Ok(Json(SendMessageResponse {
+        message_id: MessageId::new(signed.message_id.clone()),
+        thread_id,
+    }))
+}
+
+fn formatted_from(inbox: &amk_types::Inbox) -> String {
+    match inbox.display_name.as_deref() {
+        Some(name) if !name.is_empty() => format!("{name} <{}>", inbox.inbox_id.as_str()),
+        _ => inbox.inbox_id.as_str().to_owned(),
+    }
+}
+
+fn mint_message_id(from: &str) -> String {
+    let mailbox = mailbox_addr(from);
+    let domain = mailbox
+        .rsplit_once('@')
+        .map(|(_, d)| d)
+        .unwrap_or("localhost");
+    format!("<{}@{}>", uuid::Uuid::new_v4(), domain)
+}
+
+fn outbound_to_app(err: OutboundError) -> AppError {
+    match err {
+        OutboundError::NoSigningKey(d) | OutboundError::UnusableSigningKey(d) => AppError::new(
+            ErrorCode::MessageRejected,
+            format!("no DKIM key configured for domain {d}"),
+        ),
+        OutboundError::ForbiddenHeader(name) => {
+            // Envelope fields (`to`/`subject`/…) name themselves. A reserved or injected
+            // name came from the request `headers` map — fixture 27 `path` is that field.
+            let path = match name.as_str() {
+                "to" | "cc" | "bcc" | "reply_to" | "subject" | "filename" => name,
+                _ => "headers".to_owned(),
+            };
+            let mut issue = ValidationIssue::custom(format!("header {path} is not permitted"));
+            issue.path = vec![serde_json::Value::String(path)];
+            validation_error(issue)
+        }
+        OutboundError::Assembly(msg) => {
+            let mut issue = ValidationIssue::custom(msg);
+            if issue.message.contains("attachment") {
+                issue.path = vec![serde_json::Value::String("attachments".into())];
+            }
+            validation_error(issue)
+        }
+        OutboundError::Delivery(msg) => {
+            AppError::new(ErrorCode::MessageRejected, format!("delivery failed: {msg}"))
+        }
+    }
+}
+
+fn header_ci<'a>(headers: Option<&'a BTreeMap<String, String>>, name: &str) -> Option<&'a str> {
+    headers?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+fn headers_from_raw(raw: &[u8]) -> Option<BTreeMap<String, String>> {
+    let text = String::from_utf8_lossy(raw);
+    let header_block = text.split("\r\n\r\n").next().unwrap_or("");
+    let mut map = BTreeMap::new();
+    let mut current_name: Option<String> = None;
+    let mut current_val = String::new();
+    for line in header_block.split("\r\n") {
+        if line.starts_with([' ', '\t']) {
+            current_val.push(' ');
+            current_val.push_str(line.trim());
+            continue;
+        }
+        if let Some(name) = current_name.take() {
+            map.insert(name, std::mem::take(&mut current_val));
+        }
+        if let Some((n, v)) = line.split_once(':') {
+            current_name = Some(n.to_owned());
+            current_val = v.trim().to_owned();
+        }
+    }
+    if let Some(name) = current_name {
+        map.insert(name, current_val);
+    }
+    (!map.is_empty()).then_some(map)
+}
+
+fn flatten_opt(a: Option<&Addresses>) -> Vec<String> {
+    a.cloned().map(Addresses::into_vec).unwrap_or_default()
+}
+
+fn preview_of(text: Option<&str>) -> Option<String> {
+    let t = text?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let end: usize = t.chars().take(120).map(|c| c.len_utf8()).sum();
+    Some(t[..end.min(t.len())].to_owned())
+}
+
+fn sent_labels(user: &[String]) -> Vec<String> {
+    let mut labels = vec![amk_types::message::labels::SENT.to_owned()];
+    for l in user {
+        if !labels.iter().any(|e| e == l) {
+            labels.push(l.clone());
+        }
+    }
+    labels
+}
+
+/// Assign a thread via [`ReferenceChainThreading`] over a store-backed index.
+///
+/// `in_reply_to` / `references` are the values that went on the MIME (C3). Unbracketed
+/// stored parent ids are also keyed under their bracketed form so `canonical_link` can hit.
+async fn assign_outbound_thread(
+    pool: &sqlx::PgPool,
+    filter: &amk_core::scope::ScopeFilter,
+    inbox_id: &InboxId,
+    in_reply_to: Option<&MessageId>,
+    references: &[MessageId],
+    message_id: &MessageId,
+) -> Result<(ThreadId, bool), AppError> {
+    let page = messages::list(
+        pool,
+        filter,
+        &[],
+        ListMessagesQuery { limit: 10_000, direction: SortDirection::Ascending, cursor: None },
+    )
+    .await?;
+    let mut index = InMemoryThreadIndex::new();
+    for item in page.items {
+        index.insert(item.inbox_id.clone(), &item.message_id, item.thread_id);
+        let bracketed = MessageId::bracketed(item.message_id.as_str());
+        if bracketed.as_str() != item.message_id.as_str() {
+            index.insert(item.inbox_id, &bracketed, item.thread_id);
+        }
+    }
+    let mut candidate = ThreadCandidate::new(inbox_id).with_message_id(message_id);
+    if let Some(parent) = in_reply_to {
+        candidate = candidate.with_in_reply_to(parent);
+    }
+    if !references.is_empty() {
+        candidate = candidate.with_references(references);
+    }
+    match ReferenceChainThreading.assign(&index, &candidate) {
+        ThreadAssignment::Existing { thread_id, .. } => Ok((thread_id, false)),
+        ThreadAssignment::New(_) => Ok((ThreadId::new_random(), true)),
+    }
+}
+
+async fn persist_sent(
+    state: &AppState,
+    inbox: &amk_types::Inbox,
+    req: &SendMessageRequest,
+    send_ctx: &SendContext,
+    signed: &SignedMessage,
+    thread_id: ThreadId,
+    is_new: bool,
+    in_reply_to: Option<MessageId>,
+    references: Vec<MessageId>,
+    headers: Option<BTreeMap<String, String>>,
+) -> Result<(), AppError> {
+    let now = Timestamp::now();
+    let message_id = MessageId::new(signed.message_id.clone());
+    let to = flatten_opt(req.to.as_ref());
+    let cc = flatten_opt(req.cc.as_ref());
+    let bcc = flatten_opt(req.bcc.as_ref());
+    let labels = sent_labels(&req.labels);
+    let preview = preview_of(req.text.as_deref());
+    let size = signed.raw.len() as u64;
+    let references = (!references.is_empty()).then_some(references);
+    let smtp_id = Some(uuid::Uuid::new_v4().simple().to_string());
+
+    if is_new {
+        threads::insert(
+            &state.pool,
+            NewThread {
+                thread_id,
+                organization_id: inbox.organization_id.clone().expect("inbox always has org"),
+                pod_id: inbox.pod_id,
+                inbox_id: inbox.inbox_id.clone(),
+                labels: labels.clone(),
+                timestamp: now,
+                received_timestamp: None,
+                sent_timestamp: Some(now),
+                senders: vec![send_ctx.from.clone()],
+                recipients: {
+                    let mut r = to.clone();
+                    r.extend(cc.clone());
+                    r
+                },
+                subject: req.subject.clone(),
+                preview: preview.clone(),
+                last_message_id: message_id.clone(),
+                message_count: 1,
+                size,
+            },
+        )
+        .await?;
+    }
+
+    messages::insert(
+        &state.pool,
+        NewMessage {
+            inbox_id: inbox.inbox_id.clone(),
+            message_id: message_id.clone(),
+            organization_id: inbox.organization_id.clone().expect("inbox always has org"),
+            pod_id: inbox.pod_id,
+            thread_id,
+            labels,
+            timestamp: now,
+            from: send_ctx.from.clone(),
+            to,
+            cc: (!cc.is_empty()).then_some(cc.clone()),
+            bcc: (!bcc.is_empty()).then_some(bcc),
+            subject: req.subject.clone(),
+            preview: preview.clone(),
+            attachments: None,
+            in_reply_to,
+            references,
+            headers,
+            smtp_id,
+            size,
+            reply_to: {
+                let v = flatten_opt(req.reply_to.as_ref());
+                (!v.is_empty()).then_some(v)
+            },
+            text: req.text.clone(),
+            html: req.html.clone(),
+            extracted_text: None,
+            extracted_html: None,
+        },
+    )
+    .await?;
+
+    if !is_new {
+        let recorded = threads::record_member(
+            &state.pool,
+            thread_id,
+            ThreadMember {
+                last_message_id: message_id,
+                timestamp: now,
+                sent_timestamp: Some(now),
+                sender: send_ctx.from.clone(),
+                recipients: {
+                    let mut r = flatten_opt(req.to.as_ref());
+                    r.extend(flatten_opt(req.cc.as_ref()));
+                    r
+                },
+                preview,
+                size,
+            },
+        )
+        .await?;
+        if !recorded {
+            return Err(amk_core::scope::ScopeDenial::new(ResourceKind::Thread).into());
+        }
+    }
+    Ok(())
 }

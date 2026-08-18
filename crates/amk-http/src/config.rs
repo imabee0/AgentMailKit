@@ -27,6 +27,10 @@ pub struct AppConfig {
     /// `axum::extract::DefaultBodyLimit` installed on the router (`crate::router`). See
     /// [`DEFAULT_MAX_BODY_BYTES`] for why 8 MiB and why it is `[INFERRED]`.
     pub max_body_bytes: usize,
+    /// When set, outbound SMTP is relayed through this hop. When `None`, deliver direct-to-MX.
+    /// No environment variable: tests inject a [`amk_outbound::RecordingTransport`]; production
+    /// leaves this `None` (and the keyring empty) so a send fails closed until keys are injected.
+    pub smtp_smarthost: Option<(String, u16)>,
 }
 
 /// `[INFERRED]` — `reference/fixtures/27-malformed-request-handling.txt` §5 observed that the
@@ -43,6 +47,11 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self { primary_domain: None, product_name: None, max_body_bytes: DEFAULT_MAX_BODY_BYTES }
+        Self {
+            primary_domain: None,
+            product_name: None,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            smtp_smarthost: None,
+        }
     }
 }

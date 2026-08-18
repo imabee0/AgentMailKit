@@ -59,6 +59,15 @@ pub fn check_headers(headers: &BTreeMap<String, String>) -> Result<(), OutboundE
     Ok(())
 }
 
+/// Same structural-byte rule as [`check_headers`], for a named envelope field (`to`, `subject`,
+/// …). PLAN.md:246: CR/LF in a user-supplied field that reaches a header is injection.
+pub fn check_field(name: &str, value: &str) -> Result<(), OutboundError> {
+    if has_structural_byte(value) {
+        return Err(OutboundError::ForbiddenHeader(name.to_owned()));
+    }
+    Ok(())
+}
+
 fn has_structural_byte(s: &str) -> bool {
     s.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
 }
@@ -120,6 +129,13 @@ mod tests {
     fn an_empty_or_whitespace_name_is_refused() {
         assert!(check_headers(&map(&[("", "x")])).is_err());
         assert!(check_headers(&map(&[("   ", "x")])).is_err());
+    }
+
+    #[test]
+    fn cr_lf_in_a_named_envelope_field_is_refused() {
+        assert!(check_field("to", "a@b\r\nBcc: ev@il").is_err());
+        assert!(check_field("subject", "hi\ninjected").is_err());
+        assert!(check_field("to", "ok@example.test").is_ok());
     }
 
     fn title_case(s: &str) -> String {

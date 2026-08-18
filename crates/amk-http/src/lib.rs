@@ -24,26 +24,49 @@ pub mod pagination;
 pub mod scope_ext;
 mod words;
 
+use std::sync::Arc;
+
+use amk_outbound::signing::Keyring;
+use amk_outbound::OutboundTransport;
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{delete, get};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use sqlx::PgPool;
 
 pub use config::AppConfig;
 pub use error::AppError;
 
-/// Everything a handler needs beyond the request itself: the database pool and deployment
-/// configuration. `Clone` is cheap — `PgPool` is reference-counted internally, and `AppConfig`
-/// carries two `Option<String>`s.
+/// Everything a handler needs beyond the request itself: the database pool, deployment
+/// configuration, the DKIM keyring, and the outbound transport.
+///
+/// `Clone` is cheap — `PgPool` and the keyring/`Transport` are reference-counted. [`Self::new`]
+/// installs an empty keyring (fail closed) and a live SMTP transport from `config`. Tests that
+/// send mail call [`Self::with_outbound`] with a fixture keyring and a
+/// [`amk_outbound::RecordingTransport`].
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub config: AppConfig,
+    pub keyring: Arc<Keyring>,
+    pub transport: OutboundTransport,
 }
 
 impl AppState {
     pub fn new(pool: PgPool, config: AppConfig) -> Self {
-        Self { pool, config }
+        let transport = match &config.smtp_smarthost {
+            Some((host, port)) => OutboundTransport::smarthost(host, *port),
+            None => OutboundTransport::direct_mx(),
+        };
+        Self::with_outbound(pool, config, Keyring::new(), transport)
+    }
+
+    pub fn with_outbound(
+        pool: PgPool,
+        config: AppConfig,
+        keyring: Keyring,
+        transport: OutboundTransport,
+    ) -> Self {
+        Self { pool, config, keyring: Arc::new(keyring), transport }
     }
 }
 
@@ -123,6 +146,19 @@ pub fn router(state: AppState) -> Router {
             get(handlers::messages::get)
                 .patch(handlers::messages::update)
                 .delete(handlers::messages::delete),
+        )
+        .route("/v0/inboxes/{inbox_id}/messages/send", post(handlers::messages::send))
+        .route(
+            "/v0/inboxes/{inbox_id}/messages/{message_id}/reply",
+            post(handlers::messages::reply),
+        )
+        .route(
+            "/v0/inboxes/{inbox_id}/messages/{message_id}/reply-all",
+            post(handlers::messages::reply_all),
+        )
+        .route(
+            "/v0/inboxes/{inbox_id}/messages/{message_id}/forward",
+            post(handlers::messages::forward),
         )
         // Search and the attachment downloads are deferred with FTS and blobs respectively; every
         // exclusion is recorded in `.claude/contracts/amk-http-message-thread-reads.md` rather than

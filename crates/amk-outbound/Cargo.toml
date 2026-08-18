@@ -18,8 +18,11 @@ mail-auth.workspace = true
 mail-send.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+# Decode inline SendAttachment.content (base64) at the assembly boundary.
+base64.workspace = true
+# Direct-to-MX needs MX lookup. Already in the workspace lock via mail-auth
+# (`reference/fixtures/15-compile-spike.txt` F7); pinned to that resolved version.
+hickory-resolver = { version = "=0.26.1", default-features = false, features = ["tokio", "system-config"] }
 
 [dev-dependencies]
-# Only to decode the embedded throwaway DER test key; not a runtime dependency.
-base64.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -299,6 +299,87 @@ pub async fn list(
     Ok(Page { items, next })
 }
 
+/// Fields of a newly persisted member that the thread aggregate must absorb.
+///
+/// Existing columns only — no new SQL. Subject is left as stored (the root's subject);
+/// preview becomes the member's preview when one is supplied.
+pub struct ThreadMember {
+    pub last_message_id: MessageId,
+    pub timestamp: Timestamp,
+    pub sent_timestamp: Option<Timestamp>,
+    pub sender: String,
+    pub recipients: Vec<String>,
+    pub preview: Option<String>,
+    pub size: u64,
+}
+
+/// Update an existing thread's aggregates when a new message joins it (reply / reply-all).
+///
+/// `threads::update` stays labels-only. Returns `false` when no row matches `thread_id`.
+pub async fn record_member(
+    pool: &PgPool,
+    thread_id: ThreadId,
+    member: ThreadMember,
+) -> Result<bool, StoreError> {
+    if has_forbidden_byte(member.last_message_id.as_str()) {
+        return Err(StoreError::InvalidValue("last_message_id"));
+    }
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query(
+        "SELECT senders, recipients, message_count, size, sent_timestamp, preview \
+         FROM threads WHERE thread_id = $1 FOR UPDATE",
+    )
+    .bind(thread_id.0)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let mut senders: Vec<String> = row.try_get("senders")?;
+    let mut recipients: Vec<String> = row.try_get("recipients")?;
+    let message_count: i64 = row.try_get("message_count")?;
+    let size: i64 = row.try_get("size")?;
+    let existing_sent: Option<DateTime<Utc>> = row.try_get("sent_timestamp")?;
+    let existing_preview: Option<String> = row.try_get("preview")?;
+
+    if !senders
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(&member.sender))
+    {
+        senders.push(member.sender);
+    }
+    for r in member.recipients {
+        if !recipients.iter().any(|e| e.eq_ignore_ascii_case(&r)) {
+            recipients.push(r);
+        }
+    }
+    let sent_timestamp = member
+        .sent_timestamp
+        .map(Timestamp::into_inner)
+        .or(existing_sent);
+    let preview = member.preview.or(existing_preview);
+
+    sqlx::query(
+        "UPDATE threads SET last_message_id = $1, message_count = $2, size = $3, \
+         senders = $4, recipients = $5, \"timestamp\" = $6, sent_timestamp = $7, \
+         preview = $8, updated_at = now() WHERE thread_id = $9",
+    )
+    .bind(member.last_message_id.as_str())
+    .bind(message_count.saturating_add(1))
+    .bind(size.saturating_add(member.size as i64))
+    .bind(&senders)
+    .bind(&recipients)
+    .bind(member.timestamp.into_inner())
+    .bind(sent_timestamp)
+    .bind(&preview)
+    .bind(thread_id.0)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 // ---- label mutation and delete -----------------------------------------------------------------
 
 /// Apply an `add_labels`/`remove_labels` mutation to a thread, returning its labels afterwards.

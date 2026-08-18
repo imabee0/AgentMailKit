@@ -45,6 +45,7 @@ name = "amk-http"
 version = "0.1.0"
 dependencies = [
  "amk-core",
+ "amk-outbound",
  "amk-store",
  "amk-types",
  "axum",
@@ -66,6 +67,7 @@ version = "0.1.0"
 dependencies = [
  "amk-types",
  "base64",
+ "hickory-resolver",
  "mail-auth 0.12.0",
  "mail-builder",
  "mail-send",

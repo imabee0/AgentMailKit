@@ -11,7 +11,7 @@ use amk_store::inboxes::{self, NewInbox};
 use amk_store::messages::{self, ListMessagesQuery, NewMessage};
 use amk_store::pagination::{MessageCursor, SortDirection, ThreadCursor};
 use amk_store::pods;
-use amk_store::threads::{self, ListThreadsQuery, NewThread};
+use amk_store::threads::{self, ListThreadsQuery, NewThread, ThreadMember};
 use amk_store::{PageTokenError, StoreError};
 use amk_types::api_key::{ApiKeyPermissions, KeyGrants};
 use amk_types::ids::{InboxId, MessageId, OrganizationId, PodId, ThreadId};
@@ -3876,4 +3876,142 @@ async fn concurrent_label_additions_do_not_lose_one_another() {
         .expect("in scope");
     assert!(final_labels.contains(&"alpha".to_string()), "lost update: {final_labels:?}");
     assert!(final_labels.contains(&"beta".to_string()), "lost update: {final_labels:?}");
+}
+
+// ---- record_member ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn record_member_updates_aggregates_and_leaves_subject_alone() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        new_thread(
+            &inbox,
+            &org,
+            pod,
+            thread_id,
+            &["received"],
+            "2026-08-15T05:00:00.000Z",
+            "<root@x>",
+        ),
+    )
+    .await
+    .unwrap();
+
+    let joined = threads::record_member(
+        &pool,
+        thread_id,
+        ThreadMember {
+            last_message_id: MessageId::new("<reply@x>"),
+            timestamp: ts("2026-08-15T05:00:10.000Z"),
+            sent_timestamp: Some(ts("2026-08-15T05:00:10.000Z")),
+            sender: "me@example.test".into(),
+            recipients: vec!["alice@other.test".into(), inbox.as_str().to_owned()],
+            preview: Some("reply preview".into()),
+            size: 50,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(joined);
+
+    let grants = KeyGrants::from_wire(None);
+    let access = LabelAccess::by_id(&grants);
+    let filter = inbox_filter(&org, pod, &inbox);
+    let thread = threads::get_with_messages(&pool, &filter, thread_id, &access)
+        .await
+        .unwrap()
+        .expect("thread still there");
+    assert_eq!(thread.item.last_message_id.as_str(), "<reply@x>");
+    assert_eq!(thread.item.message_count, 2);
+    assert_eq!(thread.item.size, 150);
+    assert_eq!(thread.item.subject.as_deref(), Some("subject"), "subject stays the root's");
+    assert_eq!(thread.item.preview.as_deref(), Some("reply preview"));
+    assert!(thread.item.senders.iter().any(|s| s == "me@example.test"));
+    assert!(thread
+        .item
+        .recipients
+        .iter()
+        .any(|s| s == "alice@other.test"));
+}
+
+#[tokio::test]
+async fn record_member_dedupes_senders_and_recipients_folding_case() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = support::seed_org_pod_inbox(&pool).await;
+    let thread_id = ThreadId::new_random();
+    threads::insert(
+        &pool,
+        NewThread {
+            senders: vec!["sender@example.test".into()],
+            recipients: vec![inbox.as_str().to_string()],
+            ..new_thread(
+                &inbox,
+                &org,
+                pod,
+                thread_id,
+                &["received"],
+                "2026-08-15T05:00:00.000Z",
+                "<root@x>",
+            )
+        },
+    )
+    .await
+    .unwrap();
+
+    threads::record_member(
+        &pool,
+        thread_id,
+        ThreadMember {
+            last_message_id: MessageId::new("<r@x>"),
+            timestamp: ts("2026-08-15T05:00:10.000Z"),
+            sent_timestamp: None,
+            sender: "SENDER@example.test".into(),
+            recipients: vec![inbox.as_str().to_ascii_uppercase()],
+            preview: None,
+            size: 1,
+        },
+    )
+    .await
+    .unwrap();
+
+    let grants = KeyGrants::from_wire(None);
+    let access = LabelAccess::by_id(&grants);
+    let thread =
+        threads::get_with_messages(&pool, &inbox_filter(&org, pod, &inbox), thread_id, &access)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(thread.item.senders, vec!["sender@example.test"]);
+    assert_eq!(thread.item.recipients.len(), 1, "{:?}", thread.item.recipients);
+}
+
+#[tokio::test]
+async fn record_member_on_a_missing_thread_is_false() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let missing = ThreadId::new_random();
+    let found = threads::record_member(
+        &pool,
+        missing,
+        ThreadMember {
+            last_message_id: MessageId::new("<x@x>"),
+            timestamp: ts("2026-08-15T05:00:00.000Z"),
+            sent_timestamp: None,
+            sender: "a@b".into(),
+            recipients: vec![],
+            preview: None,
+            size: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!found);
 }

@@ -39,6 +39,7 @@ const SIGNED_HEADERS: &[&str] = &[
 /// unusable key fails when an operator is watching rather than on the first send; the per-send
 /// parse is the cost of that API shape, paid deliberately rather than by keeping an unvalidated
 /// blob around.
+#[derive(Clone)]
 pub struct SigningKey {
     selector: String,
     der: Vec<u8>,
@@ -75,7 +76,7 @@ fn parse_der(der: &[u8]) -> Option<RsaKey<Sha256>> {
 }
 
 /// Signing keys by domain. A domain with no key cannot send.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Keyring {
     keys: BTreeMap<String, SigningKey>,
 }
@@ -127,10 +128,19 @@ impl Keyring {
             .ok_or_else(|| OutboundError::NoSigningKey(domain.to_ascii_lowercase()))?;
         let key = parse_der(&entry.der)
             .ok_or_else(|| OutboundError::UnusableSigningKey(domain.to_ascii_lowercase()))?;
+        // Fixed oversign set plus every header actually present on `raw`. A caller header
+        // appended after this call is absent here, so it never lands in `h=`.
+        let extra = present_header_names(raw);
+        let mut names: Vec<&str> = SIGNED_HEADERS.to_vec();
+        for n in &extra {
+            if !names.iter().any(|s| s.eq_ignore_ascii_case(n)) {
+                names.push(n.as_str());
+            }
+        }
         let signature = DkimSigner::from_key(key)
             .domain(domain.to_ascii_lowercase())
             .selector(entry.selector.clone())
-            .headers(SIGNED_HEADERS.iter().copied())
+            .headers(names)
             .sign(raw)
             .map_err(|e| OutboundError::Assembly(format!("DKIM signing failed: {e}")))?;
         Ok(signature.to_header())
@@ -139,6 +149,23 @@ impl Keyring {
     pub fn domains(&self) -> impl Iterator<Item = &str> {
         self.keys.keys().map(String::as_str)
     }
+}
+
+fn present_header_names(raw: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(raw);
+    let header_block = text.split("\r\n\r\n").next().unwrap_or("");
+    let mut names = Vec::new();
+    for line in header_block.split("\r\n") {
+        if line.starts_with([' ', '\t']) {
+            continue;
+        }
+        if let Some(name) = line.split_once(':').map(|(n, _)| n.trim()) {
+            if !name.is_empty() {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
 }
 
 #[cfg(test)]
@@ -209,6 +236,50 @@ mod tests {
             assert!(unfolded.contains(name), "{name} must be in the signed set: {header}");
         }
         assert!(unfolded.contains("a=rsa-sha256"), "{header}");
+    }
+
+    fn h_tag_names(header: &str) -> Vec<String> {
+        let unfolded: String = header.chars().filter(|c| !c.is_whitespace()).collect();
+        let Some(start) = unfolded.to_ascii_lowercase().find("h=") else {
+            return Vec::new();
+        };
+        let rest = &unfolded[start + 2..];
+        let end = rest.find(';').unwrap_or(rest.len());
+        rest[..end]
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn a_header_present_at_sign_time_is_listed_in_h() {
+        let mut ring = Keyring::new();
+        ring.insert_der("example.test", "amk", &test_key_der())
+            .unwrap();
+        let header = ring
+            .sign("example.test", b"From: a@example.test\r\nX-Trace: one\r\n\r\nbody\r\n")
+            .expect("signing succeeds");
+        let names = h_tag_names(&header);
+        assert!(
+            names.iter().any(|n| n.eq_ignore_ascii_case("x-trace")),
+            "present X-Trace must be in h=: {header}"
+        );
+    }
+
+    #[test]
+    fn a_header_absent_at_sign_time_is_not_listed_in_h() {
+        let mut ring = Keyring::new();
+        ring.insert_der("example.test", "amk", &test_key_der())
+            .unwrap();
+        let header = ring
+            .sign("example.test", b"From: a@example.test\r\n\r\nbody\r\n")
+            .expect("signing succeeds");
+        let names = h_tag_names(&header);
+        assert!(
+            !names.iter().any(|n| n.eq_ignore_ascii_case("x-trace")),
+            "absent X-Trace must not be oversigned into h=: {header}"
+        );
     }
 
     /// DNS names are case-insensitive, so a key registered under one casing must sign for another.
