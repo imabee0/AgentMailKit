@@ -1,7 +1,8 @@
-//! Crate-local inbox lookup. There is no store `get_by_address`; RCPT uses this trait
-//! plus the local-domain allow-list. Comparison is [`InboxId::eq_normalized`] only.
+//! Crate-local inbox lookup. RCPT uses this trait plus the local-domain allow-list.
+//! Comparison is [`InboxId::eq_normalized`] only.
 
 use amk_types::{InboxId, OrganizationId, PodId};
+use sqlx::PgPool;
 use std::future::Future;
 
 /// Maps an RCPT address to the inbox that should receive it.
@@ -36,5 +37,21 @@ impl InboxLookup for FixedInboxLookup {
             id.eq_normalized(inbox_id)
                 .then(|| (org.clone(), *pod, id.clone()))
         })
+    }
+}
+
+/// Store-backed lookup: `inboxes::get_by_inbox_id` (normalized PK). A store error is `None`.
+#[derive(Clone)]
+pub struct StoreInboxLookup {
+    pub pool: PgPool,
+}
+
+impl InboxLookup for StoreInboxLookup {
+    async fn lookup(&self, inbox_id: &InboxId) -> Option<(OrganizationId, PodId, InboxId)> {
+        let inbox = amk_store::inboxes::get_by_inbox_id(&self.pool, inbox_id)
+            .await
+            .ok()
+            .flatten()?;
+        Some((inbox.organization_id?, inbox.pod_id, inbox.inbox_id))
     }
 }

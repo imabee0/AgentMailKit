@@ -298,18 +298,36 @@ fn amkd_help_exits_zero() {
     assert!(text(&out).contains("USAGE"));
 }
 
-// ---- amkd: unimplemented roles are recognised and rejected, never silently accepted ----------
+// ---- amkd: smtpd reaches connect; worker/all stay rejected ------------------------------------
 
+/// Case 1: `amkd --role smtpd` without `AMK_DATABASE_URL` exits 1 and names the variable
+/// (connect, not the old “not implemented” string).
 #[test]
-fn amkd_role_smtpd_worker_all_are_each_rejected_naming_the_phase_and_never_reach_the_database() {
-    for (role, needle) in [
-        ("smtpd", "amk-ingest"),
-        ("worker", "amk-jobs"),
-        ("all", "every role"),
-    ] {
+fn amkd_role_smtpd_without_database_url_names_the_variable() {
+    let out = run_amkd(&["--role", "smtpd"], &[]);
+    assert!(
+        !out.status.success(),
+        "--role smtpd must exit non-zero without AMK_DATABASE_URL"
+    );
+    assert_eq!(out.status.code(), Some(1));
+    let combined = text(&out);
+    assert!(
+        combined.contains("AMK_DATABASE_URL"),
+        "--role smtpd must name AMK_DATABASE_URL, got: {combined}"
+    );
+    assert!(
+        !combined.contains("not implemented"),
+        "--role smtpd must reach connect, not the old rejection: {combined}"
+    );
+    did_not_panic(&out);
+}
+
+/// Case 6: `--role worker` and `--role all` still print “not implemented” and never connect.
+#[test]
+fn amkd_role_worker_and_all_are_each_rejected_naming_the_phase_and_never_reach_the_database() {
+    for (role, needle) in [("worker", "amk-jobs"), ("all", "every role")] {
         // No AMK_DATABASE_URL at all: if the role were silently accepted and reached the connect
-        // step, the failure message would be about AMK_DATABASE_URL, not about the role. Passing
-        // no database url is exactly what makes that distinguishable and keeps this test DB-free.
+        // step, the failure message would be about AMK_DATABASE_URL, not about the role.
         let out = run_amkd(&["--role", role], &[]);
         assert!(!out.status.success(), "--role {role} must exit non-zero");
         assert_eq!(out.status.code(), Some(1));
