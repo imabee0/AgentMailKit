@@ -164,7 +164,8 @@ P3–P6 not started.
 ### PR 10: P2 R-key gate (G3)
 
 - **Description:** Dual-target conformance for P2 endpoints. **Not run** without the key. Does not
-  unblock P3 code (G2 does). Required for P2 gated.
+  unblock P3 code (G2 does). With G4, and only then, P2 is gated and `CURRENT_PHASE` may move.
+  `scripts/plan-ledger.sh` is touched only on that move.
 - **Files/components affected:** `reference/fixtures/` (P2 conformance transcript)
 - **Dependencies:** PR 8
 
@@ -172,7 +173,8 @@ P3–P6 not started.
 
 - **Description:** Mail injected from the OVH box via `/root/amksend.py` appears with correct
   threading over a 3-message exchange; SDK send to a Gmail account shows DKIM+SPF pass. **Not run**
-  without the box and Gmail. Does not unblock P3 code.
+  without the box and Gmail. Does not unblock P3 code. With G3, and only then, P2 is gated and
+  `CURRENT_PHASE` may move.
 - **Files/components affected:** `reference/fixtures/` (P2 R-phys transcript)
 - **Dependencies:** PR 8
 
@@ -238,7 +240,8 @@ P3–P6 not started.
 ### PR 20: P4 R-key gate (G8)
 
 - **Description:** Dual-target for P4 endpoints. **Not run** without the key. Sibling of PR 19.
-  Does not parent P5 code.
+  Does not parent P5 code. With G7, and only then, P4 is gated and `CURRENT_PHASE` may move.
+  `scripts/plan-ledger.sh` is touched only on that move.
 - **Files/components affected:** `reference/fixtures/` (P4 conformance transcript)
 - **Dependencies:** PR 18
 
@@ -279,9 +282,18 @@ P3–P6 not started.
 - **Files/components affected:** `.claude/contracts/amk-import.md`
 - **Dependencies:** PR 22
 
-### PR 26: `amk-import` + P6 cutover (G11)
+### PR 26: `amk-import` product
 
-- **Description:** LAST. Translation boundary only. Deletable after cutover. G11: restore drill,
-  `.64` swap, Stalwart 0, dns-health. R-phys. Not started before PR 25 is reviewed.
-- **Files/components affected:** `crates/amk-import/**`, `deploy/k3s/**`
+- **Description:** LAST product crate. Translation boundary only. Deletable after cutover. Not
+  started before PR 25 is reviewed. No cutover in this PR.
+- **Files/components affected:** `crates/amk-import/**`
 - **Dependencies:** PR 25
+
+### PR 27: P6 cutover gate (G11)
+
+- **Description:** Restore drill; `.64` swap; Stalwart 0; dns-health. R-phys. **Not run** without
+  the cluster. Does not write import code. `CURRENT_PHASE` / V1 acceptance only when this fixture
+  exists.
+- **Files/components affected:** `deploy/k3s/**` (cutover manifests only), `reference/fixtures/`
+  (P6 gate transcript)
+- **Dependencies:** PR 26
