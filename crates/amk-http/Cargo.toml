@@ -11,6 +11,7 @@ description = "The axum HTTP surface: auth layer, scope resolution, error envelo
 amk-types = { path = "../amk-types" }
 amk-core = { path = "../amk-core" }
 amk-store = { path = "../amk-store" }
+amk-outbound = { path = "../amk-outbound" }
 axum.workspace = true
 tower.workspace = true
 tokio.workspace = true

@@ -9,6 +9,7 @@
 #![allow(dead_code)] // not every helper is used by every test binary in this integration suite.
 
 use amk_http::{router, AppConfig, AppState};
+use amk_outbound::{Keyring, OutboundTransport, RecordingTransport};
 use amk_store::api_keys::{self, NewApiKey};
 use amk_store::inboxes::{self, NewInbox};
 use amk_store::messages::{self, NewMessage};
@@ -55,9 +56,43 @@ pub fn test_router(pool: PgPool) -> Router {
     let config = AppConfig {
         primary_domain: Some("example.test".into()),
         product_name: Some("AmkTest".into()),
-        max_body_bytes: amk_http::config::DEFAULT_MAX_BODY_BYTES,
+        ..AppConfig::default()
     };
     router(AppState::new(pool, config))
+}
+
+/// A router that can send: fixture DKIM key for `example.test` plus a recording transport.
+pub fn send_router(pool: PgPool, keyring: Keyring) -> (Router, RecordingTransport) {
+    let rec = RecordingTransport::new();
+    let config = AppConfig {
+        primary_domain: Some("example.test".into()),
+        product_name: Some("AmkTest".into()),
+        ..AppConfig::default()
+    };
+    let app = router(AppState::with_outbound(
+        pool,
+        config,
+        keyring,
+        OutboundTransport::recording(rec.clone()),
+    ));
+    (app, rec)
+}
+
+/// The throwaway RSA fixture in `amk-outbound` testdata, registered for `domain`.
+pub fn fixture_keyring(domain: &str) -> Keyring {
+    use base64::Engine as _;
+    let wrapped: String =
+        include_str!("../../../amk-outbound/src/testdata/test-signing-key.pkcs8.b64")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(wrapped)
+        .expect("embedded test key is valid base64");
+    let mut k = Keyring::new();
+    k.insert_der(domain, "amk", &der)
+        .expect("fixture DER loads");
+    k
 }
 
 /// A router with no configured domain/product name — for the tests that specifically assert the

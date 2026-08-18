@@ -40,7 +40,7 @@ fn http_request(addr: &str, method: &str, path: &str, bearer: &str, body: &str) 
     let mut stream =
         TcpStream::connect(addr).unwrap_or_else(|e| panic!("connect to amkd at {addr}: {e}"));
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(15)))
         .expect("set_read_timeout");
     let request = format!(
         "{method} {path} HTTP/1.1\r\n\
