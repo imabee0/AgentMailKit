@@ -57,29 +57,37 @@ for p in meta["packages"]:
         if d["name"] in names:
             rdeps[d["name"]].add(p["name"])
 
-# A change to any of these invalidates the whole graph: the lockfile and workspace manifest move
-# every dependency, the toolchain changes every lint verdict, and the CI definition changes what
-# "tested" even means. The gate scripts are listed because they assert workspace-wide properties.
-GLOBAL = (
-    "Cargo.lock", "Cargo.toml", "rust-toolchain.toml", "rustfmt.toml", "deny.toml",
-    ".github/", "scripts/", "conformance/", "reference/", "Dockerfile",
-)
+# There is deliberately NO list of "global" paths here.
+#
+# One was written first -- Cargo.lock, the workspace manifest, the toolchain pin, .github/,
+# scripts/, reference/ -- and a mutation run proved it was dead code: deleting the whole list
+# changed no test result, because every path on it lives outside a crate directory and therefore
+# already widens through the unrecognised-path branch below. Two mechanisms producing one
+# behaviour is the duplicate-record failure docs/PLAN.md line 516 exists to prevent: the two
+# disagree eventually and the quiet one wins. The fail-open branch is the single record.
+#
+# What keeps it honest is the test suite, not a list: affected-crates.test.sh asserts that
+# Cargo.lock, the toolchain pin, a gate script, a workflow, a fixture and the Dockerfile each
+# widen to ALL. Adding an over-broad exemption below breaks those tests.
 
 seeds, widen = set(), False
 for line in os.environ["CHANGED"].splitlines():
     line = line.strip()
     if not line:
         continue
-    if line.startswith(GLOBAL) or line in GLOBAL:
-        widen = True
-        break
     if line.startswith("docs/") or line.startswith(".claude/") or line.startswith(".grok/") \
        or line in ("README.md", "CLAUDE.md", "AGENTS.md", ".gitignore"):
         continue                      # documentation and harness prose reach no crate
     owner = None
     for name, d in dirs.items():
+        # Longest matching directory wins. UNEXERCISED TODAY and deliberately kept: no workspace
+        # member nests inside another, so the tiebreak never fires and a mutation run confirmed
+        # that removing it kills no test. It fires the moment a nested member exists (say
+        # crates/amk-http/bench), where parent and child both prefix-match and the shorter match
+        # would attribute the nested files to the parent. Add a case to affected-crates.test.sh
+        # on the commit that introduces such a member.
         if line.startswith(d + "/") and (owner is None or len(d) > len(dirs[owner])):
-            owner = name              # longest matching directory wins
+            owner = name
     if owner is None:
         widen = True                  # unrecognised path: unknown blast radius
         break
