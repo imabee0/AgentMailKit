@@ -165,7 +165,7 @@ One workflow, `.github/workflows/ci.yml`. The job graph:
 | `provenance` | with `build` | always | — | no Stalwart/JMAP shapes |
 | `audit` | if dependencies changed | always | **yes** | advisories land without this repo changing |
 | `gate-lane-l` | **reduced** (~3 min) if Rust/conformance/migrations changed | **full** (~50 min) | — | schemathesis + both official SDKs |
-| `image` | — | if `PUBLISH_IMAGE` | — | off by default — see below |
+| `image` | — | **yes** | — | builds once, pushes to GHCR by digest, attested |
 | `image-validate` | if `Dockerfile` changed | always | — | builds the image, never pushes; required by `gate` |
 | `deploy-*` | — | if `DEPLOY_ENABLED` | — | promotion, gated by environments |
 
@@ -284,33 +284,33 @@ is now corrected rather than trusted.
 
 ---
 
-### The image job is off by default, deliberately
+### What can and cannot run before this lands
 
-`image` and both `deploy-*` stages are behind repository variables (`PUBLISH_IMAGE`,
-`DEPLOY_ENABLED`) and do not run until you set them.
+Worth stating plainly, because it looks like the CD half was skipped.
 
-**Nothing consumes the image yet.** With deploys off, building and *pushing* a container on every
-merge is work whose output has no reader, so publishing stays off until something reads it.
+**`image` publishes on every merge to `main`.** It is not behind a variable. An artifact that is
+never produced cannot be promoted, and one cached build per merge is a far better default than
+merging and getting nothing. What it yields is useful even with no cluster: a digest-addressed,
+provenance-attested image in GHCR, ready for the deploy stages the moment a kubeconfig exists.
 
-The Dockerfile itself is **not** unverified. A separate `image-validate` job builds the container
-**without pushing**, on any pull request that changes `Dockerfile` or `.dockerignore`, and it is
-one of `gate`'s required jobs. That job exists precisely because the environment these workflows
-were authored in has Docker Hub blocked at its proxy (`docker pull alpine:3.20` → 403 from the
-CDN): the Dockerfile could not be built locally, and "I could not verify it here" is not a reason
-to ship it unverified. A GitHub runner reaches Docker Hub, so CI is where it gets proven.
+**Three things are structurally post-merge**, not deferred by choice:
 
-`image-validate` holds **no registry permissions at all** — it cannot push by construction rather
-than by an `if:`. It is scoped to changes in the image definition, not to every Rust change, because
-a release build costs minutes and source correctness is already covered by `build`/`clippy`/`test`.
+| | Why it cannot run yet |
+|---|---|
+| `image` (publish) | fires on `push: main`; there is no merge to `main` before the merge |
+| `mirror-base-images` | `workflow_dispatch` requires the workflow to exist on the **default branch**, and this repository has no workflows on `main` at all — this change is its first CI |
+| `deploy-staging` / `deploy-production` | need a real cluster and a `KUBE_CONFIG`; gated on `DEPLOY_ENABLED` |
 
-`workflow_dispatch` triggers `image` when `PUBLISH_IMAGE` is set, so it can be validated once on
-demand before being switched on, instead of discovering its first defect as a red `main`.
+The first two become available the moment this merges. The third needs hardware, and stays gated
+so it fails loudly rather than no-opping when someone turns it on without credentials.
 
-One defect in it was already found and fixed without running it: all three stages pinned
-`rust:1.85.0-bookworm` while `rust-toolchain.toml` says `1.94.1` and the locked dependency set
-refuses to build below 1.94 (`sqlx 0.9.0` declares `rust-version = 1.94.0`). That would have failed
-every merge. `plan-ledger.sh`'s `docker-rust-version-matches` now asserts the two agree, because
-Docker cannot read the TOML at `FROM` time and a version that only has to be remembered drifts.
+**The image build itself is already proven.** `image-validate` builds the container on every pull
+request that touches the Dockerfile, holds no registry permissions so it cannot push, and is one of
+`gate`'s required jobs. It went green in 10.7 minutes on the first run that reached it — and caught
+a real defect on the run before that, when a trailing `#` comment inside an `ARG` made every `FROM`
+an invalid reference.
+
+---
 
 ---
 

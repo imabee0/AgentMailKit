@@ -443,25 +443,20 @@ jobs:
   # production is not the image that was tested in staging.
   image:
     name: build image
-    needs: [changes, clippy, test, fixtures, provenance, ledger, audit, gate-lane-l]
-    # OFF until someone turns it on, for two reasons that both point the same way.
+    needs: [changes, clippy, test, fixtures, provenance, ledger, audit, gate-lane-l, image-validate]
+    # Publishes on every merge to main, and on demand. NOT gated behind a variable.
     #
-    # 1. Nothing consumes it yet. `deploy-*` are gated on DEPLOY_ENABLED and therefore skipped, so
-    #    building and pushing a container on every merge to main would be work whose output has no
-    #    reader — the precise redundancy this pipeline exists to remove.
-    # 2. The build has never been validated. It could not be: the environment these workflows were
-    #    authored in has Docker Hub blocked at the proxy (`docker pull alpine` returns 403 from the
-    #    CDN), so the Dockerfile is reviewed but unexecuted. Letting an unexecuted build run
-    #    automatically on main means discovering its first defect as a red main.
+    # It was, briefly, on the reasoning that nothing consumes the image yet so pushing one is
+    # waste. That was wrong twice over: the build is proven (image-validate is green and required),
+    # and an artifact that is never produced cannot be promoted — which is the entire CD half of
+    # this pipeline. Merging and getting nothing is a worse default than one cached build per merge.
     #
-    # `workflow_dispatch` is included so it can be validated ONCE, on demand, before being switched
-    # on — rather than by merging and hoping. Set the repository variable PUBLISH_IMAGE=true when
-    # that run is green. DEPLOY_ENABLED additionally gates the promotion stages below, and those
-    # depend on this job, so deploying requires both.
+    # What it produces is immediately useful even with no cluster: a digest-addressed, provenance-
+    # attested image in GHCR, ready for the deploy stages to promote the moment DEPLOY_ENABLED and
+    # a kubeconfig exist. Those stages stay gated because they need a cluster; this does not.
     if: >-
-      vars.PUBLISH_IMAGE == 'true' &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-       github.event_name == 'workflow_dispatch')
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
