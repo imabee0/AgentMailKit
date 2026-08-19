@@ -1,3 +1,27 @@
+# BASE IMAGES: pinned by DIGEST, and switchable to a GitHub-hosted mirror.
+#
+# A digest is immutable; `rust:1.94.1-bookworm` is a tag and can be repointed by whoever controls
+# it. That is the same supply-chain hole the workflows' `uses:` pins close, and it was open here
+# while being closed there.
+#
+# The two ARGs default to Docker Hub, the canonical home of these official images, which works with
+# no setup. Point them at the GHCR mirror to keep every pull on the same platform as CI:
+#
+#   .github/workflows/mirror-base-images.yml copies these exact digests into
+#   ghcr.io/<owner>/<repo>/base/*, and `docker buildx imagetools create` copies BY digest, so the
+#   mirrored image carries the identical sha256 — the pins below do not change when you switch.
+#
+# Why mirror at all: Docker Hub rate-limits anonymous pulls per IP and GitHub's runners share IPs,
+# so a busy day can turn an unrelated pull into a red build. GHCR has no such limit for Actions and
+# is already authenticated by GITHUB_TOKEN, so it needs no extra credential.
+#
+# To re-resolve after a version bump (no Docker daemon and no registry login needed):
+#   t=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/rust:pull" | jq -r .token)
+#   curl -sI -H "Authorization: Bearer $t" -H 'Accept: application/vnd.oci.image.index.v1+json' \
+#     https://registry-1.docker.io/v2/library/rust/manifests/<tag> | grep -i docker-content-digest
+ARG RUST_IMAGE=docker.io/library/rust@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 # 1.94.1-bookworm
+ARG RUNTIME_IMAGE=docker.io/library/debian@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 # bookworm-slim
+
 # MUST match rust-toolchain.toml's channel. Pinned at 1.85.0 while the toolchain file said 1.94.1,
 # which would have failed every merge to main: the locked dependency set needs >= 1.94
 # (sqlx 0.9.0 declares rust-version 1.94.0), so `cargo build --locked` on 1.85 refuses outright.
@@ -14,14 +38,14 @@
 # invalidates the dependency layer and recompiles every crate in the tree. The planner reduces the
 # manifests to a recipe that changes ONLY when dependencies change, so the expensive layer is
 # keyed on the thing that actually affects it.
-FROM rust:1.94.1-bookworm AS planner
+FROM ${RUST_IMAGE} AS planner
 WORKDIR /build
 RUN cargo install cargo-chef --locked --version 0.1.78
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ---------------------------------------------------------------------------- dependency cache
-FROM rust:1.94.1-bookworm AS deps
+FROM ${RUST_IMAGE} AS deps
 WORKDIR /build
 RUN cargo install cargo-chef --locked --version 0.1.78
 COPY --from=planner /build/recipe.json recipe.json
@@ -30,7 +54,7 @@ COPY --from=planner /build/recipe.json recipe.json
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 
 # ---------------------------------------------------------------------------- build
-FROM rust:1.94.1-bookworm AS builder
+FROM ${RUST_IMAGE} AS builder
 WORKDIR /build
 COPY --from=deps /build/target target
 COPY --from=deps /usr/local/cargo /usr/local/cargo
@@ -45,7 +69,7 @@ RUN cargo build --release --locked -p amk-cli --bins \
 # Debian slim rather than distroless or alpine, for two specific reasons: the binaries link
 # against glibc (musl would need a separate target and a separate test matrix to be honest about),
 # and DKIM/TLS verification needs a real CA bundle.
-FROM debian:bookworm-slim AS runtime
+FROM ${RUNTIME_IMAGE} AS runtime
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates tini \
  && rm -rf /var/lib/apt/lists/*

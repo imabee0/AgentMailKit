@@ -1,0 +1,115 @@
+name: Mirror base images
+
+# Copies this project's container base images into THIS repository's GitHub Container Registry, so
+# every pull in the build path comes from the same platform CI already runs on.
+#
+# Why:
+#   - Docker Hub rate-limits anonymous pulls per source IP, and GitHub's runners share IPs. A busy
+#     day turns an unrelated pull into a red build, which is the least informative failure there is.
+#   - GHCR imposes no such limit on Actions, is already authenticated by GITHUB_TOKEN, and needs no
+#     extra credential — unlike authenticating to Docker Hub, which would add one.
+#   - It removes a third party from the critical path. If Docker Hub is down, the build still runs.
+#
+# COPIES BY DIGEST. `docker buildx imagetools create` republishes the same manifest, so the mirrored
+# image carries the identical sha256 as the upstream one. The digests pinned in the Dockerfile do
+# not change when you switch registries — which is what makes the switch safe rather than a
+# re-validation exercise. It also preserves the multi-architecture index rather than flattening it.
+#
+# HOW TO ADOPT, once:
+#   1. Run this workflow (Actions -> Mirror base images -> Run workflow).
+#   2. Set the repository variable USE_GHCR_BASE=true.
+#   ci.yml then passes the mirrored references as build-args; nothing in the Dockerfile changes.
+#
+# Until step 2, the Dockerfile's defaults point at Docker Hub and everything works unchanged. There
+# is deliberately no intermediate state where the build is broken because a mirror is empty.
+on:
+  workflow_dispatch:
+  schedule:
+    # Monthly. The digests are pinned, so this is not chasing upstream tags — it re-pushes the same
+    # content so GHCR retention can never quietly expire an image the build depends on.
+    - cron: "37 4 1 * *"
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    name: mirror
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Read straight from the Dockerfile so this workflow can never mirror a different image than
+      # the one actually built. A second hand-kept list of digests is exactly the duplication
+      # scripts/plan-ledger.sh exists to prevent.
+      - name: Read the pinned digests from the Dockerfile
+        id: pins
+        run: |
+          set -euo pipefail
+          rust=$(sed -n 's/^ARG RUST_IMAGE=//p'    Dockerfile)
+          runtime=$(sed -n 's/^ARG RUNTIME_IMAGE=//p' Dockerfile)
+          for v in "$rust" "$runtime"; do
+            case "$v" in *@sha256:*) ;; *) echo "::error::not digest-pinned: $v"; exit 1 ;; esac
+          done
+          echo "rust=$rust"       >> "$GITHUB_OUTPUT"
+          echo "runtime=$runtime" >> "$GITHUB_OUTPUT"
+          echo "rust_digest=${rust#*@}"       >> "$GITHUB_OUTPUT"
+          echo "runtime_digest=${runtime#*@}" >> "$GITHUB_OUTPUT"
+
+      - name: Copy into ghcr.io/${{ github.repository }}/base
+        env:
+          NS: ghcr.io/${{ github.repository }}/base
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "$NS/rust:${{ steps.pins.outputs.rust_digest }}" \
+            "${{ steps.pins.outputs.rust }}"
+          docker buildx imagetools create \
+            --tag "$NS/debian:${{ steps.pins.outputs.runtime_digest }}" \
+            "${{ steps.pins.outputs.runtime }}"
+
+      # Proves the copy preserved the digest, which is the entire premise of the switch being safe.
+      # A mirror that quietly re-digested would mean the Dockerfile's pins no longer match what it
+      # pulls, and the build would fail later with nothing pointing back to here.
+      - name: Verify the mirrored digests are identical
+        env:
+          NS: ghcr.io/${{ github.repository }}/base
+        run: |
+          set -euo pipefail
+          check() {
+            got=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$1")
+            if [ "$got" != "$2" ]; then
+              echo "::error::$1 is $got, expected $2 — the copy did not preserve the digest"
+              exit 1
+            fi
+            echo "ok  $1"
+          }
+          check "$NS/rust:${{ steps.pins.outputs.rust_digest }}"     "${{ steps.pins.outputs.rust_digest }}"
+          check "$NS/debian:${{ steps.pins.outputs.runtime_digest }}" "${{ steps.pins.outputs.runtime_digest }}"
+
+      - name: How to adopt
+        env:
+          NS: ghcr.io/${{ github.repository }}/base
+        run: |
+          {
+            echo "### Base images mirrored to GHCR"
+            echo
+            echo '```'
+            echo "RUST_IMAGE=$NS/rust@${{ steps.pins.outputs.rust_digest }}"
+            echo "RUNTIME_IMAGE=$NS/debian@${{ steps.pins.outputs.runtime_digest }}"
+            echo '```'
+            echo
+            echo "Set repository variable **USE_GHCR_BASE=true** to build from these."
+          } >> "$GITHUB_STEP_SUMMARY"

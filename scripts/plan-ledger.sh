@@ -127,17 +127,37 @@ check ci-layer-github-actions yes \
     done
     exit 0'
 
-# SHA pinning is the other half of that control and is NOT yet done. A `uses: foo/bar@v4` resolves
-# a mutable tag at run time, so whoever can move that tag runs arbitrary code inside a job that
-# holds a GHCR token. This is recorded as an open obligation rather than asserted, because the
-# environment these workflows were authored in could not reach api.github.com to resolve the tags
-# to commits, and a fabricated SHA fails every run while looking rigorous.
+# SHA pinning is the other half of that control, and it is now DONE rather than deferred.
+# `uses: foo/bar@v4` resolves a mutable tag at run time, so whoever can move that tag runs
+# arbitrary code inside a job holding a GHCR token. Every third-party action is pinned to a commit.
 #
-# To close it, from a machine with network:
-#   gh api repos/actions/checkout/commits/v4 --jq .sha    # for each `uses:` in .github/
-# then rewrite each `uses: owner/repo@tag` as `uses: owner/repo@<sha> # tag`, and turn this `pend`
-# into a `check` asserting every non-local `uses:` ends in 40 hex characters.
-pend ci-actions-sha-pinned  "third-party actions pinned by commit SHA, not by mutable tag"
+# This was briefly recorded as a `pend` on the belief that the authoring environment could not
+# reach GitHub to resolve tags to commits. That belief was wrong: the session's git proxy serves
+# anonymous reads of public repositories, so `git ls-remote <repo> refs/tags/<tag>^{}` resolves
+# them without any API access at all. The obligation is a real check because the work was actually
+# possible — "blocked" was a conclusion reached too early, not a fact about the environment.
+#
+# `^{}` matters: on an ANNOTATED tag, plain refs/tags/X yields the tag object, and a `uses:`
+# pinned to a tag-object SHA does not resolve. To re-pin after a bump:
+#   git ls-remote https://github.com/<owner>/<repo> 'refs/tags/<tag>^{}'
+check ci-actions-sha-pinned yes \
+  "every third-party action is pinned to a 40-character commit SHA, not a mutable tag" \
+  bash -c '
+    # `-?` is load-bearing: almost every `uses:` here is a YAML list item ("- uses: ..."), and a
+    # pattern anchored straight at `uses:` matched only 5 of 35 lines — it reported clean while
+    # inspecting a seventh of the file. Caught by falsifying this check (unpin one action, expect
+    # red, got green), which is the entire reason the project falsifies its guards.
+    n=$(grep -rhcE "^[[:space:]]*-?[[:space:]]*uses:" .github/workflows .github/actions 2>/dev/null \
+        | paste -sd+ | bc)
+    [ "${n:-0}" -ge 20 ] || { echo "    only $n uses: lines seen — the matcher is broken" >&2; exit 1; }
+    bad=$(grep -rhoE "^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]]+" \
+            .github/workflows .github/actions 2>/dev/null \
+          | sed "s/.*uses:[[:space:]]*//" \
+          | grep -v "^\./" \
+          | grep -vE "@[0-9a-f]{40}$") || true
+    [ -z "$bad" ] || { echo "    unpinned: $bad" >&2; exit 1; }
+    exit 0'
+
 
 # ---------------------------------------------------------------- dispatch contracts
 # 'Every implementer dispatch states, explicitly and in full' six things. Four of six is skipped.
@@ -364,6 +384,32 @@ check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pin
     [ -n "$py" ] && [ -n "$nd" ] &&
     grep -q "agentmail==$py" "$f" &&
     grep -q "agentmail@$nd" "$f"'
+# Base images pinned by DIGEST, not by tag. Same supply-chain rule as ci-actions-sha-pinned: a tag
+# can be repointed by whoever controls it, a digest cannot. This was open in the Dockerfile while
+# being closed in the workflows, which is the inconsistency this check removes.
+#
+# Also asserts the digests are reachable through an ARG rather than hard-coded into each FROM, so
+# .github/workflows/mirror-base-images.yml can read them and the GHCR mirror can be adopted without
+# editing this file.
+check docker-base-images-pinned yes \
+  "container base images pinned by sha256 digest, via ARGs the mirror workflow can read" \
+  bash -c '
+    [ -f Dockerfile ] || exit 0
+    n=0
+    for v in RUST_IMAGE RUNTIME_IMAGE; do
+      line=$(sed -n "s/^ARG $v=//p" Dockerfile)
+      [ -n "$line" ] || { echo "    no ARG $v in Dockerfile" >&2; exit 1; }
+      case "$line" in
+        *@sha256:*) n=$((n+1)) ;;
+        *) echo "    $v is not digest-pinned: $line" >&2; exit 1 ;;
+      esac
+    done
+    [ "$n" -eq 2 ] || exit 1
+    # Every FROM must go through those ARGs; a stray literal tag would bypass the pin entirely.
+    bad=$(grep -E "^FROM " Dockerfile | grep -v "FROM \${" ) || true
+    [ -z "$bad" ] || { echo "    FROM bypasses the ARGs: $bad" >&2; exit 1; }
+    exit 0'
+
 # The Dockerfile's base image and rust-toolchain.toml are two records of ONE fact: which compiler
 # builds this project. Docker cannot read the TOML at FROM time, so the duplication is unavoidable
 # — which makes it exactly the shape this ledger exists to police. They were already out of step
@@ -375,10 +421,17 @@ check docker-rust-version-matches yes \
     [ -f Dockerfile ] || exit 0
     want=$(sed -n "s/^channel *= *\"\([^\"]*\)\"/\1/p" rust-toolchain.toml)
     [ -n "$want" ] || { echo "    no channel in rust-toolchain.toml" >&2; exit 1; }
-    for got in $(sed -n "s|^FROM rust:\([^ -]*\).*|\1|p" Dockerfile); do
-      [ "$got" = "$want" ] || {
-        echo "    Dockerfile FROM rust:$got but rust-toolchain.toml says $want" >&2; exit 1; }
-    done
+    # The base image is pinned by DIGEST, which carries no version, so the tag it was resolved from
+    # rides in a trailing comment -- the same shape as the SHA-pinned actions. Requiring that
+    # comment is what keeps this check from becoming vacuous: an earlier version grepped
+    # "^FROM rust:", and once the FROMs moved behind an ARG it matched nothing and passed while
+    # inspecting nothing.
+    got=$(sed -n "s/^ARG RUST_IMAGE=.*# *//p" Dockerfile)
+    [ -n "$got" ] || { echo "    ARG RUST_IMAGE has no trailing # <tag> comment" >&2; exit 1; }
+    case "$got" in
+      "$want"|"$want"-*) ;;
+      *) echo "    Dockerfile rust base is $got but rust-toolchain.toml says $want" >&2; exit 1 ;;
+    esac
     exit 0'
 
 # CRATE WRITE ORDER, mechanically. Added 2026-08-19 when the `amk/<phase>/<crate>` branch-naming

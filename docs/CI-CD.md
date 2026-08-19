@@ -166,6 +166,7 @@ One workflow, `.github/workflows/ci.yml`. The job graph:
 | `audit` | if dependencies changed | always | **yes** | advisories land without this repo changing |
 | `gate-lane-l` | **reduced** (~3 min) if Rust/conformance/migrations changed | **full** (~50 min) | — | schemathesis + both official SDKs |
 | `image` | — | if `PUBLISH_IMAGE` | — | off by default — see below |
+| `image-validate` | if `Dockerfile` changed | always | — | builds the image, never pushes; required by `gate` |
 | `deploy-*` | — | if `DEPLOY_ENABLED` | — | promotion, gated by environments |
 
 The pattern: **cheap checks run on everything; expensive checks run when their inputs changed; on
@@ -288,14 +289,19 @@ is now corrected rather than trusted.
 `image` and both `deploy-*` stages are behind repository variables (`PUBLISH_IMAGE`,
 `DEPLOY_ENABLED`) and do not run until you set them.
 
-Two reasons, pointing the same way:
+**Nothing consumes the image yet.** With deploys off, building and *pushing* a container on every
+merge is work whose output has no reader, so publishing stays off until something reads it.
 
-1. **Nothing consumes the image yet.** With deploys off, building and pushing a container on every
-   merge is work whose output has no reader.
-2. **The container build has never been executed.** It could not be: the environment these
-   workflows were authored in has Docker Hub blocked at the proxy — `docker pull alpine:3.20`
-   returns 403 from the CDN — so the Dockerfile is reviewed but **unrun**. Recording that as
-   *not run* rather than assuming it works is the same rule the phase gates follow.
+The Dockerfile itself is **not** unverified. A separate `image-validate` job builds the container
+**without pushing**, on any pull request that changes `Dockerfile` or `.dockerignore`, and it is
+one of `gate`'s required jobs. That job exists precisely because the environment these workflows
+were authored in has Docker Hub blocked at its proxy (`docker pull alpine:3.20` → 403 from the
+CDN): the Dockerfile could not be built locally, and "I could not verify it here" is not a reason
+to ship it unverified. A GitHub runner reaches Docker Hub, so CI is where it gets proven.
+
+`image-validate` holds **no registry permissions at all** — it cannot push by construction rather
+than by an `if:`. It is scoped to changes in the image definition, not to every Rust change, because
+a release build costs minutes and source correctness is already covered by `build`/`clippy`/`test`.
 
 `workflow_dispatch` triggers `image` when `PUBLISH_IMAGE` is set, so it can be validated once on
 demand before being switched on, instead of discovering its first defect as a red `main`.
@@ -410,23 +416,30 @@ in kind rather than in parameter.
   deploy that silently does nothing and reports green is the same defect as a skipped test that
   reports green.
 
-### Known gap: actions are pinned by tag, not by SHA
+### Every action is pinned to a commit
 
-`uses: actions/checkout@v4` resolves a mutable tag at run time, so whoever can move that tag runs
-code inside a job holding a registry token. SHA pinning closes it.
+`uses: actions/checkout@v4` resolves a **mutable** tag at run time, so whoever can move that tag
+runs arbitrary code inside a job holding a registry token. All fourteen third-party actions are
+pinned to 40-character commit SHAs, with the tag kept in a trailing comment for readability.
 
-This is **not yet done**, and is tracked as the open ledger obligation `ci-actions-sha-pinned`
-rather than quietly asserted, because the environment these workflows were written in could not
-reach `api.github.com` to resolve the tags — and a fabricated SHA fails every run while looking
-rigorous. To close it, from a machine with network:
+`plan-ledger.sh`'s `ci-actions-sha-pinned` enforces it — a real check, not an attestation.
+
+This was briefly recorded as an open obligation on the belief that the authoring environment could
+not reach GitHub to resolve tags. That belief was wrong: the session's git proxy serves anonymous
+reads of public repositories, so no API access is needed at all. To re-pin after a version bump:
 
 ```bash
-gh api repos/actions/checkout/commits/v4 --jq .sha    # for each `uses:` under .github/
+git ls-remote https://github.com/<owner>/<repo> 'refs/tags/<tag>^{}'
 ```
 
-Rewrite each `uses: owner/repo@tag` as `uses: owner/repo@<sha> # tag`, then promote
-`ci-actions-sha-pinned` from a `pend` to a `check` asserting every non-local `uses:` ends in 40 hex
-characters.
+The `^{}` is load-bearing: on an **annotated** tag, plain `refs/tags/<tag>` yields the tag object,
+and a `uses:` pinned to a tag-object SHA does not resolve.
+
+The check's own matcher had to be falsified before it could be trusted. Its first version anchored
+at `uses:` and so matched only 5 of 35 lines — almost every `uses:` here is a YAML list item
+(`- uses:`) — and it reported clean while inspecting a seventh of the file. It now allows the list
+dash and additionally fails if it sees fewer than 20 lines, so a future matcher regression surfaces
+as a failure rather than as a vacuous pass.
 
 ---
 

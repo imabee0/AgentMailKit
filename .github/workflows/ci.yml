@@ -69,11 +69,11 @@ jobs:
       # redundant work this pipeline is meant to avoid.
       full: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Skipped on `schedule`, which has no meaningful base commit to diff against — the action
       # would either error or compare against something arbitrary. Skipped, its outputs are empty,
       # so every change-gated job below evaluates false and only `audit` runs.
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         id: filter
         if: github.event_name == 'pull_request' || github.event_name == 'push'
         with:
@@ -112,7 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: lint
@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: ./scripts/verify.sh ledger
 
   hooks:
@@ -140,7 +140,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: ./scripts/verify.sh hooks
 
   # ---------------------------------------------------------------- compile once
@@ -158,7 +158,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: workspace
@@ -166,7 +166,7 @@ jobs:
       - run: ./scripts/verify.sh build
       # Only the two binaries, not target/ — the cache already carries intermediates, and an
       # artifact is for crossing the job boundary, not for storage.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: amk-binaries
           path: |
@@ -185,7 +185,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: workspace
@@ -215,7 +215,7 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: workspace
@@ -229,7 +229,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: workspace
@@ -241,7 +241,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: workspace
@@ -260,12 +260,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: lint
       # A prebuilt binary; compiling cargo-deny from source would cost more than the check.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@5b4d68e2e660441203ab128a23676f1e4faf1532 # v2
         with:
           tool: cargo-deny
       - run: ./scripts/verify.sh audit
@@ -306,9 +306,9 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: amk-binaries
           path: target/debug
@@ -317,7 +317,7 @@ jobs:
       # The gate shells out to psql for its throwaway database.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         id: py
         with:
           python-version: "3.12"
@@ -326,7 +326,7 @@ jobs:
             conformance/requirements-gate.txt
             conformance/requirements-schemathesis.txt
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -340,7 +340,7 @@ jobs:
       # the Lane L gate failed on its first CI run. p1-gate.sh's ensure_venv now repairs that, so
       # this key is defence in depth: it avoids restoring a venv that would only be thrown away.
       - name: Cache conformance virtualenvs
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             .venv-gate
@@ -383,6 +383,60 @@ jobs:
       - name: Run the Lane L gate
         run: ./scripts/verify.sh gate-lane-l
 
+  # ---------------------------------------------------------------- validate the image
+  # Builds the container WITHOUT pushing, so a broken Dockerfile is caught before merge rather
+  # than as a red main. This exists because the environment these workflows were authored in has
+  # Docker Hub blocked at its proxy, so the Dockerfile could not be built locally — and "I could
+  # not verify it here" is not a reason to ship it unverified. A GitHub runner reaches Docker Hub
+  # fine, so CI is where it gets proven.
+  #
+  # Scoped to changes in the Dockerfile itself, not to every Rust change: a release build costs
+  # minutes, and what this job validates is the IMAGE DEFINITION. Source correctness is already
+  # covered by build/clippy/test. No registry permissions at all — it cannot push, by construction
+  # rather than by an `if:`.
+  image-validate:
+    name: validate image build
+    needs: [changes, build]
+    if: needs.changes.outputs.docker == 'true' || needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # Base images come from Docker Hub by default and from this repository's own GHCR mirror
+      # once USE_GHCR_BASE is set. The DIGESTS are identical either way — the mirror copies by
+      # digest — so flipping this changes where bytes are fetched from, never which bytes.
+      - name: Resolve base image source
+        run: |
+          set -euo pipefail
+          RUST=$(sed -n 's/^ARG RUST_IMAGE=//p' Dockerfile)
+          RUNTIME=$(sed -n 's/^ARG RUNTIME_IMAGE=//p' Dockerfile)
+          if [ "${{ vars.USE_GHCR_BASE }}" = "true" ]; then
+            NS="ghcr.io/${{ github.repository }}/base"
+            RUST="$NS/rust@${RUST#*@}"
+            RUNTIME="$NS/debian@${RUNTIME#*@}"
+            echo "::notice::base images from the GHCR mirror"
+          else
+            echo "::notice::base images from Docker Hub (run 'Mirror base images', then set USE_GHCR_BASE=true)"
+          fi
+          echo "RUST_IMAGE=$RUST"       >> "$GITHUB_ENV"
+          echo "RUNTIME_IMAGE=$RUNTIME" >> "$GITHUB_ENV"
+
+      - name: Build (no push)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: false
+          load: false
+          build-args: |
+            RUST_IMAGE=${{ env.RUST_IMAGE }}
+            RUNTIME_IMAGE=${{ env.RUNTIME_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # ---------------------------------------------------------------- container image
   # Built ONCE, on main only, and identified by DIGEST from here on. Every later stage promotes
   # that exact digest; nothing rebuilds from source per environment, because an image rebuilt for
@@ -420,33 +474,55 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
       image: ghcr.io/${{ github.repository }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=sha,format=long
             type=raw,value=main
+      # Base images come from Docker Hub by default and from this repository's own GHCR mirror
+      # once USE_GHCR_BASE is set. The DIGESTS are identical either way — the mirror copies by
+      # digest — so flipping this changes where bytes are fetched from, never which bytes.
+      - name: Resolve base image source
+        run: |
+          set -euo pipefail
+          RUST=$(sed -n 's/^ARG RUST_IMAGE=//p' Dockerfile)
+          RUNTIME=$(sed -n 's/^ARG RUNTIME_IMAGE=//p' Dockerfile)
+          if [ "${{ vars.USE_GHCR_BASE }}" = "true" ]; then
+            NS="ghcr.io/${{ github.repository }}/base"
+            RUST="$NS/rust@${RUST#*@}"
+            RUNTIME="$NS/debian@${RUNTIME#*@}"
+            echo "::notice::base images from the GHCR mirror"
+          else
+            echo "::notice::base images from Docker Hub (run 'Mirror base images', then set USE_GHCR_BASE=true)"
+          fi
+          echo "RUST_IMAGE=$RUST"       >> "$GITHUB_ENV"
+          echo "RUNTIME_IMAGE=$RUNTIME" >> "$GITHUB_ENV"
+
       - name: Build and push
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            RUST_IMAGE=${{ env.RUST_IMAGE }}
+            RUNTIME_IMAGE=${{ env.RUNTIME_IMAGE }}
           # GitHub's own cache backend, scoped to this repository. `max` keeps intermediate
           # stages so a dependency-only change reuses the compiled-dependency layer.
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -522,6 +598,7 @@ jobs:
       - provenance
       - audit
       - gate-lane-l
+      - image-validate
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

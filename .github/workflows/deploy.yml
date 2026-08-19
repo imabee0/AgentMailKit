@@ -52,7 +52,7 @@ jobs:
       # Pull the image being promoted; never push from a deploy job.
       packages: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # Fail loudly and early rather than "succeeding" against a cluster that was never
       # configured. A deploy job that no-ops and reports green is indistinguishable from one that

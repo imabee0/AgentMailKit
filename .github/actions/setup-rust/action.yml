@@ -37,7 +37,7 @@ runs:
     # different target set. Keying on the commit SHA would miss every hit; keying only on the OS
     # would serve stale artifacts after a toolchain bump.
     - name: Cache cargo registry and target
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         shared-key: ${{ inputs.cache-key }}
         save-if: ${{ inputs.save-cache }}
