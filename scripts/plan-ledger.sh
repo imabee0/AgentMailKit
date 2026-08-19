@@ -207,6 +207,40 @@ check ci-workflows-present yes \
     [ -f .github/actions/setup-rust/action.yml ] || exit 1
     grep -q "^  ci-ok:" .github/workflows/ci.yml'
 
+# Base images pinned by DIGEST, not by tag. `rust:1.94.1-slim` is whatever that tag points at
+# today; an image rebuilt from a moved tag is not the artifact CI gated, however identical the
+# Dockerfile looks. Checked mechanically because the image cannot be BUILT everywhere this ledger
+# runs (no Docker daemon in the cloud sandbox), so this is the part of it that always can be.
+check ci-base-images-digest-pinned yes \
+  "Dockerfile base images pinned by digest, not by tag" \
+  bash -c '
+    [ -f Dockerfile ] || exit 1
+    # Every ARG naming an image must carry an @sha256: digest.
+    bad=$(grep -E "^ARG[[:space:]]+[A-Z_]*IMAGE=" Dockerfile | grep -v "@sha256:[0-9a-f]\{64\}" || true)
+    [ -z "$bad" ] || { printf "%s\n" "$bad"; exit 1; }
+    # ...and every FROM that names an EXTERNAL image must go through one of those ARGs. A FROM
+    # naming an earlier build stage (FROM chef AS planner) is internal and pins nothing -- the
+    # first version of this check flagged those and failed a correct Dockerfile.
+    python3 - <<PY
+import re, sys
+lines = open("Dockerfile").read().splitlines()
+stages = {m.group(1).lower() for l in lines if (m := re.match(r"^FROM\s+\S+\s+AS\s+(\S+)", l, re.I))}
+bad = []
+for l in lines:
+    m = re.match(r"^FROM\s+(\S+)", l)
+    if not m:
+        continue
+    img = m.group(1)
+    if img.startswith("\${"):          # resolved from a digest-pinned ARG, checked above
+        continue
+    if img.lower() in stages:          # internal stage reference
+        continue
+    if "@sha256:" not in img:
+        bad.append(l)
+if bad:
+    print("\n".join(bad)); sys.exit(1)
+PY'
+
 # Every third-party action pinned to a full 40-hex commit SHA. A tag is mutable: `@v4` is whatever
 # the tag points at today, which is a supply-chain hole a compromised action repository walks
 # straight through. Asserted mechanically because it is exactly the discipline that erodes when
