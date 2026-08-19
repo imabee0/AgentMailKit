@@ -11,6 +11,7 @@ pub mod accept;
 pub mod error;
 pub mod lookup;
 pub mod smtp;
+pub mod tls;
 
 pub use accept::{
     accept, AcceptRequest, Accepted, Authenticator, Delivery, Envelope, Persist, StorePersist,

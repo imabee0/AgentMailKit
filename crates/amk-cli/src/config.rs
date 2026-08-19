@@ -20,6 +20,8 @@ pub const AMK_DKIM_KEYS: &str = "AMK_DKIM_KEYS";
 pub const AMK_SMTP_SMARTHOST: &str = "AMK_SMTP_SMARTHOST";
 pub const AMK_SMTP_MAX_CONNECTIONS: &str = "AMK_SMTP_MAX_CONNECTIONS";
 pub const AMK_SMTP_SESSION_TIMEOUT: &str = "AMK_SMTP_SESSION_TIMEOUT";
+pub const AMK_SMTP_TLS_CERT: &str = "AMK_SMTP_TLS_CERT";
+pub const AMK_SMTP_TLS_KEY: &str = "AMK_SMTP_TLS_KEY";
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
 
@@ -205,6 +207,39 @@ pub fn dkim_keyring() -> Result<Keyring, BadConfigValue> {
     }
 }
 
+/// The STARTTLS acceptor for inbound SMTP, from `AMK_SMTP_TLS_CERT` / `AMK_SMTP_TLS_KEY`.
+///
+/// `Ok(None)` when both are unset -- inbound stays plaintext, exactly as before, and STARTTLS is
+/// neither advertised nor accepted. `Err` when they are set and unusable, or when only ONE is set:
+/// half a TLS configuration is a typo, and silently serving plaintext because the key path had a
+/// character wrong is the failure this refuses to have.
+///
+/// Loaded at startup so a bad certificate stops the daemon in front of an operator, rather than
+/// failing on the first sender that offers an upgrade -- where the symptom is intermittent
+/// delivery failure at other people's servers.
+pub fn smtp_tls_acceptor() -> Result<Option<amk_ingest::tls::TlsAcceptorHandle>, BadConfigValue> {
+    let cert = env::var(AMK_SMTP_TLS_CERT)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let key = env::var(AMK_SMTP_TLS_KEY)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    match (cert, key) {
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(BadConfigValue {
+            name: AMK_SMTP_TLS_CERT,
+            reason: format!("{AMK_SMTP_TLS_KEY} is not set; both are required for STARTTLS"),
+        }),
+        (None, Some(_)) => Err(BadConfigValue {
+            name: AMK_SMTP_TLS_KEY,
+            reason: format!("{AMK_SMTP_TLS_CERT} is not set; both are required for STARTTLS"),
+        }),
+        (Some(c), Some(k)) => amk_ingest::tls::acceptor_from_pem(Path::new(&c), Path::new(&k))
+            .map(Some)
+            .map_err(|e| BadConfigValue { name: AMK_SMTP_TLS_CERT, reason: e.to_string() }),
+    }
+}
+
 /// Concurrent inbound SMTP sessions. Default 256.
 ///
 /// A cap, not a queue: at capacity the listener answers `421` and closes, so a sender defers and
@@ -274,6 +309,8 @@ pub fn var_presence() -> Vec<VarPresence> {
         AMK_SMTP_SMARTHOST,
         AMK_SMTP_MAX_CONNECTIONS,
         AMK_SMTP_SESSION_TIMEOUT,
+        AMK_SMTP_TLS_CERT,
+        AMK_SMTP_TLS_KEY,
     ]
     .into_iter()
     .map(|name| VarPresence { name, set: env::var(name).is_ok() })

@@ -72,11 +72,19 @@ async fn main() {
             std::process::exit(exit::FAILURE);
         }
     };
+    // Startup, in front of an operator -- not on the first sender that offers an upgrade.
+    let smtp_tls = match config::smtp_tls_acceptor() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(exit::FAILURE);
+        }
+    };
     let app_config = config::app_config();
 
     let result = match role {
         AmkdRole::Api => server::serve_api(&url, &bind, app_config, keyring).await,
-        AmkdRole::Smtpd => server::serve_smtpd(&url, &bind, app_config).await,
+        AmkdRole::Smtpd => server::serve_smtpd(&url, &bind, app_config, smtp_tls).await,
         AmkdRole::Worker | AmkdRole::All => {
             unreachable!("not_yet_implemented already rejected worker/all")
         }

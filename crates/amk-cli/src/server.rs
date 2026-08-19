@@ -60,7 +60,12 @@ pub async fn serve_api(
 }
 
 /// Connect, require `AMK_PRIMARY_DOMAIN`, bind `bind` as SMTP, accept loop → `serve_session`.
-pub async fn serve_smtpd(database_url: &str, bind: &str, config: AppConfig) -> Result<(), String> {
+pub async fn serve_smtpd(
+    database_url: &str,
+    bind: &str,
+    config: AppConfig,
+    tls: Option<amk_ingest::tls::TlsAcceptorHandle>,
+) -> Result<(), String> {
     let primary_domain = config
         .primary_domain
         .filter(|s| !s.is_empty())
@@ -75,12 +80,20 @@ pub async fn serve_smtpd(database_url: &str, bind: &str, config: AppConfig) -> R
         format!("could not connect using AMK_DATABASE_URL: {}", describe_connect_failure(&e))
     })?;
     let auth = Authenticator::live().map_err(|e| format!("could not start authenticator: {e}"))?;
-    let ingest = IngestConfig::new(
+    let mut ingest = IngestConfig::new(
         primary_domain.clone(),
         &[primary_domain.as_str()],
         DEFAULT_MAX_BODY_BYTES,
         Duration::from_millis(250),
     );
+    // Opportunistic, not required: a sender that does not offer STARTTLS is still accepted. An MX
+    // that refuses plaintext refuses mail from every sender that has not implemented it, which is
+    // a delivery outage rather than a security posture. MTA-STS is how a domain asks for more,
+    // and that is a DNS/policy concern, not this listener's.
+    if let Some(acceptor) = tls {
+        ingest = ingest.with_tls(acceptor);
+    }
+    tracing::info!(starttls = ingest.tls_configured(), "smtpd TLS");
     let lookup = StoreInboxLookup { pool: pool.clone() };
     let persist = StorePersist { pool, auth };
 

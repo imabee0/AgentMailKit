@@ -60,7 +60,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/amk-smoke.XXXXXX") || exit 2
 MAINT="postgres://amk:amk-dev-local@127.0.0.1:${PORT}/postgres"
 
 cleanup() {
-  for pid in ${API_PID:-} ${SMTPD_PID:-} ${SINK_PID:-} ${LORIS_PID:-}; do kill "$pid" 2>/dev/null; done
+  for pid in ${API_PID:-} ${SMTPD_PID:-} ${SINK_PID:-} ${LORIS_PID:-} ${TLSD_PID:-}; do kill "$pid" 2>/dev/null; done
   wait 2>/dev/null
   "$PSQL" "$MAINT" -qc "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
   # The work directory holds a private key. Removing it is part of the test, not tidiness.
@@ -388,7 +388,72 @@ grep -q "exceeded its deadline" "$WORK/loris.log" \
 kill "$LORIS_PID" 2>/dev/null; LORIS_PID=""
 
 # ---------------------------------------------------------------------------------------------
-step "GATE 6 -- /health and /ready diverge when the database dies"
+step "GATE 6 -- STARTTLS on inbound"
+# Inbound mail used to be plaintext, unconditionally: `smtp.rs` answered 502 to STARTTLS and said
+# so in its own doc. Opportunistic TLS is near-universal among senders, so every message from
+# every peer crossed the wire in the clear.
+#
+# Opportunistic, not required -- a sender that does not offer STARTTLS is still accepted, because
+# an MX that refuses plaintext refuses mail from everyone who has not implemented it, which is a
+# delivery outage rather than a security posture.
+TLS_BIND=127.0.0.1:8227
+AMK_BIND="$TLS_BIND" AMK_SMTP_TLS_CERT="$WORK/sink.crt" AMK_SMTP_TLS_KEY="$WORK/sink.key" \
+  "$AMKD" --role smtpd >"$WORK/tlsd.log" 2>&1 &
+TLSD_PID=$!
+for _ in $(seq 1 60); do timeout 1 bash -c "(exec 3<>/dev/tcp/${TLS_BIND/:/ })" 2>/dev/null && break; sleep 0.25; done
+
+TLS_INBOX="tls-$$@${DOMAIN}"
+api POST "/v0/pods/$POD/inboxes" "{\"username\":\"tls-$$\"}" >/dev/null 2>&1
+
+if TLS_INBOX="$TLS_INBOX" python3 - "$TLS_BIND" <<'P'
+import os, smtplib, ssl, sys
+host, port = sys.argv[1].split(":"); port = int(port)
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+s = smtplib.SMTP(host, port, timeout=15)
+s.ehlo("smoke.probe")
+assert s.has_extn("starttls"), "STARTTLS not advertised with a certificate configured"
+print("  ok    STARTTLS advertised in the clear")
+s.starttls(context=ctx)
+print("  ok    handshake completed")
+s.ehlo("smoke.probe")
+# RFC 3207 s4.2: the extension must NOT reappear once the channel is encrypted.
+assert not s.has_extn("starttls"), "STARTTLS re-advertised after the upgrade (RFC 3207 s4.2)"
+print("  ok    not re-advertised after the upgrade")
+code, _ = s.docmd("STARTTLS")
+assert 500 <= code < 600, f"a second STARTTLS must be refused, got {code}"
+print(f"  ok    a second STARTTLS is refused ({code})")
+inbox = os.environ["TLS_INBOX"]
+s.sendmail("sender@outside.test", [inbox],
+    f"From: sender@outside.test\r\nTo: {inbox}\r\nSubject: over tls\r\n"
+    "Message-ID: <smoke-tls-1@outside.test>\r\n"
+    "Content-Type: text/plain; charset=utf-8\r\nMIME-Version: 1.0\r\n\r\nencrypted body\r\n")
+s.quit()
+print("  ok    a message was delivered over the encrypted channel")
+P
+then :; else bad "STARTTLS did not work end to end"; fi
+
+# It must have LANDED, not merely been accepted -- reachable by id, like Gate 3.
+if api GET "/v0/inboxes/$(enc "$TLS_INBOX")/messages/$(enc '<smoke-tls-1@outside.test>')" >/dev/null 2>&1; then
+  ok "the TLS-delivered message is stored and reachable by id"
+else
+  bad "the TLS-delivered message never reached storage"
+  sed -n '1,15p' "$WORK/tlsd.log"
+fi
+kill "$TLSD_PID" 2>/dev/null; TLSD_PID=""
+
+# And the negative side: with NO certificate configured, behaviour is exactly what it was before
+# TLS existed. The main smtpd from Gate 3 is still running without one.
+python3 - "$SMTPD" <<'P' || bad "the no-certificate path changed behaviour"
+import smtplib, sys
+host, port = sys.argv[1].split(":")
+s = smtplib.SMTP(host, int(port), timeout=10)
+s.ehlo("smoke.probe")
+assert not s.has_extn("starttls"), "STARTTLS advertised with no certificate configured"
+s.quit()
+print("  ok    no certificate configured -> STARTTLS not advertised (unchanged)")
+P
+
+step "GATE 7 -- /health and /ready diverge when the database dies"
 # LAST, and destructive: it drops this run's database, so nothing after it can use one. That
 # ordering is the bug this gate already caught once -- it used to sit inside Gate 4 and left the
 # smtpd in Gate 5 with no database to connect to.
