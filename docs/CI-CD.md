@@ -371,6 +371,25 @@ to both callers, or the entire pipeline stops starting — including every job u
 
 ---
 
+### Why there is no matrix job
+
+Matrices were considered and deliberately not used. Each candidate axis makes this pipeline worse,
+not better:
+
+- **Operating system.** The deployment target is Linux on k3s. A macOS or Windows leg would test a
+  platform this project never runs on, at triple the minutes.
+- **Rust version.** `rust-toolchain.toml` pins exactly one compiler, and that pin is the point —
+  it is what makes a CI failure reproducible locally. An MSRV-versus-stable matrix earns its keep
+  for a published library with downstream consumers; these crates are `publish = false` and are
+  consumed only by this repository's own binary.
+- **Test sharding.** Compilation dominates the test job — the suite itself runs in seconds once
+  built. Sharding across N runners would multiply the expensive half and parallelise the cheap
+  half, increasing total minutes to reduce wall-clock on a job that already finishes quickly.
+
+Where genuine parallelism exists it is expressed as separate jobs (`clippy`, `test`, `fixtures`,
+`provenance` all run concurrently off one `build`), which is the right shape for work that differs
+in kind rather than in parameter.
+
 ## 7. Security posture
 
 - **Least privilege.** Every workflow declares top-level `permissions: contents: read`. Only `image`
