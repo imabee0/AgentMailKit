@@ -1,0 +1,18 @@
+name: zzrw-b
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+    secrets:
+      KUBE_CONFIG:
+        required: false
+permissions:
+  contents: read
+jobs:
+  deploy:
+
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

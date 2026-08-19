@@ -1,0 +1,16 @@
+name: zzrw-a
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+jobs:
+  deploy:
+
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
