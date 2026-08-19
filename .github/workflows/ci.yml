@@ -404,6 +404,54 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+  # ---------------------------------------------------------------- promote the same digest
+  # Staging first, unconditionally. Production is a separate call to the SAME reusable workflow
+  # with a different environment, and GitHub's environment protection rules are what hold the
+  # manual approval — not an `if:` a contributor could edit in a pull request.
+  #
+  # THE permissions BLOCK IS LOAD-BEARING, NOT DECORATION. A called workflow may not request more
+  # than its CALLING job holds, and GitHub enforces that when it parses the run — so the whole
+  # workflow concluded `startup_failure`, with no job, no log and no annotation, purely because
+  # deploy.yml's job asks for `packages: read` while the caller granted `contents: read` alone.
+  # Proven by two probes differing only in this block: without it startup_failure, with it the run
+  # started and reached deploy.yml's own credential check. Keep these in step with deploy.yml.
+  deploy-staging:
+    name: deploy staging
+    needs: image
+    # Opt-in. Until the cluster credentials exist, deployment is OFF rather than silently
+    # succeeding: set the repository variable DEPLOY_ENABLED=true when the environments are
+    # provisioned. A no-op deploy that reports green is the same defect as a skipped test that
+    # reports green, and this project has already been bitten by the second one.
+    if: vars.DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      image: ${{ needs.image.outputs.image }}
+      digest: ${{ needs.image.outputs.digest }}
+    # Named explicitly rather than `secrets: inherit`. Inherit passes EVERY secret the caller holds
+    # into a workflow that runs kubectl against a cluster; naming the one it needs is the same
+    # least-privilege rule the permissions blocks follow.
+    secrets:
+      KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
+  deploy-production:
+    name: deploy production
+    needs: [image, deploy-staging]
+    if: vars.DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+      image: ${{ needs.image.outputs.image }}
+      digest: ${{ needs.image.outputs.digest }}
+    secrets:
+      KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
   # ---------------------------------------------------------------- the required check
   # Branch protection points at THIS job and nothing else.
   #

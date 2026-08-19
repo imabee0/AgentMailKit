@@ -1,9 +1,0 @@
-name: zzp-d
-on: pull_request
-permissions:
-  contents: read
-jobs:
-  call:
-    uses: ./.github/workflows/zzrw-d.yml
-    with:
-      environment: staging

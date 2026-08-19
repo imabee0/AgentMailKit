@@ -282,6 +282,32 @@ Both are used, for opposite reasons, and the distinction is worth keeping straig
   An `if:` expression is not: a contributor can edit an `if:` in a pull request and cannot edit an
   environment's protection rules.
 
+### The permissions rule that cost five red runs
+
+**A called workflow may not request more permissions than its calling job holds, and GitHub
+enforces this when it parses the run.** `deploy.yml`'s job asks for `packages: read` to pull the
+image it promotes. The calling jobs originally inherited the workflow default of `contents: read`,
+so every run concluded **`startup_failure`** — no job, no log, no annotation, and nothing in the
+API to read. `actionlint` and a strict YAML parse were both clean.
+
+It was found by bisection, because there was nothing else to read: removing the deploy jobs let the
+workflow start, and eight one-feature probe workflows then isolated it — a declared secret, an
+`environment:` expression and a job-`name:` expression were each individually fine; adding the
+job-level `permissions` block was not. Two final probes differing *only* in the caller's
+`permissions` settled it: without it `startup_failure`, with it the run started and reached
+`deploy.yml`'s own credential check.
+
+So `deploy-staging` and `deploy-production` each carry:
+
+```yaml
+    permissions:
+      contents: read
+      packages: read
+```
+
+**Keep these in step with `deploy.yml`.** Any permission added to the called workflow must be added
+to both callers, or the entire pipeline stops starting — including every job unrelated to deploy.
+
 ---
 
 ## 7. Security posture
