@@ -15,14 +15,85 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
-# The single source of truth for where we are. Everything below keys its due-ness off this.
-CURRENT_PHASE=P0
+# Is a gate transcript still evidence about THIS tree?
+#
+# The p*-gate-* checks grep a committed transcript. That was itself the fix for a worse defect (a
+# `pend` wired statically to PENDING, which no implementation could ever flip), but it trades
+# "can never pass" for "passes forever": the file says the gate was clean once, and keeps saying
+# so after the code it gated has been rewritten underneath it.
+#
+# Freshness is asked of git rather than of a convention: if the code a gate covers was last
+# touched AFTER the transcript was last committed, the transcript describes a tree that no longer
+# exists. Keyed on COMMIT times, not file mtimes -- a fresh checkout gives every file the same
+# mtime, which would make this silently true everywhere. No new convention is demanded of
+# transcript authors: an earlier draft wanted a `gated-at: <sha>` line in each fixture, but only
+# fixture 28 records a commit at all today, so that would have been a rule enforced retroactively
+# against four files that predate it.
+gate_evidence_fresh() { # $1 = transcript path; $2.. = the code paths it gates
+  local fx="$1"; shift
+  local fx_at code_at
+  fx_at=$(git log -1 --format=%ct -- "$fx" 2>/dev/null)
+  [ -n "$fx_at" ] || return 1          # uncommitted/unknown: cannot be dated, cannot be trusted
+  code_at=$(git log -1 --format=%ct -- "$@" 2>/dev/null)
+  [ -n "$code_at" ] || return 0        # gated code has no history yet; nothing can have invalidated it
+  [ "$fx_at" -ge "$code_at" ]
+}
+
+# The single source of truth for where we are -- DERIVED, never transcribed.
+#
+# This was `CURRENT_PHASE=P0`, a hand-edited literal, and it still read P0 while P2's
+# message/thread surface, outbound send and SMTP ingest had all merged. Three other documents
+# disagreed with it and with each other: README.md said P1, docs/RESUME.md said P2, and
+# docs/execute-plan-v1.md said `amk-ingest` did not exist (it merged at 28e6afa). Four records of
+# one fact, in the file whose whole purpose is that an obligation has exactly one.
+#
+# Computed from the same gate fixtures the p*-gate-* checks read, so there is one body of evidence
+# and not a second opinion about it. Delete a gate transcript and the phase moves back.
+#
+# CONTENT ONLY, deliberately -- freshness is a different question and belongs to the individual
+# gates, which report it as STALE. An earlier revision applied freshness here too, for consistency,
+# and the result was useless: any edit under crates/amk-http rewound this to P-1, so the furthest
+# verified point read as "nothing has been done" every time somebody touched a handler. A gate that
+# ran and was clean is a historical fact; it does not un-happen because the code moved on. What
+# moving on means is "re-run it", which is exactly what STALE says, next to the gate it concerns.
+#
+# Lane R (the credentialed conformance diff) is what advances a phase, per docs/PLAN.md's own lane
+# split: Lane L green makes a phase code-complete, not gated.
+derive_current_phase() {
+  local f
+  # P0: the official Python SDK drove auth.me() against our own server.
+  f=reference/fixtures/24-p0-gate-sdk-authme.txt
+  [ -f "$f" ] && grep -q "organization_id" "$f" || { echo "P-1"; return; }
+  # P1: Lane R -- the dual-target diff against the live reference, clean.
+  f=reference/fixtures/25-p1-gate-conformance.txt
+  [ -f "$f" ] && grep -q "0 skipped, 0 with structural diffs" "$f" || { echo "P0"; return; }
+  # P2: Lane R, this phase's endpoints. Not captured yet; when it lands, add its fixture HERE
+  # rather than editing a literal anywhere.
+  f=reference/fixtures/29-p2-conformance.txt
+  [ -f "$f" ] && grep -q "dual_target.py exit: 0" "$f" || { echo "P1"; return; }
+  echo "P2"
+}
+CURRENT_PHASE=$(derive_current_phase)
 
 fail=0
 emitted=""
 ok()     { emitted="$emitted $1"; printf '  \033[32mMET\033[0m      %-38s %s\n' "$1" "$2"; }
 bad()    { emitted="$emitted $1"; printf '  \033[31mSKIPPED\033[0m  %-38s %s\n' "$1" "$2"; fail=$((fail+1)); }
 pend()   { emitted="$emitted $1"; printf '  PENDING  %-38s %s\n' "$1" "$2"; }
+# STALE: this gate WAS run and WAS clean, and the code it covers has changed since. Distinct from
+# PENDING (never run) and MET (current), because the three call for different actions -- run it,
+# re-run it, nothing. Yellow, and never rendered as MET, so it cannot be skim-read as a pass. It
+# does not fail the build: nothing is known broken, and a Lane R gate needs a credential this
+# machine may not have.
+stale()  { emitted="$emitted $1"; printf '  \033[33mSTALE\033[0m    %-38s %s\n' "$1" "$2 [re-run: code moved since the transcript]"; }
+
+# gate_check <id> <desc> <transcript> <content-fn> <code paths...>
+# Splits "was it clean" from "is it still current" so each is reported as itself.
+gate_check() {
+  local id="$1" desc="$2" fx="$3" content="$4"; shift 4
+  if ! "$content"; then pend "$id" "$desc"; return; fi
+  if gate_evidence_fresh "$fx" "$@"; then ok "$id" "$desc"; else stale "$id" "$desc"; fi
+}
 attest() { emitted="$emitted $1"; printf '  ATTEST   %-38s %s\n' "$1" "$2"; }
 
 # check <id> <due:yes|no> <description> <command...>
@@ -325,13 +396,17 @@ check security-timing-guard-live yes \
 # key satisfied. Now it asserts the EVIDENCE, in this project's own idiom: the gate is run by hand
 # against a live server (too heavy for every `check.sh`), and its verbatim transcript is captured
 # as a fixture. The fixture must exist and must contain a real Identity response, not a placeholder.
-check p0-gate-sdk-authme no "P0 gate: official Python SDK auth.me() vs localhost, transcript captured" \
+chk_p0_gate() {
   bash -c '
     f=reference/fixtures/24-p0-gate-sdk-authme.txt
     [ -f "$f" ] || exit 1
     grep -q "organization_id" "$f" &&
     grep -qi "agentmail" "$f" &&
     ! grep -qi "placeholder\|TODO\|not yet run" "$f"'
+}
+gate_check p0-gate-sdk-authme "P0 gate: official Python SDK auth.me() vs localhost, transcript captured" \
+  reference/fixtures/24-p0-gate-sdk-authme.txt chk_p0_gate \
+  crates/amk-http crates/amk-cli
 # Same shape as p0-gate-sdk-authme: the gate needs a live server and a live reference account, so
 # it is run by hand (`./scripts/p1-gate.sh`) and its verbatim transcript captured. The ledger
 # asserts the EVIDENCE. A run that is not clean must not be able to satisfy this, so the clean
@@ -342,13 +417,17 @@ check p0-gate-sdk-authme no "P0 gate: official Python SDK auth.me() vs localhost
 # This fixture legitimately discusses `{placeholders}` at length — that is the harness feature the
 # gate needed — so the guard matched real prose and reported PENDING on a clean run. A negative
 # check has to be keyed on something that cannot occur in the document it is guarding.
-check p1-gate-conformance no "P1 gate: dual-target conformance diff clean for P1 endpoints" \
+chk_p1_conformance() {
   bash -c '
     f=reference/fixtures/25-p1-gate-conformance.txt
     [ -f "$f" ] || exit 1
     grep -q "0 skipped, 0 with structural diffs" "$f" &&
     grep -q "THIRD RUN — CLEAN" "$f" &&
     grep -q "dual_target.py exit: 0" "$f"'
+}
+gate_check p1-gate-conformance "P1 gate: dual-target conformance diff clean for P1 endpoints" \
+  reference/fixtures/25-p1-gate-conformance.txt chk_p1_conformance \
+  crates/amk-http crates/amk-store crates/amk-types
 # The OTHER half of P1's gate wording: "Python+Node SDK smoke (create/list/delete across scopes)".
 # Both clients, unmodified, driving a live server with nothing changed but the base URL.
 #
@@ -359,7 +438,7 @@ check p1-gate-conformance no "P1 gate: dual-target conformance diff clean for P1
 # so about tests. (3) The captured client versions are still the versions pinned on disk, so bumping
 # a pin without re-running the gate fails here instead of leaving a transcript that describes a run
 # against a client nobody uses any more.
-check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pinned, falsified" \
+chk_p1_sdk_smoke() {
   bash -c '
     f=reference/fixtures/26-p1-gate-sdk-smoke.txt
     [ -f "$f" ] || exit 1
@@ -373,6 +452,10 @@ check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pin
     [ -n "$py" ] && [ -n "$nd" ] &&
     grep -q "agentmail==$py" "$f" &&
     grep -q "agentmail@$nd" "$f"'
+}
+gate_check p1-gate-sdk-smoke "P1 gate: both official SDKs drive a live server; pinned, falsified" \
+  reference/fixtures/26-p1-gate-sdk-smoke.txt chk_p1_sdk_smoke \
+  crates/amk-http crates/amk-store crates/amk-cli
 # P2's Lane L conjuncts, same shape as the two P1 checks above: run by hand against a live server,
 # transcript captured, ledger asserts the EVIDENCE.
 #
@@ -382,7 +465,7 @@ check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pin
 # the suite and the transcript was committed in a docs-only change nobody re-tested. Deferring the
 # fixture without adding this check would have recorded a reason ("asserted by plan-ledger") that
 # was not true.
-check p2-gate-lane-l no "P2 Lane L: schemathesis + both SDK smokes green against our own server" \
+chk_p2_lane_l() {
   bash -c '
     f=reference/fixtures/28-p2-lane-l.txt
     [ -f "$f" ] || exit 1
@@ -390,6 +473,10 @@ check p2-gate-lane-l no "P2 Lane L: schemathesis + both SDK smokes green against
     grep -q "^sdk_smoke.mjs exit: 0" "$f" &&
     grep -q "^schemathesis exit: 0" "$f" &&
     grep -q "45 operations" "$f"'
+}
+gate_check p2-gate-lane-l "P2 Lane L: schemathesis + both SDK smokes green against our own server" \
+  reference/fixtures/28-p2-lane-l.txt chk_p2_lane_l \
+  crates/amk-http crates/amk-outbound crates/amk-ingest
 pend p6-restore-drill        "P6: restore drill passes from backups alone, before any cutover step"
 
 # ---------------------------------------------------------------- cannot be machine-checked
@@ -444,8 +531,8 @@ echo
 # is a check that silently stops checking (the guard-suite count read 24 while the suite ran 32).
 # `$id` in the contracts loop expands from the same glob the loop iterates.
 missing=$(
-  { grep -o '^[[:space:]]*\(check\|pend\|attest\|bad\) *"\?[A-Za-z0-9_$-]*' "$0" \
-      | sed 's/^[[:space:]]*[a-z]* *"\?//' | grep -v '^\$id$'
+  { grep -oE '^[[:space:]]*(check|gate_check|pend|attest|bad)[[:space:]]+"?[A-Za-z0-9_$-]*' "$0" \
+      | sed -E 's/^[[:space:]]*[a-z_]+[[:space:]]+"?//' | grep -v '^\$id$'
     for c in .claude/contracts/*.md; do printf 'contract-%s\n' "$(basename "$c" .md)"; done
   } | sort -u | while read -r id; do
         case " $emitted " in *" $id "*) ;; *) printf '%s ' "$id" ;; esac
