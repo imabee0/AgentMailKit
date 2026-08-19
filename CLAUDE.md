@@ -78,10 +78,10 @@ jobs, idempotency. **P2: message/thread landed.** `amk-outbound` is partial.
 
 ## Branching, dispatch and merge
 
-- **One branch per crate per phase, named `amk/<phase>/<crate>`** — `amk/p2/ingest`,
-  `amk/p1/http-extractors`. One worktree per branch under `.claude/worktrees/<name>/`. No branch
-  outlives its phase: one open across a phase boundary is a drift signal, so close it or restart it
-  from the new base.
+- **One branch per crate per phase, named `dev-<8hex>`** — eight lowercase hex digits
+  (e.g. `dev-8818b9cd`). Never `amk/<phase>/<crate>`. One worktree per branch under
+  `.claude/worktrees/<name>/`. No branch outlives its phase: one open across a phase boundary is a
+  drift signal, so close it or restart it from the new base.
 - **Commits conventional and atomic** — one logical change, tests in the same commit as the code
   they cover, no `wip` commits on a branch that will be reviewed.
 - **Rebase onto `main` before review; never merge-commit into the branch.** The reviewed diff must
@@ -197,7 +197,6 @@ say so plainly and rotate it.
 
 ## Forge
 
-**GitHub:** `https://github.com/Appsynergy-io/AgentMailKit` (private). Migrated from Gitea
-2026-08-17 by user instruction so the repo can be driven from Claude's cloud sandbox — this
-supersedes the global "Gitea only, never GitHub" rule for this project. The Gitea remote was
-dropped; that copy is unmaintained.
+**GitHub:** `https://github.com/imabee0/AgentMailKit`. Migrated from Gitea 2026-08-17 so the
+repo can be driven from Claude's cloud sandbox — this supersedes the global "Gitea only, never
+GitHub" rule for this project. The Gitea remote was dropped; that copy is unmaintained.

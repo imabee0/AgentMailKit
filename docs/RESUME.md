@@ -396,12 +396,10 @@ commands actually used this session:
 Note this file also, briefly, claimed `.claude/settings.json` denies `Bash(gh:*)`. It does not —
 the deny list holds only `gh auth token` and `gh auth login --with-token`.
 
-### 4. Which branch policy wins
+### 4. Branch naming — decided
 
-`docs/PLAN.md` says one branch per crate per phase, `amk/<phase>/<crate>`. This session is
-instructed to develop and push only to `claude/next-steps-planning-u0nvud`. They conflict, and the
-merged PR used the session branch. Tell me which governs, or grant `git push origin amk/*` and I
-will follow the plan.
+`dev-<8hex>` (Grok global). A `claude/<slug>` or `execute-plan/<id>-pr-N-…` label is a worktree
+only; publish `dev-<8hex>` from the same commit before review. Never `amk/<phase>/<crate>`.
 
 ### 5. Physical infrastructure — no key substitutes for these
 
@@ -451,7 +449,7 @@ retries. Delete it from the workstation or the GitHub UI.
 
 ## Migration notes (2026-08-17)
 
-- Forge is now `https://github.com/Appsynergy-io/AgentMailKit` (private). The Gitea remote was
+- Forge is now `https://github.com/imabee0/AgentMailKit`. The Gitea remote was
   dropped; that copy is unmaintained.
 - The plan moved from `~/.claude/plans/download-agents-mail-sdk-drifting-frog.md` to `docs/PLAN.md`
   so a sandbox session reads the same contract. `scripts/hooks/guard.sh` protects both paths, and

@@ -53,4 +53,4 @@ Phase status lives in `docs/RESUME.md`. `scripts/plan-ledger.sh` is the mechanic
 - Dev Postgres is `127.0.0.1:55432` via `./scripts/dev-db.sh`.
 - Secrets via `sdxd run`; never print a key. Minted keys must never begin `am_eu_`.
 - `amk-types`, `docs/PLAN.md` and `scripts/hooks/**` are hook-protected.
-- Forge is GitHub `https://github.com/Appsynergy-io/AgentMailKit` (private). PRs via `gh pr create`. Never `gh auth token`.
+- Forge is GitHub `https://github.com/imabee0/AgentMailKit`. PRs via `gh pr create`. Never `gh auth token`.

@@ -220,11 +220,11 @@ Every question below has been asked of the user at least once, and each is a que
 could have answered. An unattended session that stops on one of these has not found an ambiguity;
 it has found a gap in this section, and the fix is to add the answer here rather than to ask again.
 
-**Branch naming.** `amk/<phase>/<crate>` governs in every environment. A session-assigned branch
-(`claude/<slug>`) is a worktree label, not a policy — publish `amk/<phase>/<crate>` from the same
-commit before review. If the runtime forbids pushing anything else, push the session branch, say
-so in one line, and continue. This conflict has been raised as a blocking question before; it is
-not one.
+**Branch naming.** `dev-<8hex>` (eight lowercase hex digits) in every environment. A session-assigned
+branch (`claude/<slug>`, `execute-plan/<id>-pr-N-…`) is a worktree label — publish `dev-<8hex>` from
+the same commit before review. Never `amk/<phase>/<crate>`. If the runtime forbids pushing anything
+else, push the session branch, say so in one line, and continue. This conflict has been raised as a
+blocking question before; it is not one.
 
 **Subagent dispatch.** Standing authorisation. The three review lenses on every returned diff, the
 pre-dispatch lens on every contract, and implementer fan-out from P2 onward are all mandated by
@@ -440,7 +440,7 @@ Fan out ONLY when all four hold: (i) the crates share no files; (ii) neither dep
 
 ### Branching hygiene
 - `main` is protected; nothing lands except a merge that passed a phase gate.
-- One branch per crate per phase: `amk/<phase>/<crate>` (e.g. `amk/p2/ingest`); one worktree per branch under `.claude/worktrees/`; each worktree gets a task-scoped CLAUDE.md carrying the crate's contract.
+- One branch per crate per phase, named `dev-<8hex>` (e.g. `dev-8818b9cd`); one worktree per branch under `.claude/worktrees/`; each worktree gets a task-scoped CLAUDE.md carrying the crate's contract.
 - Commits conventional and atomic: one logical change, tests in the same commit as the code they cover; no "wip" commits on a branch that will be reviewed.
 - Merge order follows write order — never merge a downstream crate before its upstream is on main.
 - Rebase onto main before review, never merge-commit into the branch; the reviewed diff must be the diff that lands.

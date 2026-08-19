@@ -37,8 +37,8 @@ construction. It is not replaced with a fresher one.
 5. **Dispatch order is load-bearing.** Contract into the worktree first, then `.amk-scope`, then
    the lock. Contract reviewed read-only before implement. Scope is derived (command + output on
    `Scope-derivation:`).
-6. **Merge branch is `amk/<phase>/<crate>`.** execute-plan’s `execute-plan/<id>-pr-N-…` label is
-   the worktree only. Orchestrator publishes `amk/<phase>/<crate>` from `commit_sha` before review.
+6. **Merge branch is `dev-<8hex>`.** execute-plan’s `execute-plan/<id>-pr-N-…` label is
+   the worktree only. Orchestrator publishes `dev-<8hex>` from `commit_sha` before review.
    Merge that branch after three clean lenses. Never merge-commit; rebase onto `main` first.
 7. **Three lenses on every returned diff** — `amk-review-contract`, `amk-review-provenance`,
    `amk-review-tests` — plus the pre-dispatch contract lens. execute-plan’s single generic reviewer
@@ -107,20 +107,17 @@ one thing no other gate did.
 | **STARTTLS** | Inbound was plaintext unconditionally. Opportunistic TLS, RFC 3207 §4.2 verified against the running binary. |
 | **CI** | Four workflows, affected-crate closure, build-once/promote-by-digest, `ci-ok` as the single required check. The no-CI decision is reversed and recorded. |
 | **C2** | Closed by decision. Register A and C are now empty of open items. |
+| **PR A** | Blobs, signed URLs, GET raw, GET attachment (non-draft mounts). `88f7d61` `84cbdd3` `bf0394d`. |
 
 ### The work that remains, in dependency order
 
-Each item: one branch `amk/<phase>/<crate>`, a contract with a derived `Scope-derivation:`, three
+Each item: one branch `dev-<8hex>`, a contract with a derived `Scope-derivation:`, three
 read-only lenses, mutation both directions, **a line in `binary-smoke.sh`**, and a stated
 `derive-remaining-surface.sh` delta. The last two are not optional — a capability not observed
 through the shipped binary is not a capability, which is the lesson D1 cost.
 
-**PR A — blobs, attachments, raw, signed URLs.**
-Deferred by decision at P1 and now blocking: `messages/{id}/raw`, `messages/{id}/attachments/{id}`
-and the draft-attachment reads all need content-addressed storage behind `amk-store`'s blob trait.
-`reference/fixtures/06-download-url-expiry.txt` is the spec — a CloudFront-style signed URL with a
-~1h TTL and a 403 after expiry. Nothing else in the queue needs blobs, but every remaining message
-endpoint does.
+**PR A — blobs, attachments, raw, signed URLs — DONE** on this branch
+(`88f7d61`, `84cbdd3`, `bf0394d`). Draft-scoped attachment mounts wait on PR D.
 
 **PR B — `amk-jobs`.**
 `amkd --role worker` refuses to start and names this crate. Postgres jobs table + tokio workers.
