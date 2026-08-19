@@ -19,7 +19,45 @@ client; both clients can be happy on the paths they walk while a malformed page 
 
 ```bash
 ./scripts/p1-gate.sh          # all four, against a throwaway deployment. This is the gate.
+./scripts/p1-gate.sh --lane-l # the three that need no credential. NOT the gate.
 ```
+
+### Lanes
+
+`dual_target.py` is the only one of the four that calls **api.agentmail.to**, so it is the only one
+needing a live reference credential. `--lane-l` runs the other three and skips it.
+
+That split exists so continuous integration can run the uncredentialed guards on every pull request
+without a reference key ever existing in a runner — a pull request can read any secret its workflow
+is given, and the correct number of places a live AgentMail key can appear is zero. Lane R stays an
+operator-run step on a trusted machine.
+
+A `--lane-l` run prints its lane and **cannot** satisfy `plan-ledger.sh`'s `p1-gate-conformance`,
+which reads `reference/fixtures/25-p1-gate-conformance.txt` for the diff's own summary line.
+
+### Depth: the schemathesis profile
+
+Schemathesis is the expensive one. Measured here, 45 mounted operations, one full run:
+
+| phase | time |
+|---|---|
+| coverage | 1519s — 25 min |
+| fuzzing | 1039s — 17 min |
+| stateful | 249s — 4 min |
+| examples | 0.2s |
+
+Two environment variables tune it, both defaulting to the **full** set so a bare run of the script
+is still the real gate:
+
+```bash
+AMK_ST_PHASES=examples,fuzzing AMK_ST_EXAMPLES=5 ./scripts/p1-gate.sh --lane-l   # ~3 min
+```
+
+CI uses that reduced profile on pull requests and the full one on `main`, on `workflow_dispatch`,
+and on any pull request labelled `full-gate`. The reduced profile still stands up a real server,
+runs **both SDK smokes in full**, and fuzzes **every** mounted operation — it lowers depth, not
+surface coverage. The run prints which profile it used, so a reduced pass cannot be read as the
+full guard. See `docs/CI-CD.md`.
 
 Individually, against a server you already have:
 
