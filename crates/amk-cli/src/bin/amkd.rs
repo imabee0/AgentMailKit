@@ -47,6 +47,13 @@ async fn main() {
         eprintln!("{e}");
         std::process::exit(exit::FAILURE);
     }
+    // Before any listener exists. rustls cannot choose a provider on its own in this workspace
+    // (both `ring` and `aws-lc-rs` are compiled in via feature unification), and without one it
+    // panics inside the request path on the first outbound send rather than at boot.
+    // `amk_outbound::smtp` also guards its own delivery path; this is the boot-time half, so the
+    // failure -- if the chosen provider ever becomes unavailable -- surfaces here instead.
+    amk_outbound::smtp::install_crypto_provider();
+
     let keyring = match config::dkim_keyring() {
         Ok(k) => k,
         Err(e) => {

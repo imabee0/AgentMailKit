@@ -57,6 +57,30 @@ impl Transport for SmtpTransport {
     }
 }
 
+/// Install the process-wide rustls crypto provider. Idempotent; call it before serving.
+///
+/// # The panic this prevents
+///
+/// rustls 0.23 picks a provider from its own enabled features, and refuses -- by panicking, deep
+/// inside `ClientConfig::builder` -- when it cannot tell which one is meant. This workspace
+/// compiles BOTH: `sqlx`, `hickory-resolver` and `mail-send` each depend on rustls, and cargo
+/// feature unification turns on `ring` and `aws-lc-rs` together. Nothing in the dependency tree is
+/// wrong; the combination simply has no default.
+///
+/// So `amkd --role api` panicked on the first outbound send, in the tokio worker serving the
+/// request, with "Could not automatically determine the process-level CryptoProvider". Found by
+/// `scripts/binary-smoke.sh` on the run that first exercised a real send through the compiled
+/// binary -- unit tests never reached it because `RecordingTransport` builds no TLS connector, so
+/// the whole `amk-outbound` suite passed against a binary that could not send.
+///
+/// Returns `true` if this call installed the provider, `false` if one was already present. Both
+/// are success: a second call losing the race is exactly what idempotent means here.
+pub fn install_crypto_provider() -> bool {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_ok()
+}
+
 /// The value [`crate::AppState`](not here) holds: either the recording fake or a live SMTP hop.
 ///
 /// An enum rather than a trait object because [`Transport::deliver`] uses RPITIT and is not
@@ -162,12 +186,24 @@ async fn mx_hosts(domain: &str) -> Result<Vec<String>, OutboundError> {
     }
 }
 
+/// Guards the provider install on the delivery path itself.
+///
+/// `amkd` also calls [`install_crypto_provider`] at startup, which is where it belongs -- failing
+/// at boot beats failing on the first user request. This second call is not redundancy for its own
+/// sake: it makes the panic unreachable for ANY caller, including `amk-http`'s own tests and any
+/// future binary, rather than depending on every entry point remembering. `Once` makes the cost a
+/// single relaxed load after the first send.
+static PROVIDER: std::sync::Once = std::sync::Once::new();
+
 async fn deliver_to_host(
     host: &str,
     port: u16,
     implicit_tls: bool,
     message: &SignedMessage,
 ) -> Result<(), OutboundError> {
+    PROVIDER.call_once(|| {
+        install_crypto_provider();
+    });
     let builder = SmtpClientBuilder::new(host, port)
         .map_err(OutboundError::Delivery)?
         .implicit_tls(implicit_tls)
