@@ -359,7 +359,24 @@ jobs:
   image:
     name: build image
     needs: [changes, clippy, test, fixtures, provenance, ledger, audit, gate-lane-l]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # OFF until someone turns it on, for two reasons that both point the same way.
+    #
+    # 1. Nothing consumes it yet. `deploy-*` are gated on DEPLOY_ENABLED and therefore skipped, so
+    #    building and pushing a container on every merge to main would be work whose output has no
+    #    reader — the precise redundancy this pipeline exists to remove.
+    # 2. The build has never been validated. It could not be: the environment these workflows were
+    #    authored in has Docker Hub blocked at the proxy (`docker pull alpine` returns 403 from the
+    #    CDN), so the Dockerfile is reviewed but unexecuted. Letting an unexecuted build run
+    #    automatically on main means discovering its first defect as a red main.
+    #
+    # `workflow_dispatch` is included so it can be validated ONCE, on demand, before being switched
+    # on — rather than by merging and hoping. Set the repository variable PUBLISH_IMAGE=true when
+    # that run is green. DEPLOY_ENABLED additionally gates the promotion stages below, and those
+    # depend on this job, so deploying requires both.
+    if: >-
+      vars.PUBLISH_IMAGE == 'true' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

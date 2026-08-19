@@ -1,3 +1,10 @@
+# MUST match rust-toolchain.toml's channel. Pinned at 1.85.0 while the toolchain file said 1.94.1,
+# which would have failed every merge to main: the locked dependency set needs >= 1.94
+# (sqlx 0.9.0 declares rust-version 1.94.0), so `cargo build --locked` on 1.85 refuses outright.
+# Caught locally rather than by a red main. `plan-ledger.sh`'s `docker-rust-version-matches`
+# asserts the two agree, because Docker cannot read the TOML at FROM time and a version that only
+# has to be remembered is a version that drifts.
+
 # One image, both roles. `amkd --role api` and `amkd --role smtpd` are the same binary with
 # different arguments, so shipping two images would mean two things to promote and two chances for
 # them to differ. The Kubernetes Deployments differ only in their command.
@@ -7,23 +14,23 @@
 # invalidates the dependency layer and recompiles every crate in the tree. The planner reduces the
 # manifests to a recipe that changes ONLY when dependencies change, so the expensive layer is
 # keyed on the thing that actually affects it.
-FROM rust:1.85.0-bookworm AS planner
+FROM rust:1.94.1-bookworm AS planner
 WORKDIR /build
-RUN cargo install cargo-chef --locked --version 0.1.68
+RUN cargo install cargo-chef --locked --version 0.1.78
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ---------------------------------------------------------------------------- dependency cache
-FROM rust:1.85.0-bookworm AS deps
+FROM rust:1.94.1-bookworm AS deps
 WORKDIR /build
-RUN cargo install cargo-chef --locked --version 0.1.68
+RUN cargo install cargo-chef --locked --version 0.1.78
 COPY --from=planner /build/recipe.json recipe.json
 # This layer is reused across every build whose dependency graph is unchanged — which is almost
 # all of them, and it is the layer that costs minutes.
 RUN cargo chef cook --release --locked --recipe-path recipe.json
 
 # ---------------------------------------------------------------------------- build
-FROM rust:1.85.0-bookworm AS builder
+FROM rust:1.94.1-bookworm AS builder
 WORKDIR /build
 COPY --from=deps /build/target target
 COPY --from=deps /usr/local/cargo /usr/local/cargo

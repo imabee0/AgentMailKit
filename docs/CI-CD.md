@@ -165,7 +165,7 @@ One workflow, `.github/workflows/ci.yml`. The job graph:
 | `provenance` | with `build` | always | — | no Stalwart/JMAP shapes |
 | `audit` | if dependencies changed | always | **yes** | advisories land without this repo changing |
 | `gate-lane-l` | if Rust/conformance/migrations changed | always | — | minutes; schemathesis + both official SDKs |
-| `image` | — | yes | — | one image per merged commit |
+| `image` | — | if `PUBLISH_IMAGE` | — | off by default — see below |
 | `deploy-*` | — | if `DEPLOY_ENABLED` | — | promotion, gated by environments |
 
 The pattern: **cheap checks run on everything; expensive checks run when their inputs changed; on
@@ -244,6 +244,31 @@ different pins — was reused silently, and the SDK smoke failed with `ModuleNot
 the SDK itself were broken. It now creates the venv if absent and **syncs the pinned requirements on
 every run**; `pip install -r` is a no-op in about a second when already satisfied. A restored cache
 is now corrected rather than trusted.
+
+---
+
+### The image job is off by default, deliberately
+
+`image` and both `deploy-*` stages are behind repository variables (`PUBLISH_IMAGE`,
+`DEPLOY_ENABLED`) and do not run until you set them.
+
+Two reasons, pointing the same way:
+
+1. **Nothing consumes the image yet.** With deploys off, building and pushing a container on every
+   merge is work whose output has no reader.
+2. **The container build has never been executed.** It could not be: the environment these
+   workflows were authored in has Docker Hub blocked at the proxy — `docker pull alpine:3.20`
+   returns 403 from the CDN — so the Dockerfile is reviewed but **unrun**. Recording that as
+   *not run* rather than assuming it works is the same rule the phase gates follow.
+
+`workflow_dispatch` triggers `image` when `PUBLISH_IMAGE` is set, so it can be validated once on
+demand before being switched on, instead of discovering its first defect as a red `main`.
+
+One defect in it was already found and fixed without running it: all three stages pinned
+`rust:1.85.0-bookworm` while `rust-toolchain.toml` says `1.94.1` and the locked dependency set
+refuses to build below 1.94 (`sqlx 0.9.0` declares `rust-version = 1.94.0`). That would have failed
+every merge. `plan-ledger.sh`'s `docker-rust-version-matches` now asserts the two agree, because
+Docker cannot read the TOML at `FROM` time and a version that only has to be remembered drifts.
 
 ---
 

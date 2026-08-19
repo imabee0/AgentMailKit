@@ -364,6 +364,23 @@ check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pin
     [ -n "$py" ] && [ -n "$nd" ] &&
     grep -q "agentmail==$py" "$f" &&
     grep -q "agentmail@$nd" "$f"'
+# The Dockerfile's base image and rust-toolchain.toml are two records of ONE fact: which compiler
+# builds this project. Docker cannot read the TOML at FROM time, so the duplication is unavoidable
+# — which makes it exactly the shape this ledger exists to police. They were already out of step
+# (Dockerfile 1.85.0, toolchain 1.94.1) in a way that would have failed every merge to main, since
+# the locked dependency set refuses to build below 1.94.
+check docker-rust-version-matches yes \
+  "Dockerfile base image and rust-toolchain.toml name the same compiler" \
+  bash -c '
+    [ -f Dockerfile ] || exit 0
+    want=$(sed -n "s/^channel *= *\"\([^\"]*\)\"/\1/p" rust-toolchain.toml)
+    [ -n "$want" ] || { echo "    no channel in rust-toolchain.toml" >&2; exit 1; }
+    for got in $(sed -n "s|^FROM rust:\([^ -]*\).*|\1|p" Dockerfile); do
+      [ "$got" = "$want" ] || {
+        echo "    Dockerfile FROM rust:$got but rust-toolchain.toml says $want" >&2; exit 1; }
+    done
+    exit 0'
+
 # CRATE WRITE ORDER, mechanically. Added 2026-08-19 when the `amk/<phase>/<crate>` branch-naming
 # rule was retired: that rule was a PROXY for this requirement and enforced none of it, because no
 # hook ever read a branch name. The requirement itself is checkable on any tree, so it is checked.
