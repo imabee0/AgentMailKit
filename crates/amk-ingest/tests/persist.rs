@@ -58,6 +58,7 @@ async fn go(
             envelope: envelope(mail_from),
             dest: dest(org, pod, inbox),
             raw_blob_id: None,
+            blobs: None,
             max_message_bytes: CAP,
         },
     )
@@ -85,6 +86,7 @@ async fn go_opt(
             envelope: envelope(mail_from),
             dest: dest(org, pod, inbox),
             raw_blob_id: None,
+            blobs: None,
             max_message_bytes: CAP,
         },
     )
@@ -867,4 +869,131 @@ fn attachment_message(message_id: &str, to: &str, filename: &str) -> Vec<u8> {
          --bnd--\r\n"
     )
     .into_bytes()
+}
+
+// ---- attachment bodies -> the blob store --------------------------------------------------
+
+/// A two-attachment multipart, one base64 and one 7bit, so the test can prove the stored bytes
+/// are the DECODED form and that two bodies do not swap ids -- the failure mode
+/// `collect_attachments`' single-walk design exists to prevent.
+fn two_attachment_message(message_id: &str, to: &str) -> Vec<u8> {
+    format!(
+        "From: a@probe.test\r\nTo: {to}\r\nSubject: att\r\nMessage-ID: {message_id}\r\n\
+         MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=bnd\r\n\r\n\
+         --bnd\r\nContent-Type: text/plain\r\n\r\nhello\r\n\
+         --bnd\r\nContent-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=\"report.pdf\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQgZmFrZQ==\r\n\
+         --bnd\r\nContent-Type: application/octet-stream\r\n\
+         Content-Disposition: attachment; filename=\"raw.bin\"\r\n\r\nXYZ\r\n\
+         --bnd--\r\n"
+    )
+    .into_bytes()
+}
+
+fn blob_store() -> (amk_store::blobs::FsBlobStore, std::path::PathBuf) {
+    let root = std::env::temp_dir().join(format!("amk-ingest-att-{}", unique_suffix()));
+    std::fs::create_dir_all(&root).unwrap();
+    (amk_store::blobs::FsBlobStore::new(&root), root)
+}
+
+#[tokio::test]
+async fn attachment_bodies_are_stored_decoded_and_aligned_with_their_minted_ids() {
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
+    let auth = Authenticator::unresolved_is_none();
+    let (store, root) = blob_store();
+
+    let mid_s = format!("<att-blob-{}@probe.test>", unique_suffix());
+    let raw = two_attachment_message(&mid_s, inbox.as_str());
+    let accepted = accept(
+        &pool,
+        &auth,
+        AcceptRequest {
+            raw: &raw,
+            envelope: envelope("a@probe.test"),
+            dest: dest(&org, pod, &inbox),
+            raw_blob_id: None,
+            blobs: Some(&store),
+            max_message_bytes: CAP,
+        },
+    )
+    .await
+    .unwrap()
+    .expect("stored");
+
+    let f = filter(&org, pod, &inbox);
+    let msg = messages::get(&pool, &f, &inbox, &accepted.message_id, &[])
+        .await
+        .unwrap()
+        .expect("reachable");
+    let metas = msg.item.attachments.expect("metadata present");
+    assert_eq!(metas.len(), 2, "both attachments described");
+
+    // Expected DECODED bodies, in part order. If the pairing ever swapped, the size or the byte
+    // assertions below cross and fail -- the two bodies are different lengths on purpose.
+    let expect: &[(&str, &[u8])] = &[("report.pdf", b"%PDF-1.4 fake"), ("raw.bin", b"XYZ")];
+    use amk_store::blobs::BlobStore as _;
+    for (meta, (name, body)) in metas.iter().zip(expect) {
+        assert_eq!(meta.filename.as_deref(), Some(*name));
+        assert_eq!(meta.size, body.len() as u64, "{name}: size is the DECODED length");
+        let scope = messages::AttachmentScope {
+            inbox_id: Some(&inbox),
+            message_id: Some(&accepted.message_id),
+            thread_id: None,
+        };
+        let (blob, found) =
+            messages::attachment_blob(&pool, &f, scope, &meta.attachment_id.to_string(), &[])
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{name}: no blob mapped"));
+        assert_eq!(found.attachment_id, meta.attachment_id);
+        let bytes = store
+            .get(&amk_store::blobs::BlobId::parse(&blob).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(bytes, *body, "{name}: stored bytes are the decoded body, not the wire form");
+    }
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[tokio::test]
+async fn no_blob_store_keeps_metadata_and_serves_no_body() {
+    // The supported degradation: a deployment with no AMK_BLOB_ROOT still accepts the message and
+    // still describes its attachments; only the body fetch has nothing to serve. `Ok(None)` from
+    // the lookup is what the handler turns into the masked 404.
+    let Some(pool) = support::pool().await else {
+        return;
+    };
+    let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
+    let auth = Authenticator::unresolved_is_none();
+
+    let mid_s = format!("<att-noblob-{}@probe.test>", unique_suffix());
+    let raw = two_attachment_message(&mid_s, inbox.as_str());
+    let accepted = go(&pool, &auth, &raw, "a@probe.test", &org, pod, &inbox)
+        .await
+        .unwrap();
+
+    let f = filter(&org, pod, &inbox);
+    let msg = messages::get(&pool, &f, &inbox, &accepted.message_id, &[])
+        .await
+        .unwrap()
+        .expect("row");
+    let metas = msg
+        .item
+        .attachments
+        .expect("metadata survives without a store");
+    for meta in &metas {
+        let scope = messages::AttachmentScope {
+            inbox_id: Some(&inbox),
+            message_id: Some(&accepted.message_id),
+            thread_id: None,
+        };
+        let got = messages::attachment_blob(&pool, &f, scope, &meta.attachment_id.to_string(), &[])
+            .await
+            .unwrap();
+        assert!(got.is_none(), "no store configured, so no body may be promised");
+    }
 }

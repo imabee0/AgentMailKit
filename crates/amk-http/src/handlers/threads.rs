@@ -83,6 +83,15 @@ pub async fn list_inbox(
 
 // ---- shared ----
 
+/// Both segments of an inbox-mounted thread route, decoded and masked the same way the thread
+/// handlers themselves do it — shared with the attachment mounts so the two cannot diverge.
+pub(crate) fn inbox_thread_ids_from_path(
+    raw_inbox: &str,
+    raw_thread: &str,
+) -> Result<(InboxId, ThreadId), AppError> {
+    Ok((inbox_from_path(raw_inbox)?, thread_from_path(raw_thread)?))
+}
+
 fn inbox_from_path(raw: &str) -> Result<InboxId, AppError> {
     match decode_segment(raw) {
         Ok(s) => Ok(InboxId::new(s)),
@@ -163,7 +172,7 @@ pub async fn get_inbox(
 /// `thread_id` is a UUID. A segment that is not one names no row, so it masks as not-found rather
 /// than as a distinct "malformed" shape — the same rule `crate::ids::PathPodId` applies to
 /// `pod_id`, and the reason a scope miss and an absent row are indistinguishable here.
-fn thread_from_path(raw: &str) -> Result<ThreadId, AppError> {
+pub(crate) fn thread_from_path(raw: &str) -> Result<ThreadId, AppError> {
     let decoded =
         decode_segment(raw).map_err(|_| amk_core::scope::ScopeDenial::new(ResourceKind::Thread))?;
     match decoded.parse::<uuid::Uuid>() {

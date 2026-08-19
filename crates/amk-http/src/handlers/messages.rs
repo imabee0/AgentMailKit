@@ -23,8 +23,8 @@ use amk_core::threading::{
     InMemoryThreadIndex, ReferenceChainThreading, ThreadAssigner, ThreadAssignment, ThreadCandidate,
 };
 use amk_outbound::{
-    mailbox_addr, reply_all_recipients, reply_subject, sign_and_deliver, OutboundError,
-    SendContext, SignedMessage,
+    decoded_inline_attachment, mailbox_addr, reply_all_recipients, reply_subject, sign_and_deliver,
+    OutboundError, SendContext, SignedMessage,
 };
 use amk_store::blobs::{BlobId, BlobStore};
 use amk_store::inboxes;
@@ -34,7 +34,7 @@ use amk_store::threads::{self, NewThread, ThreadMember};
 use amk_store::StoreError;
 use amk_types::ids::{InboxId, MessageId, ThreadId};
 use amk_types::message::{
-    Addresses, ListMessagesResponse, RawMessageResponse, ReplyAllMessageRequest,
+    Addresses, Attachment, ListMessagesResponse, RawMessageResponse, ReplyAllMessageRequest,
     ReplyToMessageRequest, SendMessageRequest, SendMessageResponse, UpdateMessageRequest,
     UpdateMessageResponse,
 };
@@ -55,7 +55,10 @@ use crate::AppState;
 /// `message_id` **is** an RFC 5322 angle-bracket Message-ID
 /// (`[SPEC:reference/fixtures/03-id-formats.http]`), so its `<`, `>` and `@` arrive
 /// percent-encoded. `decode_segment` is the existing decoder; there is deliberately not a second.
-fn ids_from_path(raw_inbox: &str, raw_message: &str) -> Result<(InboxId, MessageId), AppError> {
+pub(crate) fn ids_from_path(
+    raw_inbox: &str,
+    raw_message: &str,
+) -> Result<(InboxId, MessageId), AppError> {
     let inbox = decode_segment(raw_inbox)
         .map_err(|_| amk_core::scope::ScopeDenial::new(ResourceKind::Message))?;
     let message = decode_segment(raw_message)
@@ -587,6 +590,50 @@ async fn persist_sent(
     let references = (!references.is_empty()).then_some(references);
     let smtp_id = Some(uuid::Uuid::new_v4().simple().to_string());
 
+    // A sent message's attachments were metadata-free until this: `attachments: None` went into
+    // the row even when the request carried them, so the API could list a message whose wire form
+    // had three parts and claim it had none. The metadata is minted from the same decoded bytes
+    // `build_signed` already validated and assembled -- `decoded_inline_attachment` is the exact
+    // function it used, so size here is the size on the wire, not the base64 length.
+    //
+    // Bodies go to the blob store under the same non-fatal rule as the raw form above: the mail
+    // is already delivered, so a storage failure costs the DOWNLOAD, never the record. Metadata
+    // is kept either way -- it describes what was sent, which stays true with or without a body
+    // to hand back.
+    let mut sent_attachments: Vec<Attachment> = Vec::new();
+    let mut attachment_blobs: BTreeMap<String, String> = BTreeMap::new();
+    for att in &req.attachments {
+        let Ok(bytes) = decoded_inline_attachment(att) else {
+            // Unreachable in practice -- build_signed already refused the request if any
+            // attachment was invalid -- but a defensive skip beats an expect() that turns a
+            // future validation change into a panic on the send path.
+            continue;
+        };
+        let attachment_id = amk_types::ids::AttachmentId::new_random();
+        if let Some(store) = &state.blobs {
+            match store.put(&bytes).await {
+                Ok(id) => {
+                    attachment_blobs.insert(attachment_id.to_string(), id.to_string());
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        attachment = %attachment_id,
+                        "could not store sent attachment body; keeping metadata without it"
+                    );
+                }
+            }
+        }
+        sent_attachments.push(Attachment {
+            attachment_id,
+            filename: att.filename.clone(),
+            size: bytes.len() as u64,
+            content_type: att.content_type.clone(),
+            content_disposition: att.content_disposition.clone(),
+            content_id: att.content_id.clone(),
+        });
+    }
+
     if is_new {
         threads::insert(
             &state.pool,
@@ -631,7 +678,7 @@ async fn persist_sent(
             bcc: (!bcc.is_empty()).then_some(bcc),
             subject: req.subject.clone(),
             preview: preview.clone(),
-            attachments: None,
+            attachments: (!sent_attachments.is_empty()).then_some(sent_attachments),
             in_reply_to,
             references,
             headers,
@@ -646,6 +693,7 @@ async fn persist_sent(
             extracted_text: None,
             extracted_html: None,
             raw_blob_id,
+            attachment_blobs: (!attachment_blobs.is_empty()).then_some(attachment_blobs),
         },
     )
     .await?;

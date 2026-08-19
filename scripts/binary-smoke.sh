@@ -260,13 +260,22 @@ INBOX="$INBOX" MID="$INBOUND_MID" python3 - "$SMTPD" <<'P' || bad "SMTP injectio
 import os, smtplib, sys
 host, port = sys.argv[1].split(":")
 inbox = os.environ["INBOX"]
+# Multipart with a base64 attachment, so Gate 7 can assert the attachment pipeline end to end:
+# the stored body must be the DECODED bytes, not the wire form. Gate 3 itself keys only on the
+# Message-ID and labels, so the extra part changes nothing it asserts.
 msg = (f"From: sender@outside.test\r\nTo: {inbox}\r\n"
        "Subject: inbound binary smoke\r\n"
        f"Message-ID: {os.environ['MID']}\r\n"
        # Required: amk-ingest answers 554 5.0.0 Missing Content-Type without it. A bare
        # smtplib.sendmail omits it, which is why the first run of this gate failed here.
-       "Content-Type: text/plain; charset=utf-8\r\n"
-       "MIME-Version: 1.0\r\n\r\ninbound body\r\n")
+       "Content-Type: multipart/mixed; boundary=smk\r\n"
+       "MIME-Version: 1.0\r\n\r\n"
+       "--smk\r\nContent-Type: text/plain; charset=utf-8\r\n\r\ninbound body\r\n"
+       "--smk\r\nContent-Type: application/pdf\r\n"
+       'Content-Disposition: attachment; filename="smoke.pdf"\r\n'
+       "Content-Transfer-Encoding: base64\r\n\r\n"
+       "JVBERi0xLjQgc21va2UgYXR0YWNobWVudA==\r\n"   # decodes to: %PDF-1.4 smoke attachment
+       "--smk--\r\n")
 s = smtplib.SMTP(host, int(port), timeout=15)
 s.sendmail("sender@outside.test", [inbox], msg)
 s.quit()
@@ -699,6 +708,44 @@ fi
       && ok "$probe answers 200 while application traffic is throttled" \
       || bad "$probe answered $c -- infrastructure probes share a bucket with application traffic"
   done
+
+# --- the attachment rides the same pipeline ----------------------------------------------------
+# Gate 3's injected message carried one attachment; this is `get-attachment` end to end across
+# the same process boundary as the raw form above: smtpd decoded and stored the body, and the api
+# role has to describe it, sign for it, and serve it to a caller with no credential.
+ATT=$(api GET "/v0/inboxes/$(enc "$INBOX")/messages/${MID_ENC}" \
+      | python3 -c 'import json,sys; a=(json.load(sys.stdin).get("attachments") or []); print(a[0]["attachment_id"] if a else "")')
+if [ -z "$ATT" ]; then
+  bad "the injected message lists no attachments -- ingest dropped the metadata"
+else
+  ok "message describes its attachment ($ATT)"
+  ARESP=$(api GET "/v0/inboxes/$(enc "$INBOX")/messages/${MID_ENC}/attachments/${ATT}") \
+    || bad "GET .../attachments/{id} failed for a described attachment"
+  if [ -n "${ARESP:-}" ]; then
+    AURL=$(printf '%s' "$ARESP" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r["filename"] == "smoke.pdf", r
+assert r["content_type"] == "application/pdf", r
+# The DECODED length -- 25 bytes -- not the 36 the base64 wire form occupies. Getting the wire
+# length here means the store kept the encoded body, and every downloaded file would be garbage.
+assert r["size"] == 25, ("size is not the DECODED length (25)", r["size"])
+print(r["download_url"])
+') || { bad "the attachment response is not the documented shape"; AURL=""; }
+    if [ -n "$AURL" ]; then
+      got=$(curl -fsS "$AURL" 2>/dev/null)
+      [ "$got" = "%PDF-1.4 smoke attachment" ] \
+        && ok "the download returns the DECODED attachment body, credential-free" \
+        || bad "downloaded body is wrong: '$got'"
+    fi
+    # And the miss: an invented id on the same message is the flat 404.
+    c=$(curl -sS -o /dev/null -w '%{http_code}' -K "$CURLRC" \
+          "http://${HTTP}/v0/inboxes/$(enc "$INBOX")/messages/${MID_ENC}/attachments/00000000000000000000000000000000" 2>/dev/null)
+    [ "$c" = 404 ] \
+      && ok "an invented attachment id is a 404, not an oracle" \
+      || bad "an invented attachment id answered $c"
+  fi
+fi
 
 # --- and the honest degradation ----------------------------------------------------------------
 # Gate 6's TLS smtpd ran with NO blob root, which is a supported deployment. Its message must give

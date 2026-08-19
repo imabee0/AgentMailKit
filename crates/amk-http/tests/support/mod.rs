@@ -409,6 +409,7 @@ pub async fn seed_thread_with_message(
             extracted_text: None,
             extracted_html: None,
             raw_blob_id: None,
+            attachment_blobs: None,
         },
     )
     .await

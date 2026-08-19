@@ -223,6 +223,25 @@ pub fn router(state: AppState) -> Router {
         // Unknown path -> 404 envelope.
         // ---- raw message fetch + the signed download it points at ----
         .route("/v0/inboxes/{inbox_id}/messages/{message_id}/raw", get(handlers::messages::raw))
+        // ---- get-attachment, on its four non-draft mounts. The three draft-scoped mounts in the
+        // spec wait for drafts themselves; recording the exclusion here is what keeps the
+        // reconciliation's gap explained rather than an oversight. ----
+        .route(
+            "/v0/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}",
+            get(handlers::attachments::get_message),
+        )
+        .route(
+            "/v0/inboxes/{inbox_id}/threads/{thread_id}/attachments/{attachment_id}",
+            get(handlers::attachments::get_inbox_thread),
+        )
+        .route(
+            "/v0/threads/{thread_id}/attachments/{attachment_id}",
+            get(handlers::attachments::get_org_thread),
+        )
+        .route(
+            "/v0/pods/{pod_id}/threads/{thread_id}/attachments/{attachment_id}",
+            get(handlers::attachments::get_pod_thread),
+        )
         // Unauthenticated by design: the token IS the authorisation. Mounted under /v0 because it
         // is part of the product surface a client follows, unlike /health and /metrics below.
         .route("/v0/blobs/{blob_id}", get(handlers::messages::download_blob))
