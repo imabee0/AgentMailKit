@@ -85,6 +85,14 @@ smtp-proto = "=0.2.3"
 # hickory, so naming it directly adds no crate to the build. `tracing-subscriber` is genuinely
 # new and is the only way anything is emitted; `json` is what makes the output structured rather
 # than pretty, and `env-filter` is what lets an operator raise a level without a rebuild.
+# Signed download URLs (amk-core::download). All three are ALREADY in Cargo.lock -- argon2 pulls
+# the digest stack and `hmac 0.13` pairs with `sha2 0.11` -- so naming them adds no crate to the
+# build. `subtle` is what makes signature comparison constant-time; `==` on a MAC is a byte-at-a-
+# time oracle that lets an attacker forge one signature byte at a time.
+hmac = "=0.13.0"
+sha2 = "=0.11.0"
+subtle = "=2.6.1"
+
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = [
     "std", "fmt", "json", "env-filter", "ansi",

@@ -39,6 +39,7 @@
 // deleted (no wire route, one call site, now rewritten against `organizations::get`).
 
 pub mod api_keys;
+pub mod blobs;
 pub mod error;
 pub mod inboxes;
 pub mod messages;

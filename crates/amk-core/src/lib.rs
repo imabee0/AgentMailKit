@@ -12,6 +12,7 @@
 //! Types come from `amk-types` (which derives from AgentMail's own artifacts). Nothing here may
 //! model a Stalwart or JMAP concept.
 
+pub mod download;
 pub mod labels;
 pub mod permissions;
 pub mod scope;
