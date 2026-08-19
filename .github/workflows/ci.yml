@@ -48,6 +48,13 @@ jobs:
     name: detect changes
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # dorny/paths-filter calls the pulls.listFiles API on a pull_request event, which the
+    # workflow-level `contents: read` does not cover — the first real run failed here with
+    # "Resource not accessible by integration". Granted per-job rather than at the top, so only
+    # this job can read pull requests and every other job keeps the narrower default.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
       migrations: ${{ steps.filter.outputs.migrations }}
