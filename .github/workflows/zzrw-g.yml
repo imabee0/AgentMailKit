@@ -1,0 +1,110 @@
+name: zzrw-g
+
+# Promotes ONE already-built image digest into ONE environment. Called twice by ci.yml — staging,
+# then production — with the same digest both times.
+#
+# A reusable workflow rather than a composite action here, deliberately and for the opposite
+# reason to .github/actions/setup-rust: this NEEDS to be a separate job, because `environment:`
+# is a job-level key and it is what binds GitHub's protection rules (required reviewers, wait
+# timers, environment secrets). Those rules are the approval gate. An `if:` expression is not —
+# a contributor can edit an `if:` in a pull request, and cannot edit an environment's rules.
+#
+# The digest is an input, never recomputed. Rebuilding per environment would mean production runs
+# an image that staging never tested, which defeats the entire promotion model.
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment to deploy into; carries the protection rules and secrets.
+        required: true
+        type: string
+      image:
+        description: Registry path, e.g. ghcr.io/owner/repo
+        required: true
+        type: string
+      digest:
+        description: The immutable sha256 digest produced by the build job.
+        required: true
+        type: string
+    secrets:
+      KUBE_CONFIG:
+        description: >
+          base64-encoded kubeconfig for the target cluster. Declared explicitly rather than
+          relying on `secrets: inherit`, which hands the called workflow EVERY secret the caller
+          holds — indefensible in a workflow that runs kubectl against production. Marked
+          not-required so a repository without it still parses; the job's first step hard-fails
+          when it is empty, so the loud failure happens at run time rather than becoming a
+          silent no-op deploy.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      # Pull the image being promoted; never push from a deploy job.
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail loudly and early rather than "succeeding" against a cluster that was never
+      # configured. A deploy job that no-ops and reports green is indistinguishable from one that
+      # worked, which is the exact class of defect this pipeline exists to remove.
+      - name: Require cluster credentials
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "${KUBE_CONFIG:-}" ]; then
+            echo "::error::environment '${{ inputs.environment }}' has no KUBE_CONFIG secret."
+            echo "Add it to the environment, or unset the repository variable DEPLOY_ENABLED"
+            echo "so this stage does not run at all. It will not pretend to deploy."
+            exit 1
+          fi
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          install -d -m 700 "$HOME/.kube"
+          printf '%s' "$KUBE_CONFIG" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      # Deploy BY DIGEST. A tag can be moved between this line and the pull; a digest cannot, so
+      # what staging validated is byte-identical to what production runs.
+      - name: Roll out ${{ inputs.digest }}
+        env:
+          REF: ${{ inputs.image }}@${{ inputs.digest }}
+          NS: amk-${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          echo "promoting $REF into $NS"
+          kubectl -n "$NS" set image deployment/amk-api  api="$REF"  --record
+          kubectl -n "$NS" set image deployment/amk-smtpd smtpd="$REF" --record
+
+      # The rollout is not the outcome; a serving pod is. `rollout status` fails on a crash-looping
+      # or unschedulable pod, which is what turns this into a real safeguard rather than a push.
+      - name: Wait for both rollouts to become healthy
+        env:
+          NS: amk-${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          kubectl -n "$NS" rollout status deployment/amk-api   --timeout=5m
+          kubectl -n "$NS" rollout status deployment/amk-smtpd --timeout=5m
+
+      # Undo automatically on a failed rollout. Leaving a half-promoted environment for a human to
+      # find is the worst state of the three (healthy / rolled back / unknown).
+      - name: Roll back on failure
+        if: failure()
+        env:
+          NS: amk-${{ inputs.environment }}
+        run: |
+          echo "::warning::rollout failed in $NS — rolling back"
+          kubectl -n "$NS" rollout undo deployment/amk-api   || true
+          kubectl -n "$NS" rollout undo deployment/amk-smtpd || true

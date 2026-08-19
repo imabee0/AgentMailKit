@@ -1,0 +1,28 @@
+name: zzrw-e
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment to deploy into; carries the protection rules and secrets.
+        required: true
+        type: string
+      image:
+        description: Registry path, e.g. ghcr.io/owner/repo
+        required: true
+        type: string
+      digest:
+        description: The immutable sha256 digest produced by the build job.
+        required: true
+        type: string
+    secrets:
+      KUBE_CONFIG:
+        description: >
+          base64-encoded kubeconfig for the target cluster.
+        required: false
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
