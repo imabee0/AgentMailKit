@@ -60,7 +60,7 @@ WORK=$(mktemp -d "${TMPDIR:-/tmp}/amk-smoke.XXXXXX") || exit 2
 MAINT="postgres://amk:amk-dev-local@127.0.0.1:${PORT}/postgres"
 
 cleanup() {
-  for pid in ${API_PID:-} ${SMTPD_PID:-} ${SINK_PID:-}; do kill "$pid" 2>/dev/null; done
+  for pid in ${API_PID:-} ${SMTPD_PID:-} ${SINK_PID:-} ${LORIS_PID:-}; do kill "$pid" 2>/dev/null; done
   wait 2>/dev/null
   "$PSQL" "$MAINT" -qc "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
   # The work directory holds a private key. Removing it is part of the test, not tidiness.
@@ -333,6 +333,65 @@ gen=$(curl -sS -o /dev/null -D - "http://${HTTP}/health" 2>/dev/null | tr -d '\r
   && ok "a request id is generated when none is supplied" \
   || bad "no request id generated for an unlabelled request"
 
+# Structured, and never key material. The keyring line names selector and domain only.
+if grep -q '"DKIM keyring loaded"' "$WORK/api.log" || grep -q "DKIM keyring loaded" "$WORK/api.log"; then
+  ok "startup logged the keyring load"
+else
+  bad "no structured keyring-load event in the log"
+fi
+
+# ---------------------------------------------------------------------------------------------
+step "GATE 5 -- smtpd survives a slow-loris"
+# The accept loop used to spawn a task per connection with no cap, and serve_session has no
+# deadline of its own: after the 250ms greet-pause, read_line awaits the next byte forever. A few
+# hundred sockets trickling one byte a minute cost an attacker nothing and pinned a task each.
+#
+# Its own smtpd on its own port, with tiny limits, so the numbers are checkable in seconds rather
+# than inferred from the production defaults (256 / 600s).
+LORIS_BIND=127.0.0.1:8226
+AMK_BIND="$LORIS_BIND" AMK_SMTP_MAX_CONNECTIONS=5 AMK_SMTP_SESSION_TIMEOUT=3 \
+  "$AMKD" --role smtpd >"$WORK/loris.log" 2>&1 &
+LORIS_PID=$!
+for _ in $(seq 1 60); do timeout 1 bash -c "(exec 3<>/dev/tcp/${LORIS_BIND/:/ })" 2>/dev/null && break; sleep 0.25; done
+
+if python3 - "$LORIS_BIND" <<'P'
+import socket, sys, time
+host, port = sys.argv[1].split(":"); port = int(port)
+banners, held = [], []
+for _ in range(12):
+    try:
+        s = socket.create_connection((host, port), timeout=5); s.settimeout(5)
+        b = s.recv(256).decode(errors="replace").strip()
+        banners.append(b.split()[0] if b else "(none)")
+        held.append(s)                      # never speak again: this is the attack
+    except Exception as e:
+        banners.append(f"ERR:{type(e).__name__}")
+served  = banners.count("220")
+deferred = banners.count("421")
+assert served == 5, f"cap not enforced: {served} served against a cap of 5 ({banners})"
+# 421 rather than a dropped socket matters: RFC 5321 s3.8, and every real MTA retries on it, so
+# mail over the cap is DEFERRED, not lost. A closed connection with no banner is indistinguishable
+# from a broken server and some senders will bounce.
+assert deferred == 7, f"expected 7 deferrals, got {deferred} ({banners})"
+print("  ok    cap held: 5 served, 7 answered 421 (retryable, not dropped)")
+time.sleep(5)                                # outlast the 3s deadline
+s = socket.create_connection((host, port), timeout=5); s.settimeout(5)
+assert s.recv(256).decode(errors="replace").startswith("220"), \
+    "permits were never released -- the session deadline is not firing"
+print("  ok    the deadline reclaimed the permits held by idle sessions")
+P
+then :; else bad "smtpd did not survive the slow-loris"; fi
+grep -q "smtpd at capacity" "$WORK/loris.log" \
+  && ok "capacity refusals are logged" || bad "capacity refusals were not logged"
+grep -q "exceeded its deadline" "$WORK/loris.log" \
+  && ok "deadline closures are logged" || bad "deadline closures were not logged"
+kill "$LORIS_PID" 2>/dev/null; LORIS_PID=""
+
+# ---------------------------------------------------------------------------------------------
+step "GATE 6 -- /health and /ready diverge when the database dies"
+# LAST, and destructive: it drops this run's database, so nothing after it can use one. That
+# ordering is the bug this gate already caught once -- it used to sit inside Gate 4 and left the
+# smtpd in Gate 5 with no database to connect to.
 # THE NEGATIVE CASE, and the one that matters. /health and /ready must diverge when the database
 # dies: liveness stays up (restarting the pod does not fix Postgres -- it turns a degraded service
 # into a crash-loop) while readiness fails, taking the instance out of rotation. Asserting only the
@@ -357,12 +416,6 @@ grep -q "amk-dev-local" "$WORK/api.log" \
   && bad "the log contains the database password" \
   || ok "the readiness failure did not leak the DSN"
 
-# Structured, and never key material. The keyring line names selector and domain only.
-if grep -q '"DKIM keyring loaded"' "$WORK/api.log" || grep -q "DKIM keyring loaded" "$WORK/api.log"; then
-  ok "startup logged the keyring load"
-else
-  bad "no structured keyring-load event in the log"
-fi
 
 printf '\n'
 if [ "$fail" -eq 0 ]; then echo "binary-smoke: PASS"; else echo "binary-smoke: FAIL"; fi

@@ -18,6 +18,8 @@ pub const AMK_PRIMARY_DOMAIN: &str = "AMK_PRIMARY_DOMAIN";
 pub const AMK_PRODUCT_NAME: &str = "AMK_PRODUCT_NAME";
 pub const AMK_DKIM_KEYS: &str = "AMK_DKIM_KEYS";
 pub const AMK_SMTP_SMARTHOST: &str = "AMK_SMTP_SMARTHOST";
+pub const AMK_SMTP_MAX_CONNECTIONS: &str = "AMK_SMTP_MAX_CONNECTIONS";
+pub const AMK_SMTP_SESSION_TIMEOUT: &str = "AMK_SMTP_SESSION_TIMEOUT";
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
 
@@ -203,6 +205,57 @@ pub fn dkim_keyring() -> Result<Keyring, BadConfigValue> {
     }
 }
 
+/// Concurrent inbound SMTP sessions. Default 256.
+///
+/// A cap, not a queue: at capacity the listener answers `421` and closes, so a sender defers and
+/// retries rather than waiting on a socket that will never get a banner. 256 is comfortably above
+/// what a single-tenant mail server sees and far below what exhausts file descriptors.
+///
+/// A malformed or zero value falls back to the default rather than failing the start: unlike
+/// `AMK_DKIM_KEYS`, where a wrong value means silently unsigned mail, a wrong value here means a
+/// wrong BOUND, and refusing to accept mail at all is the worse failure. The fallback is logged.
+pub fn smtp_max_connections() -> usize {
+    const DEFAULT: usize = 256;
+    match env::var(AMK_SMTP_MAX_CONNECTIONS) {
+        Err(_) => DEFAULT,
+        Ok(raw) => match raw.trim().parse::<usize>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(
+                    value = %raw, default = DEFAULT,
+                    "{AMK_SMTP_MAX_CONNECTIONS} is not a positive integer; using the default"
+                );
+                DEFAULT
+            }
+        },
+    }
+}
+
+/// Wall-clock ceiling on one inbound SMTP session, in seconds. Default 600.
+///
+/// RFC 5321 §4.5.3.2 gives per-command timeouts summing to well over an hour for a maximally slow
+/// but legitimate transfer; 600s is a deliberate tightening, because this server accepts mail for
+/// one organisation rather than acting as a public relay for arbitrary peers. It bounds how long a
+/// single connection can hold one of the permits above -- without it the semaphore only changes
+/// which resource gets exhausted.
+pub fn smtp_session_timeout() -> std::time::Duration {
+    const DEFAULT_SECS: u64 = 600;
+    let secs = match env::var(AMK_SMTP_SESSION_TIMEOUT) {
+        Err(_) => DEFAULT_SECS,
+        Ok(raw) => match raw.trim().parse::<u64>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(
+                    value = %raw, default = DEFAULT_SECS,
+                    "{AMK_SMTP_SESSION_TIMEOUT} is not a positive integer; using the default"
+                );
+                DEFAULT_SECS
+            }
+        },
+    };
+    std::time::Duration::from_secs(secs)
+}
+
 /// Whether each configuration variable is present, for `amk doctor` — never the value itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarPresence {
@@ -219,6 +272,8 @@ pub fn var_presence() -> Vec<VarPresence> {
         AMK_PRODUCT_NAME,
         AMK_DKIM_KEYS,
         AMK_SMTP_SMARTHOST,
+        AMK_SMTP_MAX_CONNECTIONS,
+        AMK_SMTP_SESSION_TIMEOUT,
     ]
     .into_iter()
     .map(|name| VarPresence { name, set: env::var(name).is_ok() })
