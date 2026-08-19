@@ -309,7 +309,13 @@ pub async fn trace_requests(
     // already charged above, so a failure costs 21 in total. Deliberate: the point is that the
     // NEXT attempt is throttled.
     let extra = RateLimiter::cost_for_status(status.as_u16());
-    if extra > 1.0 && !matches!(subject, Subject::Probe(_)) {
+    // No `Subject::Probe` exclusion here, deliberately. One was written and then removed: it
+    // survived its own mutation run because it is unreachable -- no probe path can answer 401 or
+    // 403, and the only non-200 any of them emits is `/ready`'s 503, which `cost_for_status`
+    // charges the ordinary cost (pinned in `ratelimit::tests`). An unpinnable guard against a
+    // status that cannot occur is not defence in depth; it is a claim no test can falsify. If a
+    // probe endpoint ever gains a credential, this is the line that has to change WITH a test.
+    if extra > 1.0 {
         // `penalise`, not `check`: the argon2id verify has already happened, so this charge lands
         // whether or not the bucket can afford it. Using `check` here meant the surcharge stopped
         // applying the moment it was most needed.

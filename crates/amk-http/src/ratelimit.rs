@@ -358,6 +358,20 @@ mod tests {
     }
 
     #[test]
+    fn a_dependency_outage_is_not_charged_as_a_credential_guess() {
+        // `/ready` answers 503 when Postgres is unreachable, and a kubelet retries it every few
+        // seconds. Surcharging that would throttle the probe reporting the outage -- the signal
+        // would disappear at exactly the moment it matters. 500 is here for the same reason: an
+        // internal error is our bug, not the caller's attack.
+        assert_eq!(RateLimiter::cost_for_status(503), COST_OK);
+        assert_eq!(RateLimiter::cost_for_status(500), COST_OK);
+        assert_eq!(RateLimiter::cost_for_status(429), COST_OK);
+        // And the two that ARE guesses, so this test cannot pass by the surcharge being gone.
+        assert_eq!(RateLimiter::cost_for_status(401), COST_AUTH_FAILURE);
+        assert_eq!(RateLimiter::cost_for_status(403), COST_AUTH_FAILURE);
+    }
+
+    #[test]
     fn a_probe_and_an_ordinary_caller_at_the_same_address_are_different_buckets() {
         // The whole point of the `Probe` variant. If these two hashed alike, draining one would
         // drain the other -- which is precisely the defect binary-smoke.sh caught, where forged
