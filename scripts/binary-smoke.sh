@@ -278,6 +278,92 @@ case "$LISTED" in
     ok "excluded from the list endpoint while reachable by id (count stayed $BEFORE -> $AFTER)" ;;
 esac
 
+# ---------------------------------------------------------------------------------------------
+step "GATE 4 -- the operational surface a cluster needs"
+# k3s cannot health-check a server with no probe endpoint, and an incident cannot be answered by
+# grepping unstructured stdout. These are unauthenticated by design (a probe that needs a
+# credential is a probe the kubelet cannot use), so they are checked WITHOUT the curl config.
+
+code=$(curl -sS -o "$WORK/health.out" -w '%{http_code}' "http://${HTTP}/health" 2>/dev/null)
+[ "$code" = 200 ] && grep -q "^ok$" "$WORK/health.out" \
+  && ok "/health 200 without a credential" \
+  || bad "/health answered $code (body: $(head -c 60 "$WORK/health.out" 2>/dev/null))"
+
+code=$(curl -sS -o "$WORK/ready.out" -w '%{http_code}' "http://${HTTP}/ready" 2>/dev/null)
+[ "$code" = 200 ] && grep -q "^ready$" "$WORK/ready.out" \
+  && ok "/ready 200 with the database up" \
+  || bad "/ready answered $code with a live database"
+
+code=$(curl -sS -o "$WORK/metrics.out" -w '%{http_code}' "http://${HTTP}/metrics" 2>/dev/null)
+if [ "$code" != 200 ]; then
+  bad "/metrics answered $code"
+else
+  ok "/metrics 200"
+  # Every sample must carry HELP and TYPE, and every value must parse. A malformed exposition is
+  # rejected by the scraper SILENTLY -- the dashboard simply stops updating, which is the failure
+  # mode this assertion exists for.
+  python3 - "$WORK/metrics.out" <<'P'
+import sys
+text = open(sys.argv[1]).read()
+samples = [l for l in text.splitlines() if l and not l.startswith("#")]
+assert samples, "no samples exported"
+for line in samples:
+    parts = line.split()
+    assert len(parts) == 2, f"malformed sample: {line!r}"
+    int(parts[1])
+    assert f"# HELP {parts[0]} " in text, f"{parts[0]} has no HELP"
+    assert f"# TYPE {parts[0]} counter" in text, f"{parts[0]} has no TYPE"
+print(f"  ok    {len(samples)} counters, all with HELP and TYPE")
+P
+  # The request counter must have MOVED: Gate 2 drove real traffic through this server. A counter
+  # stuck at zero means the middleware is mounted somewhere requests do not reach it.
+  n=$(sed -n 's/^amk_http_requests_total //p' "$WORK/metrics.out")
+  [ "${n:-0}" -gt 0 ] \
+    && ok "amk_http_requests_total counted real traffic ($n)" \
+    || bad "amk_http_requests_total is $n after Gate 2 drove requests -- the layer is not seeing them"
+fi
+
+# The request id is what correlates a caller's logs with ours; echoing it is the contract.
+hdr=$(curl -sS -o /dev/null -D - -H 'x-request-id: smoke-correlation-1' "http://${HTTP}/health" 2>/dev/null | tr -d '\r' | sed -n 's/^[Xx]-[Rr]equest-[Ii]d: //p')
+[ "$hdr" = "smoke-correlation-1" ] \
+  && ok "x-request-id echoed verbatim" \
+  || bad "x-request-id not echoed (got ${hdr:-none})"
+gen=$(curl -sS -o /dev/null -D - "http://${HTTP}/health" 2>/dev/null | tr -d '\r' | sed -n 's/^[Xx]-[Rr]equest-[Ii]d: //p')
+[ -n "$gen" ] && [ "$gen" != "smoke-correlation-1" ] \
+  && ok "a request id is generated when none is supplied" \
+  || bad "no request id generated for an unlabelled request"
+
+# THE NEGATIVE CASE, and the one that matters. /health and /ready must diverge when the database
+# dies: liveness stays up (restarting the pod does not fix Postgres -- it turns a degraded service
+# into a crash-loop) while readiness fails, taking the instance out of rotation. Asserting only the
+# happy path would pass on a /ready that returns 200 unconditionally, which is the same as having
+# no readiness probe at all.
+#
+# Runs LAST, and destroys this run's throwaway database to do it -- nothing below needs it.
+"$PSQL" "$MAINT" -qc "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
+sleep 1
+hc=$(curl -sS -o /dev/null -w '%{http_code}' "http://${HTTP}/health" 2>/dev/null)
+rc=$(curl -sS -o /dev/null -w '%{http_code}' "http://${HTTP}/ready" 2>/dev/null)
+[ "$hc" = 200 ] \
+  && ok "/health stays 200 with the database gone (liveness must not crash-loop the pod)" \
+  || bad "/health answered $hc with the database gone -- a failing liveness probe restarts the pod"
+[ "$rc" = 503 ] \
+  && ok "/ready falls to 503 with the database gone" \
+  || bad "/ready answered $rc with the database gone -- it is not checking anything"
+grep -q "readiness check failed" "$WORK/api.log" \
+  && ok "the readiness failure is logged with its reason" \
+  || bad "the readiness failure was not logged"
+grep -q "amk-dev-local" "$WORK/api.log" \
+  && bad "the log contains the database password" \
+  || ok "the readiness failure did not leak the DSN"
+
+# Structured, and never key material. The keyring line names selector and domain only.
+if grep -q '"DKIM keyring loaded"' "$WORK/api.log" || grep -q "DKIM keyring loaded" "$WORK/api.log"; then
+  ok "startup logged the keyring load"
+else
+  bad "no structured keyring-load event in the log"
+fi
+
 printf '\n'
 if [ "$fail" -eq 0 ]; then echo "binary-smoke: PASS"; else echo "binary-smoke: FAIL"; fi
 exit "$fail"

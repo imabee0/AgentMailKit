@@ -75,5 +75,20 @@ mail-auth = "=0.12.0"
 mail-parser = "=0.11.6"
 smtp-proto = "=0.2.3"
 
+# Structured logging. `docs/PLAN.md`:190 requires "logs structured to stdout, key-ids never key
+# material" and :206 names a metrics surface; neither existed -- an audit found ZERO `tracing::`
+# or `log::` call sites workspace-wide and 26 `println!`s. Added now rather than after
+# amk-events/jobs/dns/mcp exist, because threading it through six more crates later costs several
+# times what threading it through four does.
+#
+# `tracing` is already in Cargo.lock at this exact version, pulled transitively by sqlx and
+# hickory, so naming it directly adds no crate to the build. `tracing-subscriber` is genuinely
+# new and is the only way anything is emitted; `json` is what makes the output structured rather
+# than pretty, and `env-filter` is what lets an operator raise a level without a rebuild.
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = [
+    "std", "fmt", "json", "env-filter", "ansi",
+] }
+
 axum = { version = "=0.8.9", features = ["ws"] }
 tower = "=0.5.3"

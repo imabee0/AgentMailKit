@@ -33,8 +33,11 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use sqlx::PgPool;
 
+pub mod observability;
+
 pub use config::AppConfig;
 pub use error::AppError;
+pub use observability::Metrics;
 
 /// Everything a handler needs beyond the request itself: the database pool, deployment
 /// configuration, the DKIM keyring, and the outbound transport.
@@ -61,6 +64,10 @@ pub struct AppState {
     pub config: AppConfig,
     pub keyring: Arc<Keyring>,
     pub transport: OutboundTransport,
+    /// Shared, lock-free counters behind `GET /metrics`. `Arc` because `AppState` is cloned per
+    /// request and every clone must increment the SAME counters -- a per-clone copy would report
+    /// one request per request forever.
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -78,7 +85,13 @@ impl AppState {
         keyring: Keyring,
         transport: OutboundTransport,
     ) -> Self {
-        Self { pool, config, keyring: Arc::new(keyring), transport }
+        Self {
+            pool,
+            config,
+            keyring: Arc::new(keyring),
+            transport,
+            metrics: Arc::new(Metrics::new()),
+        }
     }
 }
 
@@ -201,7 +214,23 @@ pub fn router(state: AppState) -> Router {
         // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
         // default 405 — the dispatch contract is explicit: "There is no 405."
         .method_not_allowed_fallback(not_found_fallback)
+        // ---- operational surface (3) — NOT part of the AgentMail API ----
+        //
+        // Unversioned and outside /v0 deliberately. These are not reference-API operations, and
+        // mounting them under /v0 would make `derive-implemented-paths.sh` count them against the
+        // 130 the spec describes -- inflating the coverage number with endpoints AgentMail does
+        // not have. The conformance diff would then flag three paths the reference never serves.
+        .route("/health", get(observability::health))
+        .route("/ready", get(observability::ready))
+        .route("/metrics", get(observability::metrics))
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        // Outermost, so it sees every request including ones rejected by routing or the body
+        // limit -- a 404 or a 413 is exactly the kind of thing worth counting, and a layer added
+        // after `.with_state` would never observe them.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            observability::trace_requests,
+        ))
         .with_state(state)
 }
 

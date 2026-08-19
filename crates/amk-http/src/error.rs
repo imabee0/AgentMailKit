@@ -51,7 +51,9 @@ impl AppError {
     }
 
     pub fn internal(context: &str) -> Self {
-        eprintln!("amk-http: internal error: {context}");
+        // Structured, and the ONLY place the real cause is recorded -- the client gets the fixed
+        // string below, which `database_errors_never_leak_into_the_client_facing_message` pins.
+        tracing::error!(error = %context, "internal error");
         Self::new(ErrorCode::InternalError, "Internal error.")
     }
 

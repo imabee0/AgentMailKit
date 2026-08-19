@@ -24,6 +24,17 @@ async fn main() {
         AmkdCommand::Serve(role) => role,
     };
 
+    // FIRST. Everything below logs, and an event emitted before a subscriber exists is dropped
+    // silently -- including the config failures that are the most useful thing a failed start can
+    // tell an operator.
+    amk_cli::logging::init();
+    // DELIBERATE DEVIATION from "replace every println!". The `eprintln!`s below are fatal-exit
+    // messages: the last thing an operator sees before the process dies. They stay on stderr,
+    // unconditionally, because a `tracing::error!` is FILTERABLE -- `AMK_LOG=off` or a
+    // misconfigured filter would swallow the one message explaining why the daemon refused to
+    // start. Two of them also run before this line, during argument parsing, where no subscriber
+    // exists yet. Lifecycle and request events are structured; the refusal-to-start path is not.
+
     if let Some(message) = server::not_yet_implemented(role) {
         eprintln!("{message}");
         std::process::exit(exit::FAILURE);

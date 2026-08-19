@@ -48,7 +48,7 @@ pub async fn serve_api(
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("could not bind AMK_BIND {bind:?}: {e}"))?;
-    println!("amkd: serving --role api on {bind}");
+    tracing::info!(role = "api", %bind, "serving");
     axum::serve(listener, app)
         .await
         .map_err(|e| format!("server error: {e}"))
@@ -82,7 +82,7 @@ pub async fn serve_smtpd(database_url: &str, bind: &str, config: AppConfig) -> R
     let listener = tokio::net::TcpListener::bind(bind)
         .await
         .map_err(|e| format!("could not bind AMK_BIND {bind:?}: {e}"))?;
-    println!("amkd: serving --role smtpd on {bind}");
+    tracing::info!(role = "smtpd", %bind, %primary_domain, "serving");
     loop {
         let (stream, peer) = listener
             .accept()

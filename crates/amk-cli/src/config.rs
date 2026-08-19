@@ -189,7 +189,7 @@ fn keyring_from_dir(dir: &Path) -> Result<Keyring, String> {
     // Selector and domain only. Never key material: this line reaches stdout and any log shipper
     // behind it (`docs/PLAN.md` "Secrets provenance", `scripts/hooks/guard.sh` hook hygiene).
     loaded.sort();
-    println!("amkd: DKIM keyring loaded: {}", loaded.join(", "));
+    tracing::info!(keys = %loaded.join(", "), count = loaded.len(), "DKIM keyring loaded");
     Ok(keyring)
 }
 

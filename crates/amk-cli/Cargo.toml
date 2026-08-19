@@ -40,10 +40,13 @@ tokio.workspace = true
 # workspace-pinned dependency of `amk-http`; reused here, not added.
 axum.workspace = true
 thiserror.workspace = true
+# The composition root installs the subscriber, so both halves live here and nowhere else.
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 # Deliberately absent, per the dispatch contract's "no new dependency" decision:
 #   clap             — the parser (`src/args.rs`) is hand-written: four subcommands and one flag.
-#   tracing / anyhow — not workspace-pinned; this crate's own error types use `thiserror`, already
+#   anyhow — not workspace-pinned; this crate's own error types use `thiserror`, already
 #                       pinned, matching every other crate's own-error-type idiom.
 #   mail-parser / mail-auth / mail-send / mail-builder / smtp-proto — stalwart-labs crates belong
 #                       to amk-ingest/amk-outbound, converted at that boundary. Nothing here has any
