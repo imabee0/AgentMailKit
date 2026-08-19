@@ -384,6 +384,32 @@ check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pin
     [ -n "$py" ] && [ -n "$nd" ] &&
     grep -q "agentmail==$py" "$f" &&
     grep -q "agentmail@$nd" "$f"'
+# An ARG that is meant to be an image reference must actually BE one. A Dockerfile treats `#` as a
+# comment only at the start of a line, so `ARG X=img@sha256:... # tag` puts " # tag" INSIDE the
+# value and buildx rejects the stage with "invalid reference format". That exact mistake shipped
+# from this repository and was caught by CI on the first real build, not by any local check —
+# because no local check looked. This is that check.
+check docker-arg-image-refs-valid yes \
+  "every ARG *_IMAGE holds a bare digest reference: no spaces, no inline comment" \
+  bash -c '
+    [ -f Dockerfile ] || exit 0
+    n=0
+    while IFS= read -r v; do
+      n=$((n+1))
+      case "$v" in
+        *"#"*)  echo "    inline comment inside an image ARG: $v" >&2; exit 1 ;;
+        *" "*)  echo "    whitespace inside an image ARG: $v" >&2; exit 1 ;;
+      esac
+      case "$v" in
+        *@sha256:*) ;;
+        *) echo "    not digest-pinned: $v" >&2; exit 1 ;;
+      esac
+    done <<EOF
+$(sed -n "s/^ARG [A-Z_]*IMAGE=//p" Dockerfile)
+EOF
+    [ "$n" -ge 2 ] || { echo "    expected at least 2 image ARGs, saw $n" >&2; exit 1; }
+    exit 0'
+
 # Base images pinned by DIGEST, not by tag. Same supply-chain rule as ci-actions-sha-pinned: a tag
 # can be repointed by whoever controls it, a digest cannot. This was open in the Dockerfile while
 # being closed in the workflows, which is the inconsistency this check removes.
@@ -422,12 +448,11 @@ check docker-rust-version-matches yes \
     want=$(sed -n "s/^channel *= *\"\([^\"]*\)\"/\1/p" rust-toolchain.toml)
     [ -n "$want" ] || { echo "    no channel in rust-toolchain.toml" >&2; exit 1; }
     # The base image is pinned by DIGEST, which carries no version, so the tag it was resolved from
-    # rides in a trailing comment -- the same shape as the SHA-pinned actions. Requiring that
-    # comment is what keeps this check from becoming vacuous: an earlier version grepped
-    # "^FROM rust:", and once the FROMs moved behind an ARG it matched nothing and passed while
-    # inspecting nothing.
-    got=$(sed -n "s/^ARG RUST_IMAGE=.*# *//p" Dockerfile)
-    [ -n "$got" ] || { echo "    ARG RUST_IMAGE has no trailing # <tag> comment" >&2; exit 1; }
+    # sits on its own `# base-tag rust:` line. It cannot be a trailing comment on the ARG: a
+    # Dockerfile only honours `#` at the START of a line, so a trailing one lands inside the value
+    # and buildx fails with "invalid reference format". That shipped once.
+    got=$(sed -n "s/^# base-tag rust: *//p" Dockerfile)
+    [ -n "$got" ] || { echo "    no '\''# base-tag rust: <tag>'\'' line in Dockerfile" >&2; exit 1; }
     case "$got" in
       "$want"|"$want"-*) ;;
       *) echo "    Dockerfile rust base is $got but rust-toolchain.toml says $want" >&2; exit 1 ;;

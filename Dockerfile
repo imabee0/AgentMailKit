@@ -15,12 +15,19 @@
 # so a busy day can turn an unrelated pull into a red build. GHCR has no such limit for Actions and
 # is already authenticated by GITHUB_TOKEN, so it needs no extra credential.
 #
+# The tag each digest came from rides on its OWN comment line above the ARG. It cannot ride at the
+# end of the ARG line: a Dockerfile only treats `#` as a comment at the START of a line, so a
+# trailing one becomes part of the value and buildx rejects it with "invalid reference format".
+# That mistake shipped and was caught by image-validate on the first real build of this file.
+#
 # To re-resolve after a version bump (no Docker daemon and no registry login needed):
 #   t=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/rust:pull" | jq -r .token)
 #   curl -sI -H "Authorization: Bearer $t" -H 'Accept: application/vnd.oci.image.index.v1+json' \
 #     https://registry-1.docker.io/v2/library/rust/manifests/<tag> | grep -i docker-content-digest
-ARG RUST_IMAGE=docker.io/library/rust@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55 # 1.94.1-bookworm
-ARG RUNTIME_IMAGE=docker.io/library/debian@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241 # bookworm-slim
+# base-tag rust: 1.94.1-bookworm
+ARG RUST_IMAGE=docker.io/library/rust@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55
+# base-tag debian: bookworm-slim
+ARG RUNTIME_IMAGE=docker.io/library/debian@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
 # MUST match rust-toolchain.toml's channel. Pinned at 1.85.0 while the toolchain file said 1.94.1,
 # which would have failed every merge to main: the locked dependency set needs >= 1.94
