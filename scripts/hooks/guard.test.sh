@@ -214,5 +214,52 @@ check 2 "grok two-level (cwd=primary) write into worktree OUT of scope" \
 check 0 "grok two-level (cwd=primary) write into worktree IN scope" \
   "$(jg write "$GWT2/crates/amk-core/src/scope.rs" "$ORCH" "pub struct S;")"
 
+# ---------------------------------------------------------------- Bash writes to frozen paths
+# Rules 0/1/2/4 only ever saw Write|Edit|NotebookEdit, so `sed -i`, `cp`, `tee` and `>` reached the
+# same files untouched. These cover the narrowing, and -- more importantly -- the NEGATIVE side:
+# an over-broad version of this rule would block ordinary shell work in a worktree, which is worse
+# than the hole, because a guard that blocks legitimate work gets disabled.
+
+echo
+echo "-- Bash writes: implementer, no lock --"
+check 2 "sed -i into amk-types is blocked" \
+  "$(j Bash "" "$WT" "" "sed -i 's/a/b/' crates/amk-types/src/ids.rs")"
+check 2 "append-redirect into amk-types is blocked" \
+  "$(j Bash "" "$WT" "" "echo 'pub struct X;' >> crates/amk-types/src/ids.rs")"
+check 2 "cp over an amk-types file is blocked" \
+  "$(j Bash "" "$WT" "" "cp /tmp/x.rs crates/amk-types/src/ids.rs")"
+check 2 "tee into amk-types is blocked" \
+  "$(j Bash "" "$WT" "" "cat /tmp/x | tee crates/amk-types/src/ids.rs")"
+check 2 "rm of an amk-types file is blocked" \
+  "$(j Bash "" "$WT" "" "rm crates/amk-types/src/ids.rs")"
+check 2 "an implementer rewriting the guard is blocked" \
+  "$(j Bash "" "$WT" "" "sed -i 's/deny/allow/' scripts/hooks/guard.sh")"
+check 2 "an implementer rewriting the plan is blocked" \
+  "$(j Bash "" "$WT" "" "echo x >> docs/PLAN.md")"
+
+echo "-- Bash writes: the NEGATIVE side (must PASS) --"
+check 0 "reading amk-types is not a write" \
+  "$(j Bash "" "$WT" "" "grep -rn TypeName crates/amk-types/src")"
+check 0 "testing amk-types is not a write" \
+  "$(j Bash "" "$WT" "" "cargo test -p amk-types")"
+check 0 "writing inside the implementer's own crate is fine" \
+  "$(j Bash "" "$WT" "" "sed -i 's/a/b/' crates/amk-ingest/src/smtp.rs")"
+check 0 "a write verb naming nothing frozen is fine" \
+  "$(j Bash "" "$WT" "" "cp /tmp/a.rs /tmp/b.rs")"
+check 0 "the orchestrator may edit amk-types from the primary checkout" \
+  "$(j Bash "" "$ORCH" "" "sed -i 's/a/b/' crates/amk-types/src/ids.rs")"
+
+echo "-- Bash writes: the fan-out lock freezes EVERYONE, orchestrator included --"
+: > "$LOCK"
+check 2 "orchestrator sed -i into amk-types is blocked while a dispatch is live" \
+  "$(j Bash "" "$ORCH" "" "sed -i 's/a/b/' crates/amk-types/src/ids.rs")"
+check 2 "orchestrator redirect into the plan is blocked while a dispatch is live" \
+  "$(j Bash "" "$ORCH" "" "echo note >> docs/PLAN.md")"
+check 0 "reading amk-types is still fine while a dispatch is live" \
+  "$(j Bash "" "$ORCH" "" "grep -rn TypeName crates/amk-types/src")"
+rm -f "$LOCK"
+check 0 "orchestrator may edit amk-types again once the lock is gone" \
+  "$(j Bash "" "$ORCH" "" "sed -i 's/a/b/' crates/amk-types/src/ids.rs")"
+
 printf '\nguard tests: %d passed, %d failed\n' "$pass" "$fail"
 exit $(( fail > 0 ))
