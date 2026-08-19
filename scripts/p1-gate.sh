@@ -172,7 +172,7 @@ echo "== P1 gate, second half: the unmodified official Python SDK against the sa
 # required field the model insists on), so neither half subsumes the other.
 if [ ! -x .venv-gate/bin/python ]; then
   python3 -m venv .venv-gate
-  .venv-gate/bin/pip install -q -r conformance/requirements-gate.txt
+  .venv-gate/bin/pip install -q --require-hashes -r conformance/requirements-gate.txt
 fi
 AMK_BASE="http://${BIND}" AMK_KEY="$CAND_KEY" .venv-gate/bin/python conformance/sdk_smoke.py
 SMOKE_EXIT=$?
@@ -248,7 +248,7 @@ echo "== P1 gate, fourth part: schemathesis over the implemented paths =="
 # invariants no OpenAPI document can express (conformance/schemathesis_checks.py).
 if [ ! -x .venv-schemathesis/bin/st ]; then
   python3 -m venv .venv-schemathesis
-  .venv-schemathesis/bin/pip install -q -r conformance/requirements-schemathesis.txt
+  .venv-schemathesis/bin/pip install -q --require-hashes -r conformance/requirements-schemathesis.txt
 fi
 # `SCOPE_EXIT=$?` after a `mapfile < <(...)` reads MAPFILE's status, not the script's — which is
 # always 0, so a router/spec disagreement would have been announced and then ignored. Capture the

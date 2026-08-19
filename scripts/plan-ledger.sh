@@ -207,6 +207,29 @@ check ci-workflows-present yes \
     [ -f .github/actions/setup-rust/action.yml ] || exit 1
     grep -q "^  ci-ok:" .github/workflows/ci.yml'
 
+# Python dependencies hash-pinned AND the hashes actually enforced.
+#
+# Before 2026-08-19 only the TOP-LEVEL package was version-pinned: `schemathesis==4.24.3` with its
+# whole transitive tree -- hypothesis, httpx, jsonschema, werkzeug -- free to resolve differently
+# on every install. So a gate could pass on Monday and fail on Tuesday with no change to this
+# repository, and the failure would look like ours.
+#
+# Two halves, and the second is the one that rots: `--generate-hashes` puts hashes in the file, and
+# `--require-hashes` makes pip refuse anything else. A requirements file full of hashes that some
+# script installs WITHOUT that flag is decoration -- it looks pinned and enforces nothing. Both are
+# asserted here for that reason.
+check ci-python-deps-hash-pinned yes \
+  "conformance requirements carry hashes, and every install enforces them" \
+  bash -c '
+    for f in conformance/requirements-gate.txt conformance/requirements-schemathesis.txt; do
+      [ -f "$f" ] || exit 1
+      grep -q -- "--hash=sha256:" "$f" || exit 1
+    done
+    # Every pip install of these files must pass --require-hashes.
+    bad=$(grep -rhn "pip install.*requirements-\(gate\|schemathesis\)" \
+            scripts .github 2>/dev/null | grep -v -- "--require-hashes" || true)
+    [ -z "$bad" ] || { printf "%s\n" "$bad"; exit 1; }'
+
 # Base images pinned by DIGEST, not by tag. `rust:1.94.1-slim` is whatever that tag points at
 # today; an image rebuilt from a moved tag is not the artifact CI gated, however identical the
 # Dockerfile looks. Checked mechanically because the image cannot be BUILT everywhere this ledger
@@ -481,7 +504,7 @@ chk_p1_sdk_smoke() {
     grep -q "^p1-gate.sh exit: 0" "$f" &&
     grep -q "^sdk_smoke.mjs exit: 1" "$f" &&
     grep -q "^p1-gate.sh exit: 1" "$f" &&
-    py=$(sed -n "s/^agentmail==//p" conformance/requirements-gate.txt) &&
+    py=$(sed -n "s/^agentmail==//p" conformance/requirements-gate.txt | tr -d " \\\\") &&
     nd=$(tr -d " \",;" < conformance/package.json | sed -n "s/^agentmail://p") &&
     [ -n "$py" ] && [ -n "$nd" ] &&
     grep -q "agentmail==$py" "$f" &&
