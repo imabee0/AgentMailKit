@@ -54,7 +54,11 @@ pub async fn serve_api(
         .await
         .map_err(|e| format!("could not bind AMK_BIND {bind:?}: {e}"))?;
     tracing::info!(role = "api", %bind, "serving");
-    axum::serve(listener, app)
+    // `into_make_service_with_connect_info` is what puts the peer address in the request
+    // extensions. Without it the rate limiter sees UNSPECIFIED for every caller and buckets all
+    // unauthenticated traffic together -- which is not "no limit", it is a WORSE one: a single
+    // abusive source would throttle every other anonymous caller with it.
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
         .map_err(|e| format!("server error: {e}"))
 }

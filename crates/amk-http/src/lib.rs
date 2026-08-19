@@ -34,10 +34,12 @@ use axum::Router;
 use sqlx::PgPool;
 
 pub mod observability;
+pub mod ratelimit;
 
 pub use config::AppConfig;
 pub use error::AppError;
 pub use observability::Metrics;
+pub use ratelimit::RateLimiter;
 
 /// Everything a handler needs beyond the request itself: the database pool, deployment
 /// configuration, the DKIM keyring, and the outbound transport.
@@ -68,6 +70,9 @@ pub struct AppState {
     /// request and every clone must increment the SAME counters -- a per-clone copy would report
     /// one request per request forever.
     pub metrics: Arc<Metrics>,
+    /// Shared token buckets. `Arc` for the same reason `metrics` is: every clone must consult the
+    /// SAME buckets, or the limit is per-request and limits nothing.
+    pub limiter: Arc<RateLimiter>,
 }
 
 impl AppState {
@@ -91,6 +96,7 @@ impl AppState {
             keyring: Arc::new(keyring),
             transport,
             metrics: Arc::new(Metrics::new()),
+            limiter: Arc::new(RateLimiter::default()),
         }
     }
 }

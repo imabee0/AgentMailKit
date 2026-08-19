@@ -22,14 +22,16 @@
 //! dependency-direction check: "zero extra tooling, exact graph". If histograms or labelled
 //! cardinality are ever genuinely needed, that is the moment to take the dependency, not now.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
+use crate::ratelimit::{RateLimiter, Subject};
 use crate::AppState;
 
 /// The counters `docs/PLAN.md`:206 names, restricted to the ones that can be TRUE today.
@@ -45,6 +47,7 @@ pub struct Metrics {
     pub http_responses_5xx_total: AtomicU64,
     pub http_responses_4xx_total: AtomicU64,
     pub internal_errors_total: AtomicU64,
+    pub throttled_total: AtomicU64,
     pub dkim_signing_failures_total: AtomicU64,
     pub ingest_accepted_total: AtomicU64,
     pub ingest_rejected_relay_denied_total: AtomicU64,
@@ -67,7 +70,9 @@ impl Metrics {
     /// Every counter carries HELP and TYPE. A scraper tolerates their absence; a human reading an
     /// unfamiliar dashboard at 3am does not.
     pub fn render(&self) -> String {
-        let rows: [(&str, &str, u64); 10] = [
+        // Length inferred, deliberately: an explicit `[...; N]` is a second record of the row
+        // count, and it drifted the first time a counter was added.
+        let rows: &[(&str, &str, u64)] = &[
             (
                 "amk_http_requests_total",
                 "HTTP requests received",
@@ -87,6 +92,11 @@ impl Metrics {
                 "amk_internal_errors_total",
                 "Errors mapped to the opaque internal-error response",
                 Self::get(&self.internal_errors_total),
+            ),
+            (
+                "amk_throttled_total",
+                "Requests refused with 429 by the rate limiter",
+                Self::get(&self.throttled_total),
             ),
             (
                 "amk_dkim_signing_failures_total",
@@ -120,7 +130,7 @@ impl Metrics {
             ),
         ];
         let mut out = String::with_capacity(2048);
-        for (name, help, value) in rows {
+        for &(name, help, value) in rows {
             out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"));
         }
         out
@@ -208,6 +218,55 @@ pub async fn trace_requests(
         .map(str::to_owned);
     let request_id = incoming.unwrap_or_else(|| Uuid::new_v4().to_string());
 
+    // The peer address, when the server was built with `into_make_service_with_connect_info`.
+    // Absent in the in-process test harness (`oneshot` has no socket), where UNSPECIFIED means
+    // every test request shares one bucket -- correct, because a test that silently got its own
+    // bucket per request would never observe a limit at all.
+    let peer: IpAddr = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let subject = Subject::derive(
+        request
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok()),
+        peer,
+    );
+
+    // Checked BEFORE the handler runs, and charged at the ordinary cost. The auth-failure
+    // surcharge is applied after, once the status is known -- the expensive thing an attacker
+    // triggers is `authenticate`'s argon2id verify, which has already happened by then, so the
+    // surcharge is what makes the NEXT attempt uneconomic rather than this one.
+    if !state
+        .limiter
+        .check(&subject, RateLimiter::cost_for_status(200))
+    {
+        state
+            .metrics
+            .http_requests_total
+            .fetch_add(1, Ordering::Relaxed);
+        state
+            .metrics
+            .throttled_total
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(?subject, "rate limited");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [
+                (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                // Conservative and honest: the bucket refills continuously, so one second is
+                // always enough for at least one token at the configured rate.
+                (header::RETRY_AFTER, HeaderValue::from_static("1")),
+            ],
+            // The bare `{"message": ...}` shape, matching the auth layer -- a throttle is a
+            // gateway-level refusal, not an application error with a code and a docs link.
+            r#"{"message":"Too Many Requests"}"#,
+        )
+            .into_response();
+    }
+
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     let span = tracing::info_span!("http", %request_id, %method, path = %path);
@@ -229,6 +288,16 @@ pub async fn trace_requests(
     .await;
 
     let status = response.status();
+    // The surcharge. `cost_for_status` is 20 for 401/403 and 1 otherwise, and the ordinary 1 was
+    // already charged above, so a failure costs 21 in total. Deliberate: the point is that the
+    // NEXT attempt is throttled.
+    let extra = RateLimiter::cost_for_status(status.as_u16());
+    if extra > 1.0 {
+        // `penalise`, not `check`: the argon2id verify has already happened, so this charge lands
+        // whether or not the bucket can afford it. Using `check` here meant the surcharge stopped
+        // applying the moment it was most needed.
+        state.limiter.penalise(&subject, extra);
+    }
     if status.is_server_error() {
         state
             .metrics

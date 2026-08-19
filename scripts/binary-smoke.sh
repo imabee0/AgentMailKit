@@ -388,6 +388,44 @@ grep -q "exceeded its deadline" "$WORK/loris.log" \
 kill "$LORIS_PID" 2>/dev/null; LORIS_PID=""
 
 # ---------------------------------------------------------------------------------------------
+step "GATE 5b -- the auth-failure path is rate limited"
+# `amk-store::api_keys::authenticate` performs exactly one argon2id verify on EVERY path including
+# misses -- the timing-oracle fix, and incidentally an expensive operation an unauthenticated
+# caller gets to trigger at line rate. That is the CPU-exhaustion primitive the surcharge closes.
+#
+# Driven against the running binary because the first version of this limiter passed its unit
+# tests and did nothing in production: the surcharge used `check`, which declines to deduct when
+# the balance is short, so the charge silently stopped landing exactly when it mattered.
+if python3 - <<'P'
+import urllib.request, urllib.error
+def hit(auth):
+    r = urllib.request.Request("http://127.0.0.1:8123/v0/pods")
+    r.add_header("Authorization", auth)
+    try:
+        return urllib.request.urlopen(r, timeout=5).status
+    except urllib.error.HTTPError as e:
+        return e.code
+codes = [hit("Bearer am_smoke_wrong_key_000000000000") for _ in range(12)]
+assert 429 in codes, f"auth failures were never throttled: {codes}"
+first = codes.index(429)
+assert first == 6, f"expected the 7th failure to throttle, got index {first}: {codes}"
+print("  ok    six auth failures absorbed, the seventh throttled 429")
+# A DIFFERENT credential must not be collateral damage -- many agents share one NAT address, so
+# bucketing on the credential when one is presented is what keeps neighbours independent.
+other = hit("Bearer am_smoke_other_key_1111111111")
+assert other in (401, 403), f"a distinct credential was throttled by another's failures: {other}"
+print("  ok    a distinct credential keeps its own bucket")
+P
+then :; else bad "the auth-failure rate limit did not behave"; fi
+
+# And the valid key must be untouched by all of that.
+api GET /v0/pods >/dev/null 2>&1 \
+  && ok "the valid key is unaffected by another subject's throttling" \
+  || bad "the valid key became collateral damage"
+n=$(curl -sS "http://${HTTP}/metrics" 2>/dev/null | sed -n 's/^amk_throttled_total //p')
+[ "${n:-0}" -ge 6 ] && ok "throttles are counted (amk_throttled_total=$n)" \
+                    || bad "amk_throttled_total is ${n:-unset} after 6 throttled requests"
+
 step "GATE 6 -- STARTTLS on inbound"
 # Inbound mail used to be plaintext, unconditionally: `smtp.rs` answered 502 to STARTTLS and said
 # so in its own doc. Opportunistic TLS is near-universal among senders, so every message from
