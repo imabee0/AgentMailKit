@@ -80,15 +80,31 @@ were run individually in the sandbox:
 | dual-target conformance diff | **R-key** | **not run — needs the read-only AgentMail key** |
 
 Both defects that had schemathesis red are fixed and one is merged: the extractor escapes
-(`main` @ `0d0631c`) and the metadata round-trip. `scripts/plan-ledger.sh` still reads
-`CURRENT_PHASE=P0` and **stays there until the conformance diff runs** — local green is not the
-gate, and advancing on Lane L alone is exactly the "gate its own evidence contradicts" trap.
+(`main` @ `0d0631c`) and the metadata round-trip.
+
+**Corrected 2026-08-19 — "not run" above is imprecise, and the imprecision mattered.** Fixture 25
+records the dual-target diff running to `THIRD RUN — CLEAN`, `0 skipped, 0 with structural diffs`,
+`dual_target.py exit: 0`, on 2026-08-16. It ran, and it was clean. What the table means is that it
+has not been re-run *since the extractor and metadata fixes landed on top of it* — the transcript
+describes an earlier tree.
+
+Those are different facts and collapsing them into "not run" cost a real misreading: an audit
+reading this file concluded P1's gate had never executed, while an audit reading the fixture
+concluded P1 was gated. `scripts/plan-ledger.sh` now distinguishes them mechanically —
+
+  MET      ran, clean, current
+  STALE    ran, clean, code has moved since  → re-run it
+  PENDING  never run                          → run it
+
+— and reports this gate as STALE, which is the true state. `CURRENT_PHASE` is likewise no longer a
+hand-edited literal: it is derived from the gate transcripts, and reads **P1**.
 
 **P2: message/thread reads plus send + ingest.** Router is 45 operations (`derive-implemented-paths`
 +4 send/reply/reply-all/forward). `amk-outbound` SMTP Transport and the four HTTP POSTs are on
 `main` (three-lens CLEAN @ `8c5d3d7`). `amk-ingest` SMTP state machine + persist is on `main`
-(three-lens CLEAN @ `45ad7ae`). `amkd --role smtpd` is wired (CLEAN @ `28e6afa`). P1 Lane R conformance is
-still **not run**. `CURRENT_PHASE` stays P0. See "P2 progress" below.
+(three-lens CLEAN @ `45ad7ae`). `amkd --role smtpd` is wired (CLEAN @ `28e6afa`). P1 Lane R
+conformance is **STALE, not un-run** — see the correction above. The phase is derived, not
+transcribed: `./scripts/plan-ledger.sh | head -1`. See "P2 progress" below.
 
 ## The extractor-rejection work item: DONE and MERGED (`main` @ 0d0631c), still ungated
 

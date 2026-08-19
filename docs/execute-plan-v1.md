@@ -11,10 +11,14 @@ worktrees and keeps state. Dispatch, review, branch names, and merge follow PLAN
 
 ## Current position
 
-P0 gated (fixture 24). P1 Lane L green; Lane R (dual-target conformance) **not run**;
-`CURRENT_PHASE=P0`. P2 message/thread surface landed; `amk-outbound` has signing/assemble/build;
-SMTP `Transport` and the four send HTTP endpoints are not wired; `amk-ingest` does not exist.
-P3–P6 not started.
+**Derived, not transcribed.** Run `./scripts/plan-ledger.sh | head -1` for the phase and
+`./scripts/derive-implemented-paths.sh` for the mounted surface.
+
+The paragraph that used to sit here was wrong in two directions at once by 2026-08-19: it said
+`amk-ingest` does not exist (it merged at `28e6afa`) and that P1 Lane R was not run (fixture 25
+records `THIRD RUN — CLEAN` with `0 skipped, 0 with structural diffs`). Both were stale rather than
+mistaken when written, which is the failure mode a hand-maintained status paragraph has by
+construction. It is not replaced with a fresher one.
 
 ## Key Decisions
 

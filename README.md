@@ -6,10 +6,17 @@ The goal is narrow and testable: the **unmodified** official AgentMail SDKs, CLI
 must work against this server by changing only the base URL. No billing surface — the hosted
 product's Stripe/x402 paths are deliberately absent.
 
-Status: **pre-release, under active construction.** P0 (skeleton, auth, error shapes, control-plane
-storage and HTTP) is complete and gate-passed; P1 (control plane) is in its gate. Mail in/out,
-drafts, events, domains and migration are planned but unwritten. It is not usable as a mail server
-yet.
+Status: **pre-release, under active construction.** It is not usable as a mail server yet.
+
+The phase is not transcribed here. `./scripts/plan-ledger.sh` derives it from the gate transcripts
+in `reference/fixtures/` and prints it on its first line; this paragraph said P1 for some time
+after P2's message/thread surface, outbound send and SMTP ingest had all merged, which is exactly
+what a second record of one fact does. What is implemented is likewise derivable, not recited:
+
+```bash
+./scripts/plan-ledger.sh | head -1          # the phase, from the evidence
+./scripts/derive-implemented-paths.sh       # operations mounted, reconciled against openapi.json
+```
 
 ## Why
 

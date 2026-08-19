@@ -214,6 +214,55 @@ Source of truth for DKIM private keys, the at-rest master key (webhook headers, 
 ### V1 acceptance
 **V1 is complete when the unmodified official AgentMail SDKs, CLI, and MCP bridge run against the server holding `.64`, the dual-target conformance diff is clean for every V1 endpoint, the four production domains send and receive live mail with DKIM/SPF/DMARC passing, every P0–P6 gate has actually run, the restore drill has passed, and Register A is empty except items on their stated clocks.**
 
+## Standing decisions — what an unattended session must NOT stop to ask (added 2026-08-19)
+
+Every question below has been asked of the user at least once, and each is a question the plan
+could have answered. An unattended session that stops on one of these has not found an ambiguity;
+it has found a gap in this section, and the fix is to add the answer here rather than to ask again.
+
+**Branch naming.** `amk/<phase>/<crate>` governs in every environment. A session-assigned branch
+(`claude/<slug>`) is a worktree label, not a policy — publish `amk/<phase>/<crate>` from the same
+commit before review. If the runtime forbids pushing anything else, push the session branch, say
+so in one line, and continue. This conflict has been raised as a blocking question before; it is
+not one.
+
+**Subagent dispatch.** Standing authorisation. The three review lenses on every returned diff, the
+pre-dispatch lens on every contract, and implementer fan-out from P2 onward are all mandated by
+this plan — they do not need per-session permission. If the runtime denies the Agent tool, record
+a one-line standing deviation ("single-actor review, runtime-denied") and keep going; do not stop
+to ask, and do not silently drop the review requirement.
+
+**Reversible choices are the agent's.** Naming, file layout, test structure, retry counts, log
+levels, error wording, helper placement, commit granularity. Take the sensible default, note it in
+one line, never block. `docs/OPERATING-RULES.md` already says this; it is repeated here because
+the stops kept happening anyway.
+
+**STOP-and-report is narrower than it reads.** It means exactly one thing: a *wire shape* — a
+type, field, status code or identifier — that is absent from `amk-types` AND from every fixture in
+`reference/fixtures/`. That is the case where guessing corrupts the contract and cannot be caught
+downstream. It is **not** licence to stop on process ambiguity, tooling friction, a missing
+permission, a stale document, or a judgement call about how to structure code. Those are the
+agent's to resolve and note.
+
+**Lane R unavailable is not a stopping condition.** No credential, no OVH box, no Gmail account,
+no cluster ⇒ record the outstanding conjunct in the queue and start the next phase's *code*. A
+phase is code-complete on Lane L and gated on Lane R; the two are separated precisely so the
+absence of the second never idles a session. `scripts/plan-ledger.sh` reports such a gate as
+PENDING (never run) or STALE (ran, code has moved since) and neither fails the build.
+
+**A gate that cannot run here is reported as NOT RUN.** Never as passed, never as failed. This is
+already the rule; the ledger's three-state reporting now enforces it mechanically.
+
+**An approval prompt is a defect in `.claude/settings.json`, not a decision point.** Fix the
+allow-list. If the classifier blocks the agent from editing its own permissions — which it should —
+put the exact patch in the session report and carry on with what is possible. Do not stop the run
+waiting for it.
+
+**What genuinely does require the user**, and is therefore worth stopping for: a credential this
+machine does not have; a destructive or irreversible action on live infrastructure; deleting
+resources on the real AgentMail account; and a change to this plan's own architecture decisions.
+Nothing else on this list.
+
 ## Testing (applies from P0)
 
 Layers, each with a stated purpose so they don't collapse into each other:
@@ -474,8 +523,11 @@ it.
 ### Stop hook — deterministic phase gate
 A Stop hook runs a script and blocks the turn from ending until it passes: failing tests, unformatted/unlinted tree, or a shape-provenance violation all block. **Noted explicitly: Claude Code overrides after 8 consecutive blocks — a Stop hook is a strong gate, not an absolute one; the check must be fast and terminating, and CI remains the authoritative gate.**
 
-**DECIDED 2026-08-15 by the user — there is no CI layer. ~~CI remains the authoritative gate~~ is
-struck: nothing runs on the forge.** `./scripts/check.sh` plus the PreToolUse and Stop hooks are
+**REVERSED 2026-08-19 — there IS a CI layer; see the block below. The 2026-08-15 decision is kept
+in full because the reasoning it records is still the reasoning that governs what CI is *for*.**
+
+~~**DECIDED 2026-08-15 by the user — there is no CI layer. ~~CI remains the authoritative gate~~ is
+struck: nothing runs on the forge.**~~ `./scripts/check.sh` plus the PreToolUse and Stop hooks are
 the only gates, and the departure is recorded here rather than left as an open item. What that
 costs, stated rather than implied: every gate in this project now runs on the same machine, under
 the same session, as the agent it is gating — the Stop hook is overridden after 8 consecutive
@@ -485,6 +537,30 @@ are the ones already built: `scripts/hooks/guard.sh` freezes `scripts/hooks/**` 
 so a dispatched agent cannot disable the guard, and `scripts/plan-ledger.sh` fails the build on a
 due-but-unmet obligation. Neither is independent of this machine. Revisit if the repository ever
 takes contributions from anyone but the orchestrator.
+
+**THE REVERSAL, 2026-08-19.** The premise above — one operator, one machine, every gate run by the
+person reading its output — ended at the 2026-08-17 GitHub migration, which was made specifically
+so cloud sandboxes could drive this repository. The decision was never reopened, and an audit
+measured what that cost:
+
+- **336 of 705 tests (48%) skipped themselves** whenever Postgres was unreachable, while
+  `./scripts/check.sh` printed `check: PASS` — indistinguishable from a full run.
+- **`main` sat RED** on `every_fixture_is_either_asserted_or_explicitly_deferred` from `0e7d345`
+  onward. The fixture landed in a docs-only commit; nothing re-ran the suite; nobody noticed.
+- **`amkd --role api` could not send a single message.** `AppState::new` built an empty `Keyring`
+  unconditionally and no environment variable could inject a key. Every local gate was green,
+  three review lenses were clean, and the product's headline feature did not work.
+
+All three are one shape: a verification that nothing independent ever re-ran. That is the thing a
+forge CI provides and a same-session gate cannot, and it is why the decision is reversed rather
+than merely relaxed.
+
+What CI is **not** here: it does not replace `./scripts/check.sh`, the hooks, or the review panel,
+and it is not the authoritative gate for anything needing a credential or hardware — the Lane L /
+Lane R split above still governs. `ci-layer-local-only` is retired in `scripts/plan-ledger.sh` with
+its reasoning kept as a comment, and replaced by `ci-workflows-present`, `ci-actions-sha-pinned`
+and `ci-base-images-digest-pinned`, so deleting the pipeline is now the regression rather than the
+default.
 
 ### Permissions layer
 `.claude/settings.json` with explicit allow AND deny rules per subagent role, plus `--allowedTools` scoping for any unattended run. The deny list is recorded explicitly — never rely on the `tools:` frontmatter alone. Hooks complement permissions, CI, and branch protection; they replace none of them.
