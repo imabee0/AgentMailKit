@@ -7,6 +7,7 @@ use std::time::Duration;
 use amk_http::{config::DEFAULT_MAX_BODY_BYTES, AppConfig, AppState};
 use amk_ingest::lookup::StoreInboxLookup;
 use amk_ingest::{serve_session, Authenticator, IngestConfig, StorePersist};
+use amk_outbound::Keyring;
 
 use crate::args::AmkdRole;
 use crate::config::AMK_PRIMARY_DOMAIN;
@@ -28,11 +29,21 @@ pub fn not_yet_implemented(role: AmkdRole) -> Option<&'static str> {
 }
 
 /// Connect, build the router, bind `bind`, and serve forever (or until the listener errors).
-pub async fn serve_api(database_url: &str, bind: &str, config: AppConfig) -> Result<(), String> {
+///
+/// `keyring` is the operator's DKIM material, from `AMK_DKIM_KEYS`. It is a parameter rather than
+/// something this function loads, so that a failure to load it is reported by `main` BEFORE a
+/// listener exists -- a server that has bound its port is a server something is already talking
+/// to, and discovering there that it cannot sign is too late.
+pub async fn serve_api(
+    database_url: &str,
+    bind: &str,
+    config: AppConfig,
+    keyring: Keyring,
+) -> Result<(), String> {
     let pool = amk_store::connect(database_url).await.map_err(|e| {
         format!("could not connect using AMK_DATABASE_URL: {}", describe_connect_failure(&e))
     })?;
-    let app = amk_http::router(AppState::new(pool, config));
+    let app = amk_http::router(AppState::new(pool, config, keyring));
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await

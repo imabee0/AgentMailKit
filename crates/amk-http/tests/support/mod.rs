@@ -58,7 +58,7 @@ pub fn test_router(pool: PgPool) -> Router {
         product_name: Some("AmkTest".into()),
         ..AppConfig::default()
     };
-    router(AppState::new(pool, config))
+    router(AppState::new(pool, config, Keyring::new()))
 }
 
 /// A router that can send: fixture DKIM key for `example.test` plus a recording transport.
@@ -98,7 +98,7 @@ pub fn fixture_keyring(domain: &str) -> Keyring {
 /// A router with no configured domain/product name — for the tests that specifically assert the
 /// fail-closed behaviour.
 pub fn unconfigured_router(pool: PgPool) -> Router {
-    router(AppState::new(pool, AppConfig::default()))
+    router(AppState::new(pool, AppConfig::default(), Keyring::new()))
 }
 
 pub fn unique_suffix() -> String {

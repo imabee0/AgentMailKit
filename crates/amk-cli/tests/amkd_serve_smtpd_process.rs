@@ -6,6 +6,7 @@
 
 mod support;
 
+use amk_outbound::Keyring;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -151,7 +152,7 @@ fn rfc822(
 }
 
 async fn get_message(pool: &sqlx::PgPool, key: &str, inbox: &InboxId, message_id: &str) -> Value {
-    let app = router(AppState::new(pool.clone(), AppConfig::default()));
+    let app = router(AppState::new(pool.clone(), AppConfig::default(), Keyring::new()));
     let uri = format!(
         "/v0/inboxes/{}/messages/{}",
         inbox.to_path_segment(),

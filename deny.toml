@@ -1,0 +1,69 @@
+# cargo-deny configuration. Added 2026-08-19 with the CI layer.
+#
+# Scope note, because the plan already rejected cargo-deny once and the two decisions are
+# different: `docs/PLAN.md:108` chose a hand-rolled `cargo metadata` walk over cargo-deny for the
+# SHAPE-PROVENANCE dependency-direction check (amk-types/core/store must not reach amk-import),
+# and that choice stands — `scripts/shape-provenance.sh` still owns it, because it needs an exact
+# graph query cargo-deny does not express. This file covers what nothing covered: advisories,
+# licences, duplicate/wildcard bans and source registries.
+#
+# Runs nightly, not per-PR. A CVE disclosed against a pinned transitive dependency must not fail
+# an unrelated pull request — but it must be visible within 24 hours.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# No ignores. An advisory that must be tolerated gets an entry here WITH the reason and the
+# condition for removing it — never a silent blanket allow.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+# DERIVED, not chosen: this list is every SPDX token reachable from
+#   cargo metadata --all-features | jq '.packages[].license'
+# on 2026-08-19, minus tokens that appear only as an alternative inside an OR expression which a
+# permitted licence already satisfies (LGPL-2.1-or-later is the only such case — it appears solely
+# as `MIT OR Apache-2.0 OR LGPL-2.1-or-later`, and MIT satisfies it).
+#
+# Tokens that appear inside an AND expression are mandatory and are all present below:
+#   (Apache-2.0 OR MIT) AND BSD-3-Clause · (MIT OR Apache-2.0) AND Unicode-3.0 ·
+#   Apache-2.0 AND ISC · MIT AND BSD-3-Clause · ring's compound expression
+#
+# Adding a token here is a supply-chain decision: state which dependency needed it in the commit
+# message, so a new copyleft entry cannot slip in as routine maintenance.
+allow = [
+    "0BSD",
+    "AGPL-3.0-or-later",       # our own crates
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# Duplicate versions warn rather than deny: the workspace pins exactly (asserted by
+# `plan-ledger.sh`'s `deps-pinned-exactly`), so a duplicate is a transitive resolution we do not
+# directly control. Worth seeing; not worth failing a nightly on.
+multiple-versions = "warn"
+# A wildcard dependency contradicts the exact-pinning rule outright, so it fails.
+wildcards = "deny"
+allow-wildcard-paths = true    # path deps between our own crates carry no version
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No git dependencies. Everything resolves from crates.io at an exact version, which is what makes
+# Cargo.lock a complete description of the build.
+allow-git = []

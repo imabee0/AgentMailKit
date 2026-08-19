@@ -40,9 +40,21 @@ pub use error::AppError;
 /// configuration, the DKIM keyring, and the outbound transport.
 ///
 /// `Clone` is cheap — `PgPool` and the keyring/`Transport` are reference-counted. [`Self::new`]
-/// installs an empty keyring (fail closed) and a live SMTP transport from `config`. Tests that
+/// takes the keyring as an ARGUMENT and derives a live SMTP transport from `config`. Tests that
 /// send mail call [`Self::with_outbound`] with a fixture keyring and a
 /// [`amk_outbound::RecordingTransport`].
+///
+/// # Why the keyring is a parameter and not a default
+///
+/// It used to be neither: `new` called `Keyring::new()` unconditionally, so **every deployment
+/// answered every send with `NoSigningKey`** — the crate compiled, all 697 tests passed, three
+/// review lenses were clean, and the product could not send mail. Nothing caught it because
+/// nothing tested the composed binary; `amk-outbound` was exercised as a library and `amk-http`
+/// through handlers that injected their own keyring.
+///
+/// Making it a parameter is the fix that generalises: a caller must now say what it is doing.
+/// `amk-cli` passes `config::dkim_keyring()`; a read-only test passes `Keyring::new()` and means
+/// it. `scripts/binary-smoke.sh` is the gate that keeps it honest end to end.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
@@ -52,12 +64,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(pool: PgPool, config: AppConfig) -> Self {
+    pub fn new(pool: PgPool, config: AppConfig, keyring: Keyring) -> Self {
         let transport = match &config.smtp_smarthost {
             Some((host, port)) => OutboundTransport::smarthost(host, *port),
             None => OutboundTransport::direct_mx(),
         };
-        Self::with_outbound(pool, config, Keyring::new(), transport)
+        Self::with_outbound(pool, config, keyring, transport)
     }
 
     pub fn with_outbound(
@@ -224,7 +236,7 @@ mod tests {
     async fn router_builds_without_touching_the_database() {
         let pool = PgPool::connect_lazy("postgres://amk:amk-dev-local@127.0.0.1:55432/amk")
             .expect("lazy connect never touches the network");
-        let state = AppState::new(pool, AppConfig::default());
+        let state = AppState::new(pool, AppConfig::default(), Keyring::new());
         let _ = router(state);
     }
 

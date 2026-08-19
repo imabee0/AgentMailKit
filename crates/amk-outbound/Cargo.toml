@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 # The three stalwart-labs crates live HERE and nowhere else. They are consumed as libraries — one
 # of the plan's two sanctioned roles for Stalwart — and converted at this crate's edge: no

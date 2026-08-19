@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Inbound SMTP state machine and persist. smtp-proto/mail-parser/mail-auth stay inside this crate."
 
 [dependencies]

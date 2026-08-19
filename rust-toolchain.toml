@@ -1,0 +1,18 @@
+# The toolchain pin. Added 2026-08-19.
+#
+# `Cargo.toml`'s `rust-version = "1.85"` is an MSRV DECLARATION — it constrains which language
+# features may be used and nothing else. It does not pin the compiler, so two machines running
+# `./scripts/check.sh` on identical source could reach different verdicts: rustfmt's output and
+# clippy's lint set both move between releases, and `-D warnings` turns a new lint into a build
+# failure that did not exist yesterday. That is the reproducibility gap this file closes.
+#
+# 1.94.1 is the version the workspace was developed and gated against.
+#
+# MSRV is verified separately, in `.github/workflows/nightly.yml`, which builds against 1.85 as
+# well as this pin. Bumping the channel here is a deliberate act: re-run `./scripts/check.sh` in
+# full and expect new clippy lints, exactly as bumping a dependency pin requires re-running the
+# compile spike (`reference/fixtures/15-compile-spike.txt`).
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

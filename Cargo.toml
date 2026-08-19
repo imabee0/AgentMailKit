@@ -16,6 +16,13 @@ edition = "2021"
 rust-version = "1.85"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Appsynergy-io/AgentMailKit"
+# Nothing here is published to crates.io: the seven crates are one deployable unit that happens to
+# be split for the dependency-direction rule `scripts/shape-provenance.sh` enforces. Stating that
+# is not cosmetic -- `cargo deny check bans` treats a version-less path dependency as a WILDCARD
+# and fails on it for any crate it believes is publishable, because crates.io would reject the
+# manifest. Declared here so the fact lives in one place, and so an accidental `cargo publish`
+# refuses rather than uploading a private mail server.
+publish = false
 
 # Pins verified in P-1 item 15 (reference/fixtures/15-compile-spike.txt): every
 # version below resolves AND the APIs we rely on compile. Do not bump without

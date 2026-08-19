@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "The `amk` (init/migrate/doctor) and `amkd` (--role api|smtpd|worker|all) binaries. See .claude/contracts/amk-bins.md."
 
 [[bin]]
@@ -20,6 +21,12 @@ amk-types = { path = "../amk-types" }
 amk-store = { path = "../amk-store" }
 amk-http = { path = "../amk-http" }
 amk-ingest = { path = "../amk-ingest" }
+# `Keyring` for `AMK_DKIM_KEYS`. `amk-cli` is the composition root: it is the only place that reads
+# the environment, so it is the only place that can hand `amk-http` a keyring. Before this, nothing
+# could -- `AppState::new` built an empty one unconditionally and every deployed send failed closed
+# with `NoSigningKey` while every gate reported green. Already a transitive dependency via
+# `amk-http`; named here because this crate now uses the type directly.
+amk-outbound = { path = "../amk-outbound" }
 # `PgConnectOptions` for `amk doctor`'s own parse-before-connect (see the dispatch contract's own
 # reasoning: `PgPoolOptions::connect` defers the parse, so a malformed DSN and an unreachable
 # database are indistinguishable without doing this parse ourselves), and `sqlx::Error`'s variants
