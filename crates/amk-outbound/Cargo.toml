@@ -24,6 +24,14 @@ base64.workspace = true
 # Direct-to-MX needs MX lookup. Already in the workspace lock via mail-auth
 # (`reference/fixtures/15-compile-spike.txt` F7); pinned to that resolved version.
 hickory-resolver = { version = "=0.26.1", default-features = false, features = ["tokio", "system-config"] }
+# Named directly ONLY to install a crypto provider -- no rustls type appears in any signature here.
+# rustls 0.23 refuses to guess a provider when more than one is compiled in, and BOTH `ring` and
+# `aws-lc-rs` are in this workspace graph (sqlx, hickory and mail-send each pull rustls, and
+# feature unification enables both). The result was a PANIC inside the request path on every
+# outbound send -- see `install_crypto_provider`. `ring` is the choice because it is already built
+# here and needs no C toolchain at image-build time. Pinned exactly to the resolved version, like
+# every other dependency in this workspace.
+rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

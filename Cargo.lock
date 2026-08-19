@@ -90,6 +90,7 @@ dependencies = [
  "mail-auth 0.12.0",
  "mail-builder",
  "mail-send",
+ "rustls",
  "thiserror",
  "tokio",
 ]

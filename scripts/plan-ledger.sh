@@ -159,6 +159,7 @@ DEFERRALS=$(cat <<'EOF'
 24-p0-gate-sdk-authme.txt|P0 gate transcript, asserted by plan-ledger
 25-p1-gate-conformance.txt|P1 gate diff, asserted by the conformance run
 26-p1-gate-sdk-smoke.txt|P1 gate SDK smoke, asserted by plan-ledger
+28-p2-lane-l.txt|P2 Lane L transcript, asserted by plan-ledger
 C1-domain-shape.txt|amk-types domain shapes, P5
 EOF
 )
@@ -335,6 +336,23 @@ check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pin
     [ -n "$py" ] && [ -n "$nd" ] &&
     grep -q "agentmail==$py" "$f" &&
     grep -q "agentmail@$nd" "$f"'
+# P2's Lane L conjuncts, same shape as the two P1 checks above: run by hand against a live server,
+# transcript captured, ledger asserts the EVIDENCE.
+#
+# Added 2026-08-19 because nothing asserted fixture 28 at all. It landed on `main` at 0e7d345 and
+# `amk-types`'s own coverage tripwire went red on it -- `main` was failing
+# `every_fixture_is_either_asserted_or_explicitly_deferred` and stayed that way, because no CI ran
+# the suite and the transcript was committed in a docs-only change nobody re-tested. Deferring the
+# fixture without adding this check would have recorded a reason ("asserted by plan-ledger") that
+# was not true.
+check p2-gate-lane-l no "P2 Lane L: schemathesis + both SDK smokes green against our own server" \
+  bash -c '
+    f=reference/fixtures/28-p2-lane-l.txt
+    [ -f "$f" ] || exit 1
+    grep -q "^sdk_smoke.py exit: 0" "$f" &&
+    grep -q "^sdk_smoke.mjs exit: 0" "$f" &&
+    grep -q "^schemathesis exit: 0" "$f" &&
+    grep -q "45 operations" "$f"'
 pend p6-restore-drill        "P6: restore drill passes from backups alone, before any cutover step"
 
 # ---------------------------------------------------------------- cannot be machine-checked
