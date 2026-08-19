@@ -78,6 +78,7 @@ fn new_message(
         html: None,
         extracted_text: None,
         extracted_html: None,
+        raw_blob_id: None,
     }
 }
 

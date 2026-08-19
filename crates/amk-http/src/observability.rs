@@ -194,6 +194,14 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
 /// The header a caller can supply to correlate its own logs with ours.
 const REQUEST_ID: &str = "x-request-id";
 
+/// Liveness. Skips the limiter outright -- it allocates nothing and reads nothing, so there is no
+/// resource for a limit to protect, and it is the endpoint whose refusal restarts the pod.
+const HEALTH_PATH: &str = "/health";
+/// Every infrastructure endpoint, limited on their own [`Subject::Probe`] bucket rather than
+/// sharing the anonymous one. `/health` appears here too so that its bucket is never the
+/// application's, in case the exemption above is ever narrowed.
+const PROBE_PATHS: [&str; 3] = [HEALTH_PATH, "/ready", "/metrics"];
+
 /// Per-request span, request id, and the response counters.
 ///
 /// Hand-written rather than `tower_http::trace::TraceLayer` because tower-http is not a sanctioned
@@ -227,21 +235,30 @@ pub async fn trace_requests(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-    let subject = Subject::derive(
-        request
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok()),
-        peer,
-    );
+    // Infrastructure endpoints are classified BEFORE the subject is derived, because the whole
+    // point is that they do not share a bucket with application traffic. See `Subject::Probe`.
+    let path_now = request.uri().path();
+    let exempt = path_now == HEALTH_PATH;
+    let subject = if PROBE_PATHS.contains(&path_now) {
+        Subject::Probe(peer)
+    } else {
+        Subject::derive(
+            request
+                .headers()
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            peer,
+        )
+    };
 
     // Checked BEFORE the handler runs, and charged at the ordinary cost. The auth-failure
     // surcharge is applied after, once the status is known -- the expensive thing an attacker
     // triggers is `authenticate`'s argon2id verify, which has already happened by then, so the
     // surcharge is what makes the NEXT attempt uneconomic rather than this one.
-    if !state
-        .limiter
-        .check(&subject, RateLimiter::cost_for_status(200))
+    if !exempt
+        && !state
+            .limiter
+            .check(&subject, RateLimiter::cost_for_status(200))
     {
         state
             .metrics
@@ -292,7 +309,7 @@ pub async fn trace_requests(
     // already charged above, so a failure costs 21 in total. Deliberate: the point is that the
     // NEXT attempt is throttled.
     let extra = RateLimiter::cost_for_status(status.as_u16());
-    if extra > 1.0 {
+    if extra > 1.0 && !matches!(subject, Subject::Probe(_)) {
         // `penalise`, not `check`: the argon2id verify has already happened, so this charge lands
         // whether or not the bucket can afford it. Using `check` here meant the surcharge stopped
         // applying the moment it was most needed.

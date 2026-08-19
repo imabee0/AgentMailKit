@@ -73,6 +73,10 @@ pub struct AppState {
     /// Shared token buckets. `Arc` for the same reason `metrics` is: every clone must consult the
     /// SAME buckets, or the limit is per-request and limits nothing.
     pub limiter: Arc<RateLimiter>,
+    /// Where raw MIME and attachment bodies live. `None` keeps the pre-blob behaviour -- parse and
+    /// discard -- so a deployment without a configured root still sends and receives; only
+    /// `GET .../raw` degrades, and it degrades to a 404 rather than to a lie.
+    pub blobs: Option<amk_store::blobs::FsBlobStore>,
 }
 
 impl AppState {
@@ -97,6 +101,7 @@ impl AppState {
             transport,
             metrics: Arc::new(Metrics::new()),
             limiter: Arc::new(RateLimiter::default()),
+            blobs: None,
         }
     }
 }
@@ -216,6 +221,11 @@ pub fn router(state: AppState) -> Router {
                 .delete(handlers::threads::delete_inbox),
         )
         // Unknown path -> 404 envelope.
+        // ---- raw message fetch + the signed download it points at ----
+        .route("/v0/inboxes/{inbox_id}/messages/{message_id}/raw", get(handlers::messages::raw))
+        // Unauthenticated by design: the token IS the authorisation. Mounted under /v0 because it
+        // is part of the product surface a client follows, unlike /health and /metrics below.
+        .route("/v0/blobs/{blob_id}", get(handlers::messages::download_blob))
         .fallback(not_found_fallback)
         // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
         // default 405 — the dispatch contract is explicit: "There is no 405."

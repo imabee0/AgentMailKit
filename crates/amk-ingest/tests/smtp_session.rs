@@ -100,7 +100,7 @@ async fn size_cap_minus_one_and_cap_accepted_cap_plus_one_rejected() {
     let mut lookup = FixedInboxLookup::new();
     lookup.insert(inbox.clone(), org.clone(), pod);
     let auth = amk_ingest::Authenticator::unresolved_is_none();
-    let persist = StorePersist { pool: pool.clone(), auth };
+    let persist = StorePersist { blobs: None, pool: pool.clone(), auth };
     const CAP: usize = 400;
     let addr = spawn_smtp(short_pause_config(&["local.test"], CAP), lookup, persist).await;
 
@@ -161,7 +161,7 @@ async fn missing_message_id_data_is_554_and_store_empty() {
     let mut lookup = FixedInboxLookup::new();
     lookup.insert(inbox.clone(), org.clone(), pod);
     let auth = amk_ingest::Authenticator::unresolved_is_none();
-    let persist = StorePersist { pool: pool.clone(), auth };
+    let persist = StorePersist { blobs: None, pool: pool.clone(), auth };
     let addr = spawn_smtp(short_pause_config(&["local.test"], 64 * 1024), lookup, persist).await;
 
     let mut spec = MimeSpec::simple("a@probe.test", inbox.as_str(), "no mid", "<unused@x>", "body");
@@ -196,7 +196,11 @@ async fn spf_hardfail_data_is_250_and_store_empty() {
     let (org, pod, inbox) = seed_org_pod_inbox(&pool).await;
     let mut lookup = FixedInboxLookup::new();
     lookup.insert(inbox.clone(), org.clone(), pod);
-    let persist = StorePersist { pool: pool.clone(), auth: amk_ingest::Authenticator::spf_fail() };
+    let persist = StorePersist {
+        blobs: None,
+        pool: pool.clone(),
+        auth: amk_ingest::Authenticator::spf_fail(),
+    };
     let addr = spawn_smtp(short_pause_config(&["local.test"], 64 * 1024), lookup, persist).await;
 
     let id = mid("hf-smtp");

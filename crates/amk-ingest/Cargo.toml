@@ -13,6 +13,8 @@ amk-types = { path = "../amk-types" }
 amk-core = { path = "../amk-core" }
 amk-store = { path = "../amk-store" }
 thiserror.workspace = true
+# Structured logging for the delivery path -- a blob-store failure is non-fatal and must be loud.
+tracing.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 sqlx.workspace = true
 chrono.workspace = true

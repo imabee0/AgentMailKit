@@ -44,11 +44,14 @@ pub async fn serve_api(
     bind: &str,
     config: AppConfig,
     keyring: Keyring,
+    blobs: Option<amk_store::blobs::FsBlobStore>,
 ) -> Result<(), String> {
     let pool = amk_store::connect(database_url).await.map_err(|e| {
         format!("could not connect using AMK_DATABASE_URL: {}", describe_connect_failure(&e))
     })?;
-    let app = amk_http::router(AppState::new(pool, config, keyring));
+    let mut state = AppState::new(pool, config, keyring);
+    state.blobs = blobs;
+    let app = amk_http::router(state);
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -69,6 +72,7 @@ pub async fn serve_smtpd(
     bind: &str,
     config: AppConfig,
     tls: Option<amk_ingest::tls::TlsAcceptorHandle>,
+    blobs: Option<amk_store::blobs::FsBlobStore>,
 ) -> Result<(), String> {
     let primary_domain = config
         .primary_domain
@@ -99,7 +103,7 @@ pub async fn serve_smtpd(
     }
     tracing::info!(starttls = ingest.tls_configured(), "smtpd TLS");
     let lookup = StoreInboxLookup { pool: pool.clone() };
-    let persist = StorePersist { pool, auth };
+    let persist = StorePersist { pool, auth, blobs: blobs.clone() };
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await

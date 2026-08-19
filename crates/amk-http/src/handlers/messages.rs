@@ -8,10 +8,14 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use chrono::{Duration as ChronoDuration, Utc};
+use serde::Deserialize;
 
+use amk_core::download;
 use amk_core::labels::{excluded_labels, system_label_violations, LabelAccess};
 use amk_core::permissions;
 use amk_core::scope::ResourceKind;
@@ -22,6 +26,7 @@ use amk_outbound::{
     mailbox_addr, reply_all_recipients, reply_subject, sign_and_deliver, OutboundError,
     SendContext, SignedMessage,
 };
+use amk_store::blobs::{BlobId, BlobStore};
 use amk_store::inboxes;
 use amk_store::messages::{self, ListMessagesQuery, NewMessage};
 use amk_store::pagination::{MessageCursor, SortDirection};
@@ -29,8 +34,9 @@ use amk_store::threads::{self, NewThread, ThreadMember};
 use amk_store::StoreError;
 use amk_types::ids::{InboxId, MessageId, ThreadId};
 use amk_types::message::{
-    Addresses, ListMessagesResponse, ReplyAllMessageRequest, ReplyToMessageRequest,
-    SendMessageRequest, SendMessageResponse, UpdateMessageRequest, UpdateMessageResponse,
+    Addresses, ListMessagesResponse, RawMessageResponse, ReplyAllMessageRequest,
+    ReplyToMessageRequest, SendMessageRequest, SendMessageResponse, UpdateMessageRequest,
+    UpdateMessageResponse,
 };
 use amk_types::{ErrorCode, Message, Timestamp, ValidationIssue};
 
@@ -559,6 +565,25 @@ async fn persist_sent(
     let labels = sent_labels(&req.labels);
     let preview = preview_of(req.text.as_deref());
     let size = signed.raw.len() as u64;
+
+    // The bytes that actually LEFT, not the request that produced them: `signed.raw` is
+    // post-assembly and post-DKIM, so `GET .../raw` on a sent message returns exactly what the
+    // recipient's server received, DKIM-Signature and all. Storing the request instead would
+    // return something no recipient ever saw -- useless for the one question anybody asks a sent
+    // message's raw form, which is "what did they actually get".
+    //
+    // Non-fatal, same as ingest: the mail is already delivered, and failing the response now
+    // would tell the caller a send failed that demonstrably succeeded.
+    let raw_blob_id = match &state.blobs {
+        None => None,
+        Some(store) => match store.put(&signed.raw).await {
+            Ok(id) => Some(id.to_string()),
+            Err(e) => {
+                tracing::error!(error = %e, "could not store sent raw MIME; message was delivered");
+                None
+            }
+        },
+    };
     let references = (!references.is_empty()).then_some(references);
     let smtp_id = Some(uuid::Uuid::new_v4().simple().to_string());
 
@@ -620,6 +645,7 @@ async fn persist_sent(
             html: req.html.clone(),
             extracted_text: None,
             extracted_html: None,
+            raw_blob_id,
         },
     )
     .await?;
@@ -648,4 +674,138 @@ async fn persist_sent(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Raw message fetch and the signed download it points at.
+//
+// `[SPEC:reference/fixtures/06-download-url-expiry.txt]`. Two endpoints, deliberately split the
+// way the reference splits them: an AUTHENTICATED metadata call that mints a URL, and an
+// UNAUTHENTICATED fetch that honours it. That split is the whole point of a signed URL -- the
+// second is handed to something that has no credentials (a download manager, an `<img src>`, a
+// mail client) and must work anyway.
+
+/// `GET /v0/inboxes/{inbox_id}/messages/{message_id}/raw`
+///
+/// Returns metadata plus a short-lived URL, never the bytes. The bytes come from
+/// [`download_blob`], and keeping them apart is what lets the fetch be credential-free without
+/// making the metadata credential-free too.
+pub async fn raw(
+    State(state): State<AppState>,
+    ctx: AuthContext,
+    Path((raw_inbox_id, raw_message_id)): Path<(String, String)>,
+) -> Result<Json<RawMessageResponse>, AppError> {
+    let (inbox_id, message_id) = ids_from_path(&raw_inbox_id, &raw_message_id)?;
+    let filter = settle_inbox_mount(&state.pool, &ctx.scope, &inbox_id).await?;
+    permissions::require(&ctx.grants, "message_read")?;
+
+    // Same access rules as get-by-id: restricted mail IS reachable by id (fixture 09b), so the
+    // raw form must be too -- a raw endpoint that hid what get-by-id returns would be a second,
+    // inconsistent visibility rule.
+    let access = LabelAccess::by_id(&ctx.grants);
+    let excluded = excluded_labels(&access);
+
+    // `raw_blob` binds a `text[]`, so the borrowed slice has to be owned once here.
+    let owned_excluded: Vec<String> = excluded.iter().map(|s| (*s).to_string()).collect();
+    let (blob_id, size) =
+        match messages::raw_blob(&state.pool, &filter, &inbox_id, &message_id, &owned_excluded)
+            .await?
+        {
+            Some(v) => v,
+            // Not-found covers "no such message", "out of scope" and "no raw captured" alike.
+            // Distinguishing them is an existence oracle on a guessable id.
+            None => return Err(amk_core::scope::ScopeDenial::new(ResourceKind::Message).into()),
+        };
+
+    // Configured together or not at all: `amkd` refuses to start with a blob root and no key, so
+    // reaching here without one means blobs are off entirely and there is nothing to hand out.
+    let Some(key) = state.config.master_key.as_ref() else {
+        return Err(AppError::internal("master key absent while a blob exists"));
+    };
+
+    let expires_at = Utc::now() + ChronoDuration::seconds(download::DEFAULT_TTL_SECS as i64);
+    let token = download::mint(key, &blob_id, expires_at.timestamp().max(0) as u64);
+    let download_url = format!(
+        "{}/v0/blobs/{}?token={}",
+        state.config.public_base_url.trim_end_matches('/'),
+        blob_id,
+        token
+    );
+
+    Ok(Json(RawMessageResponse {
+        message_id,
+        size,
+        download_url,
+        expires_at: Timestamp::from(expires_at),
+    }))
+}
+
+/// `GET /v0/blobs/{blob_id}?token=…` — the credential-free fetch.
+///
+/// UNAUTHENTICATED BY DESIGN, and the token is the entire authorisation: it names one blob, it
+/// expires, and its MAC covers both. A leaked URL is a leaked object until it expires, which is
+/// why the TTL is an hour and why nothing but blob bytes is ever served this way.
+///
+/// Every failure — malformed token, wrong signature, expired, wrong blob, missing object — is the
+/// SAME 403 with the same body. Telling a caller which one hands it an oracle for probing what it
+/// holds, and the reference behaves identically: fixture 06 recorded a flat `AccessDenied` after
+/// expiry with no further detail.
+pub async fn download_blob(
+    State(state): State<AppState>,
+    Path(raw_blob_id): Path<String>,
+    Query(q): Query<DownloadQuery>,
+) -> Response {
+    fn denied() -> Response {
+        (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"message":"Forbidden"}"#,
+        )
+            .into_response()
+    }
+
+    let (Some(store), Some(key)) = (state.blobs.as_ref(), state.config.master_key.as_ref()) else {
+        return denied();
+    };
+    // Parsed before anything else touches the filesystem: this is the only validation between a
+    // caller-supplied string and a path, and it is what makes traversal impossible.
+    let Some(blob_id) = BlobId::parse(&raw_blob_id) else {
+        return denied();
+    };
+    let now = Utc::now().timestamp().max(0) as u64;
+    if let Err(e) = download::verify(key, &q.token, blob_id.as_str(), now) {
+        // The reason is logged, never returned.
+        tracing::warn!(blob = %blob_id, reason = ?e, "download token refused");
+        return denied();
+    }
+
+    match store.get(&blob_id).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [
+                // `message/rfc822` would be more precise for raw mail, but this endpoint serves
+                // attachment bodies too and the blob store keeps no content type -- it stores
+                // bytes. Octet-stream is the honest answer, and it is also the safe one: a
+                // browser will not render it.
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                // Never cached by a shared proxy: the URL is a bearer token.
+                (header::CACHE_CONTROL, "private, no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            // A valid token for an object that is not there means the row and the tree have
+            // drifted -- worth an error line, not a different status.
+            tracing::error!(blob = %blob_id, error = %e, "blob referenced but not readable");
+            denied()
+        }
+    }
+}
+
+/// The `?token=` on a download URL.
+#[derive(Debug, Deserialize)]
+pub struct DownloadQuery {
+    #[serde(default)]
+    pub token: String,
 }

@@ -57,6 +57,7 @@ async fn go(
             raw,
             envelope: envelope(mail_from),
             dest: dest(org, pod, inbox),
+            raw_blob_id: None,
             max_message_bytes: CAP,
         },
     )
@@ -83,6 +84,7 @@ async fn go_opt(
             raw,
             envelope: envelope(mail_from),
             dest: dest(org, pod, inbox),
+            raw_blob_id: None,
             max_message_bytes: CAP,
         },
     )

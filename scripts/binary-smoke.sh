@@ -92,6 +92,14 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -outform DER \
 chmod 600 "$KEYS/${SELECTOR}.${DOMAIN}.der"
 ok "$SELECTOR._domainkey.$DOMAIN (2048-bit, DER, throwaway)"
 
+step "throwaway blob root and master key"
+# Both are the operator-facing shape: a directory of bytes and a secret from the environment. The
+# key is generated per run and never printed -- `openssl rand` rather than a literal, so a copy of
+# this script cannot become a shared secret in someone's deployment.
+BLOBS="$WORK/blobs"; mkdir -p "$BLOBS"; chmod 700 "$BLOBS"
+MASTER_KEY=$(openssl rand -hex 32) || { echo "openssl rand failed"; exit 1; }
+ok "blob root $BLOBS, 64-hex master key (not printed)"
+
 # A self-signed cert for the sink. amk-outbound falls back to plaintext ONLY on port 25, so a
 # smarthost anywhere else must complete a TLS handshake -- which means this gate exercises the
 # real production delivery path (STARTTLS to a smarthost) rather than a plaintext shortcut no
@@ -141,6 +149,28 @@ else
     || bad "refused but did not name the variable: $(head -1 "$WORK/badsh.log")"
 fi
 
+# The blob configuration has the same shape of trap, and each of these three was a plausible
+# silent-degradation: a blob root with no key mints nothing (a 500 on the first download rather
+# than a refusal at boot), an unwritable or absent root drops raw bytes for every message received
+# until someone notices, and a short key produces a signature anyone can forge while HMAC raises
+# no objection at all.
+refuses() { # $1=label  $2=variable the message must name  $3..=env assignments
+  local label="$1" want="$2"; shift 2
+  if env "$@" AMK_DKIM_KEYS="$KEYS" AMK_BIND="$HTTP" timeout 10 "$AMKD" --role api \
+       >"$WORK/refuse.log" 2>&1; then
+    bad "amkd started $label -- it must refuse"
+  elif grep -q "$want" "$WORK/refuse.log"; then
+    ok "refused $label, naming $want"
+  else
+    bad "did not refuse $label naming $want: $(head -1 "$WORK/refuse.log")"
+  fi
+}
+refuses "with a blob root and no master key" AMK_MASTER_KEY "AMK_BLOB_ROOT=$BLOBS"
+refuses "with a blob root that does not exist" AMK_BLOB_ROOT \
+  "AMK_BLOB_ROOT=$WORK/no-such-dir" "AMK_MASTER_KEY=$MASTER_KEY"
+refuses "with a forgeably short master key" AMK_MASTER_KEY \
+  "AMK_BLOB_ROOT=$BLOBS" "AMK_MASTER_KEY=secret"
+
 # ---------------------------------------------------------------------------------------------
 step "start the SMTP sink, then amkd --role api pointed at it"
 python3 scripts/smtp-sink.py --port "$SINK" --outdir "$WORK/sink" \
@@ -149,6 +179,7 @@ SINK_PID=$!
 for _ in $(seq 1 40); do timeout 1 bash -c "(exec 3<>/dev/tcp/127.0.0.1/$SINK)" 2>/dev/null && break; sleep 0.25; done
 
 AMK_DKIM_KEYS="$KEYS" AMK_SMTP_SMARTHOST="127.0.0.1:${SINK}" AMK_BIND="$HTTP" \
+  AMK_BLOB_ROOT="$BLOBS" AMK_MASTER_KEY="$MASTER_KEY" AMK_PUBLIC_BASE_URL="http://${HTTP}" \
   "$AMKD" --role api >"$WORK/api.log" 2>&1 &
 API_PID=$!
 up=0
@@ -218,7 +249,8 @@ step "GATE 3 -- inbound SMTP lands, and lands with the RIGHT visibility"
 # a conjunction: reachable by id, and absent from the list. Asserting only the first would pass on
 # a build that had lost the exclusion -- which is a data-disclosure bug, not a cosmetic one.
 INBOUND_MID='<smoke-inbound-1@outside.test>'
-AMK_BIND="$SMTPD" "$AMKD" --role smtpd >"$WORK/smtpd.log" 2>&1 &
+AMK_BIND="$SMTPD" AMK_BLOB_ROOT="$BLOBS" AMK_MASTER_KEY="$MASTER_KEY" \
+  "$AMKD" --role smtpd >"$WORK/smtpd.log" 2>&1 &
 SMTPD_PID=$!
 for _ in $(seq 1 60); do timeout 1 bash -c "(exec 3<>/dev/tcp/${SMTPD/:/ })" 2>/dev/null && break; sleep 0.25; done
 
@@ -491,7 +523,168 @@ s.quit()
 print("  ok    no certificate configured -> STARTTLS not advertised (unchanged)")
 P
 
-step "GATE 7 -- /health and /ready diverge when the database dies"
+# ---------------------------------------------------------------------------------------------
+step "GATE 7 -- raw MIME leaves by a signed URL, and ONLY by a signed URL"
+# Two processes and a filesystem have to agree here: `amkd --role smtpd` wrote the original bytes
+# under AMK_BLOB_ROOT during Gate 3, and `amkd --role api` -- a separate process, started from a
+# separate environment -- has to find them, mint a token over them and serve them to a caller with
+# no credential at all. Nothing in the unit suite crosses that boundary; both sides construct
+# their own store.
+#
+# The positive half is easy to pass by accident, so the negatives carry the weight. This endpoint
+# hands out mail to an UNAUTHENTICATED request, which makes the token the entire access control:
+# if a tampered, absent, or replayed-onto-another-object token is ever honoured, every message in
+# the deployment is readable by anyone who can guess a 64-hex id.
+
+RAW=$(api GET "/v0/inboxes/$(enc "$INBOX")/messages/${MID_ENC}/raw") \
+  || bad "GET .../raw failed for a message that get-by-id serves"
+
+if [ -n "${RAW:-}" ]; then
+  # Parsed into shell variables in one step, but the eval is guarded: `eval "$(cmd)"` succeeds
+  # even when `cmd` fails, so the exit status has to be taken from the substitution itself before
+  # anything is evaluated.
+  if VARS=$(printf '%s' "$RAW" | python3 -c '
+import json, re, sys, shlex
+r = json.load(sys.stdin)
+url = r["download_url"]
+# The URL must be absolute and built from AMK_PUBLIC_BASE_URL, not from the bind address: a
+# deployment behind a proxy hands out the proxy URL, and getting this wrong yields a link that
+# only works from inside the cluster.
+assert url.startswith("http://127.0.0.1:8123/v0/blobs/"), f"unexpected download_url {url}"
+assert r["size"] > 0, "size is not positive"
+# Timestamps are wire-exact: RFC 3339, exactly three fractional digits, Z (CLAUDE.md).
+assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", r["expires_at"]), r["expires_at"]
+blob = url.split("/v0/blobs/", 1)[1].split("?", 1)[0]
+assert re.fullmatch(r"[0-9a-f]{64}", blob), f"blob id is not 64 lowercase hex: {blob}"
+print("RAW_URL=" + shlex.quote(url))
+print("RAW_BLOB=" + shlex.quote(blob))
+print("RAW_SIZE=" + shlex.quote(str(r["size"])))
+'); then eval "$VARS"; else bad "the raw response is not the documented shape"; fi
+fi
+
+if [ -n "${RAW_URL:-}" ]; then
+  ok "raw minted a signed URL over blob ${RAW_BLOB:0:12}… (${RAW_SIZE} bytes, expiring)"
+
+  # --- the positive: no credential, and the ORIGINAL bytes come back --------------------------
+  code=$(curl -sS -o "$WORK/raw.eml" -D "$WORK/raw.hdr" -w '%{http_code}' "$RAW_URL" 2>/dev/null)
+  if [ "$code" != 200 ]; then
+    bad "the signed URL answered $code without a credential"
+  else
+    ok "200 with no Authorization header -- the token is the authorisation"
+    # Keyed on the injected Message-ID, for the reason recorded above Gate 3: an assertion that
+    # does not identify WHICH object it got is not an assertion.
+    grep -qF "$INBOUND_MID" "$WORK/raw.eml" \
+      && ok "the bytes are the injected message, not some other row's raw" \
+      || bad "the served blob does not contain $INBOUND_MID"
+    served=$(wc -c <"$WORK/raw.eml" | tr -d ' ')
+    [ "$served" = "$RAW_SIZE" ] \
+      && ok "byte count matches the advertised size" \
+      || bad "served $served bytes, advertised $RAW_SIZE"
+    grep -qi '^content-type: *application/octet-stream' "$WORK/raw.hdr" \
+      && ok "served as application/octet-stream (a browser will not render it)" \
+      || bad "wrong content type: $(grep -i '^content-type' "$WORK/raw.hdr" | head -1)"
+    # The URL IS a bearer token. A shared proxy caching it would hand the message to the next
+    # caller who asks for the same path.
+    grep -qi '^cache-control: *private, *no-store' "$WORK/raw.hdr" \
+      && ok "Cache-Control: private, no-store" \
+      || bad "missing no-store: $(grep -i '^cache-control' "$WORK/raw.hdr" | head -1)"
+  fi
+
+  # --- content addressing, on disk ------------------------------------------------------------
+  # The id is not a name the server chose; it is the SHA-256 of the bytes. Recomputing it here is
+  # what makes "content-addressed" a checked property rather than a comment in the source.
+  sum=$(sha256sum "$WORK/raw.eml" 2>/dev/null | cut -d' ' -f1)
+  [ "$sum" = "$RAW_BLOB" ] \
+    && ok "blob id is the SHA-256 of the served bytes" \
+    || bad "blob id $RAW_BLOB is not the digest of what was served ($sum)"
+  shard="$BLOBS/${RAW_BLOB:0:2}/${RAW_BLOB:2:2}/$RAW_BLOB"
+  [ -f "$shard" ] \
+    && ok "on disk, sharded: ${RAW_BLOB:0:2}/${RAW_BLOB:2:2}/…" \
+    || bad "no object at $shard -- smtpd and the api role disagree about the blob root"
+
+fi
+
+# --- the stored raw is the SIGNED raw ----------------------------------------------------------
+# Gate 2 proved the bytes on the wire carry DKIM-Signature. This proves the bytes we KEPT are the
+# same ones -- if the raw were captured before signing, a recipient's complaint could never be
+# reconciled against what we can show we sent.
+if [ -n "${SEND:-}" ]; then
+  SENT_MID=$(printf '%s' "$SEND" | python3 -c 'import json,sys; print(json.load(sys.stdin)["message_id"])')
+  surl=$(api GET "/v0/inboxes/$(enc "$INBOX")/messages/$(enc "$SENT_MID")/raw" \
+         | python3 -c 'import json,sys; print(json.load(sys.stdin)["download_url"])' 2>/dev/null)
+  if [ -n "$surl" ] && curl -fsS "$surl" -o "$WORK/sent.eml" 2>/dev/null; then
+    grep -qi '^DKIM-Signature:' "$WORK/sent.eml" \
+      && ok "the retained raw of a sent message carries its DKIM-Signature" \
+      || bad "the stored raw is unsigned -- it was captured before signing"
+  else
+    bad "the raw of a message this binary sent is not retrievable"
+  fi
+fi
+
+
+if [ -n "${RAW_URL:-}" ]; then
+  # --- the negatives, each an independent way in ----------------------------------------------
+  deny() { # $1=label  $2=url
+    local c; c=$(curl -sS -o /dev/null -w '%{http_code}' "$2" 2>/dev/null)
+    [ "$c" = 403 ] && ok "$1 -> 403" || bad "$1 -> $c (must be an indistinguishable 403)"
+  }
+  TOKEN=${RAW_URL#*\?token=}
+  BASE=${RAW_URL%\?*}
+  # Flip the last character of the MAC. Every other byte of the request is untouched, so a pass
+  # here means the signature is not being checked at all.
+  last=${TOKEN: -1}; [ "$last" = "A" ] && flip=B || flip=A
+  deny "a token with one character changed" "${BASE}?token=${TOKEN%?}${flip}"
+  deny "no token at all"                    "${BASE}"
+  deny "an empty token"                     "${BASE}?token="
+  # The MAC covers the blob id, so a token minted for one object must not open another. Without
+  # that binding, one legitimate download URL is a key to the whole store.
+  other=$(printf 'not the same object' | sha256sum | cut -d' ' -f1)
+  deny "a valid token replayed against a different blob" \
+       "http://${HTTP}/v0/blobs/${other}?token=${TOKEN}"
+  # Path traversal cannot survive BlobId::parse, but the assertion belongs where an attacker would
+  # aim rather than only in the unit test for the parser.
+  deny "a traversal in the blob id" "http://${HTTP}/v0/blobs/..%2f..%2fetc%2fpasswd?token=${TOKEN}"
+
+  # The MINTING endpoint stays authenticated -- only the fetch is credential-free.
+  c=$(curl -sS -o /dev/null -w '%{http_code}' \
+        "http://${HTTP}/v0/inboxes/$(enc "$INBOX")/messages/${MID_ENC}/raw" 2>/dev/null)
+  case "$c" in
+    401|403) ok "minting a URL still requires a credential ($c)" ;;
+    *)       bad "GET .../raw answered $c with no credential -- anyone can mint download URLs" ;;
+  esac
+fi
+
+  # --- what those six refusals did to the bucket, and what they must NOT have done -------------
+  # Discovered here, not designed: the six refusals above each carry the 20x auth-failure
+  # surcharge, so by this line the anonymous bucket for 127.0.0.1 is in debt. That is correct --
+  # forging download tokens IS credential guessing and should get expensive. What was NOT correct
+  # is what happened next on the first run of this gate: `/health` answered 429, which in a
+  # cluster is a liveness failure and a pod restart. A burst of bad tokens must never be able to
+  # restart the API server.
+  c=$(curl -sS -o /dev/null -w '%{http_code}' "http://${HTTP}/v0/blobs/${RAW_BLOB}?token=" 2>/dev/null)
+  [ "$c" = 429 ] \
+    && ok "the anonymous bucket IS in debt after six refusals (429)" \
+    || ok "anonymous bucket not yet throttled ($c) -- the surcharge is bounded, not the point here"
+  for probe in /health /ready /metrics; do
+    c=$(curl -sS -o /dev/null -w '%{http_code}' "http://${HTTP}${probe}" 2>/dev/null)
+    [ "$c" = 200 ] \
+      && ok "$probe answers 200 while application traffic is throttled" \
+      || bad "$probe answered $c -- infrastructure probes share a bucket with application traffic"
+  done
+
+# --- and the honest degradation ----------------------------------------------------------------
+# Gate 6's TLS smtpd ran with NO blob root, which is a supported deployment. Its message must give
+# a 404 rather than a 500 or an empty 200: absent raw degrades to not-found, never to a lie.
+if [ -n "${TLS_INBOX:-}" ]; then
+  c=$(curl -sS -o /dev/null -w '%{http_code}' -K "$CURLRC" \
+        "http://${HTTP}/v0/inboxes/$(enc "$TLS_INBOX")/messages/$(enc '<smoke-tls-1@outside.test>')/raw" 2>/dev/null)
+  [ "$c" = 404 ] \
+    && ok "a message stored with no blob root gives 404 on /raw, not a broken link" \
+    || bad "/raw answered $c for a message that has no raw"
+fi
+
+# ---------------------------------------------------------------------------------------------
+step "GATE 8 -- /health and /ready diverge when the database dies"
 # LAST, and destructive: it drops this run's database, so nothing after it can use one. That
 # ordering is the bug this gate already caught once -- it used to sit inside Gate 4 and left the
 # smtpd in Gate 5 with no database to connect to.

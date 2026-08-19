@@ -22,6 +22,9 @@ pub const AMK_SMTP_MAX_CONNECTIONS: &str = "AMK_SMTP_MAX_CONNECTIONS";
 pub const AMK_SMTP_SESSION_TIMEOUT: &str = "AMK_SMTP_SESSION_TIMEOUT";
 pub const AMK_SMTP_TLS_CERT: &str = "AMK_SMTP_TLS_CERT";
 pub const AMK_SMTP_TLS_KEY: &str = "AMK_SMTP_TLS_KEY";
+pub const AMK_BLOB_ROOT: &str = "AMK_BLOB_ROOT";
+pub const AMK_MASTER_KEY: &str = "AMK_MASTER_KEY";
+pub const AMK_PUBLIC_BASE_URL: &str = "AMK_PUBLIC_BASE_URL";
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:8080";
 
@@ -64,6 +67,14 @@ pub fn app_config() -> AppConfig {
         // before binding. Reading it here and discarding the error would reintroduce exactly the
         // failure this variable exists to fix.
         smtp_smarthost: smtp_smarthost().ok().flatten(),
+        master_key: master_key().ok().flatten(),
+        // Only used to build absolute download URLs. Defaults to the bind address, which is right
+        // for a developer on localhost and wrong behind a proxy -- so a deployment that hands out
+        // URLs sets it, and one that never calls `.../raw` never notices.
+        public_base_url: env::var(AMK_PUBLIC_BASE_URL)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| format!("http://{}", bind_address())),
         // `max_body_bytes` is deliberately NOT read from the environment: it is a safety bound
         // this crate has no business widening per-deployment, and `amk_http::AppConfig`'s own
         // default carries the reasoning for its value. Spread rather than named so a future field
@@ -240,6 +251,67 @@ pub fn smtp_tls_acceptor() -> Result<Option<amk_ingest::tls::TlsAcceptorHandle>,
     }
 }
 
+/// `AMK_BLOB_ROOT`: where raw MIME and attachment bodies live.
+///
+/// `Ok(None)` when unset -- the pre-blob behaviour, where raw is parsed and discarded and
+/// `GET .../raw` is a 404. That degradation is honest and lets a deployment run without deciding
+/// where bytes go; inventing a default under /tmp would put mail somewhere a reboot clears.
+///
+/// When set, the directory must exist and be writable, checked HERE rather than on the first
+/// delivery -- a mail server that discovers at 3am that its blob root is unwritable has already
+/// dropped the raw form of everything it received since the last restart.
+pub fn blob_root() -> Result<Option<amk_store::blobs::FsBlobStore>, BadConfigValue> {
+    let Some(raw) = env::var(AMK_BLOB_ROOT)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw.trim());
+    let bad = |reason: String| BadConfigValue { name: AMK_BLOB_ROOT, reason };
+    let meta = std::fs::metadata(&path)
+        .map_err(|e| bad(format!("cannot stat {}: {e}", path.display())))?;
+    if !meta.is_dir() {
+        return Err(bad(format!("{} is not a directory", path.display())));
+    }
+    // Writability is proven by writing, not by inspecting mode bits -- mode bits are wrong under
+    // a read-only mount, an unwritable overlay, or a full disk, all of which are the real cases.
+    let probe = path.join(format!(".amk-write-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"")
+        .map_err(|e| bad(format!("{} is not writable: {e}", path.display())))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(Some(amk_store::blobs::FsBlobStore::new(path)))
+}
+
+/// `AMK_MASTER_KEY`: the secret behind signed download URLs.
+///
+/// Required whenever a blob root is configured -- a blob store with no way to hand anything out is
+/// half a feature, and the failure would surface as a 500 on the first download rather than at
+/// boot.
+///
+/// At least 32 bytes. HMAC accepts any length, which is exactly why this is checked here: an
+/// operator who sets `AMK_MASTER_KEY=secret` gets a signature anyone can forge, and nothing in the
+/// crypto would complain. `docs/PLAN.md`:212 makes secd/sdxd the source of truth; this only reads
+/// what it is given.
+pub fn master_key() -> Result<Option<Vec<u8>>, BadConfigValue> {
+    const MIN_BYTES: usize = 32;
+    let Some(raw) = env::var(AMK_MASTER_KEY)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    let key = raw.trim().as_bytes().to_vec();
+    if key.len() < MIN_BYTES {
+        return Err(BadConfigValue {
+            name: AMK_MASTER_KEY,
+            // The LENGTH, never the value: this string reaches logs and terminals.
+            reason: format!("is {} bytes; at least {MIN_BYTES} are required", key.len()),
+        });
+    }
+    Ok(Some(key))
+}
+
 /// Concurrent inbound SMTP sessions. Default 256.
 ///
 /// A cap, not a queue: at capacity the listener answers `421` and closes, so a sender defers and
@@ -311,6 +383,9 @@ pub fn var_presence() -> Vec<VarPresence> {
         AMK_SMTP_SESSION_TIMEOUT,
         AMK_SMTP_TLS_CERT,
         AMK_SMTP_TLS_KEY,
+        AMK_BLOB_ROOT,
+        AMK_MASTER_KEY,
+        AMK_PUBLIC_BASE_URL,
     ]
     .into_iter()
     .map(|name| VarPresence { name, set: env::var(name).is_ok() })

@@ -12,6 +12,7 @@ use amk_core::scope::{Mount, Resolved, Scope};
 use amk_core::threading::{
     InMemoryThreadIndex, ReferenceChainThreading, ThreadAssigner, ThreadAssignment, ThreadCandidate,
 };
+use amk_store::blobs::{BlobStore, FsBlobStore};
 use amk_store::messages::{self, NewMessage};
 use amk_store::threads::{self, NewThread, ThreadMember};
 use amk_store::StoreError;
@@ -58,6 +59,10 @@ pub struct AcceptRequest<'a> {
     pub envelope: Envelope,
     pub dest: Delivery,
     pub max_message_bytes: usize,
+    /// The blob the raw bytes were stored under, if they were. Passed IN rather than computed
+    /// here so `accept` stays a pure parse-and-persist step with one I/O dependency (the pool) --
+    /// its unit tests would otherwise all need a filesystem.
+    pub raw_blob_id: Option<String>,
 }
 
 /// SPF/DKIM via `mail-auth`, or a test stub. No `mail_auth::` type is public.
@@ -211,6 +216,10 @@ pub trait Persist: Send + Sync {
 pub struct StorePersist {
     pub pool: PgPool,
     pub auth: Authenticator,
+    /// Where the original bytes go. `None` keeps the pre-blob behaviour -- parse and discard --
+    /// so a deployment without a configured blob root still accepts mail rather than refusing it.
+    /// `GET .../raw` is then a 404, which is the honest answer.
+    pub blobs: Option<FsBlobStore>,
 }
 
 impl Persist for StorePersist {
@@ -221,6 +230,25 @@ impl Persist for StorePersist {
         dest: &Delivery,
         max_message_bytes: usize,
     ) -> Result<Option<Accepted>, IngestError> {
+        // The raw bytes go to the blob store BEFORE the row is written, so a row can never point
+        // at an object that does not exist. The other order fails in the worse direction: a
+        // `raw_blob_id` referring to nothing is a 404 on a message the API otherwise serves
+        // happily, which reads as data loss rather than as a missing feature.
+        //
+        // A blob-store failure is NOT fatal to the delivery. The message itself is fine; refusing
+        // it would turn "the disk is full" into "we reject your mail", and an MTA that bounces on
+        // a local storage problem loses mail that a 4xx would have had redelivered. Logged loudly,
+        // stored without its raw.
+        let raw_blob_id = match &self.blobs {
+            None => None,
+            Some(store) => match store.put(raw).await {
+                Ok(id) => Some(id.to_string()),
+                Err(e) => {
+                    tracing::error!(error = %e, "could not store raw MIME; accepting without it");
+                    None
+                }
+            },
+        };
         accept(
             &self.pool,
             &self.auth,
@@ -229,6 +257,7 @@ impl Persist for StorePersist {
                 envelope: envelope.clone(),
                 dest: dest.clone(),
                 max_message_bytes,
+                raw_blob_id,
             },
         )
         .await
@@ -407,6 +436,7 @@ pub async fn accept(
             html,
             extracted_text,
             extracted_html,
+            raw_blob_id: req.raw_blob_id.clone(),
         },
     )
     .await;

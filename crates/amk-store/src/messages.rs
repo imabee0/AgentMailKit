@@ -50,6 +50,57 @@ pub struct NewMessage {
     pub html: Option<String>,
     pub extracted_text: Option<String>,
     pub extracted_html: Option<String>,
+    /// The original RFC 5322 bytes, as a blob id. `None` when no raw was captured -- a composed
+    /// draft, or a message stored before blobs existed. `GET .../raw` is a 404 for those, which is
+    /// the honest answer; inventing a value would be a lie the endpoint then has to serve.
+    pub raw_blob_id: Option<String>,
+}
+
+/// The blob id and byte size of a message's raw form, scoped exactly like [`get`].
+///
+/// A separate query rather than a field on [`Message`], because `raw_blob_id` is OURS -- the
+/// reference exposes no such field, and putting it on the wire type would be an invented shape
+/// that the conformance diff would (correctly) flag.
+///
+/// The scope filter and the excluded-label predicate are applied in SQL, identically to `get`.
+/// That is not defensive duplication: a raw-fetch path that resolved the message with a laxer
+/// query than the read path would hand out the bytes of messages the caller cannot see, which is
+/// strictly worse than exposing the metadata.
+///
+/// `Ok(None)` covers three cases the caller must not distinguish for the client -- no such
+/// message, out of scope, or a message with no raw captured -- because telling them apart is an
+/// existence oracle on an id that is guessable (it is an RFC 5322 Message-ID).
+pub async fn raw_blob(
+    pool: &PgPool,
+    filter: &ScopeFilter,
+    inbox_id: &InboxId,
+    message_id: &MessageId,
+    excluded: &[String],
+) -> Result<Option<(String, u64)>, StoreError> {
+    let row: Option<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT raw_blob_id, size FROM messages \
+         WHERE organization_id = $1 \
+           AND ($2::uuid IS NULL OR pod_id = $2) \
+           AND ($3::text IS NULL OR inbox_id = $3) \
+           AND inbox_id = $4 AND message_id = $5 \
+           AND NOT (labels && $6)",
+    )
+    .bind(filter.organization_id().as_str())
+    .bind(filter.pod_id().map(|p| p.0))
+    .bind(filter.inbox_id().map(|i| i.as_str()))
+    .bind(inbox_id.as_str())
+    .bind(message_id.as_str())
+    .bind(excluded)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(match row {
+        Some((Some(blob), size)) => Some((blob, size.max(0) as u64)),
+        // The message exists but has no raw -- stored before blobs, or composed rather than
+        // received. Same answer as "no such message": there is nothing to serve.
+        Some((None, _)) => None,
+        None => None,
+    })
 }
 
 pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
@@ -97,10 +148,10 @@ pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
             inbox_id, message_id, organization_id, pod_id, thread_id, labels, \"timestamp\", \
             from_address, to_addresses, cc_addresses, bcc_addresses, subject, preview, \
             attachments, in_reply_to, message_references, headers, smtp_id, size, reply_to, \
-            text, html, extracted_text, extracted_html \
+            text, html, extracted_text, extracted_html, raw_blob_id \
          ) VALUES ( \
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
-            $19, $20, $21, $22, $23, $24 \
+            $19, $20, $21, $22, $23, $24, $25 \
          )",
     )
     .bind(inbox_id.as_str())
@@ -127,6 +178,7 @@ pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
     .bind(&msg.html)
     .bind(&msg.extracted_text)
     .bind(&msg.extracted_html)
+    .bind(&msg.raw_blob_id)
     .execute(pool)
     .await?;
     Ok(())

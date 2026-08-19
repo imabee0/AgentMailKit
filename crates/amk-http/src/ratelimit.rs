@@ -59,6 +59,20 @@ const MAX_BUCKETS: usize = 50_000;
 pub enum Subject {
     Key(String),
     Ip(IpAddr),
+    /// A kubelet or a Prometheus scraper, kept in its OWN bucket namespace.
+    ///
+    /// `scripts/binary-smoke.sh` found why this variant has to exist. Five deliberately-forged
+    /// download tokens -- 403s, each charged the 20x surcharge -- drained the anonymous bucket for
+    /// 127.0.0.1, and the next `/health` request answered **429**. A 429 on a liveness probe is a
+    /// pod restart, so any burst of bad credentials from an address the kubelet happens to share
+    /// would have restarted the pod. The dependency ran the wrong way round: infrastructure
+    /// liveness must not be a function of application auth failures.
+    ///
+    /// Separate rather than exempt, for `/ready` and `/metrics`: both do real work (`/ready`
+    /// queries the pool) and an entirely unlimited unauthenticated endpoint is a pool-starvation
+    /// primitive. `/health` touches nothing at all and skips the limiter entirely -- there is no
+    /// resource to protect and it is the one whose refusal costs a restart.
+    Probe(IpAddr),
 }
 
 impl Subject {
@@ -341,6 +355,28 @@ mod tests {
             rl.check_at(&ip(1), 1.0, t + Duration::from_secs(21)),
             "debt was not floored: recovery took longer than capacity/refill"
         );
+    }
+
+    #[test]
+    fn a_probe_and_an_ordinary_caller_at_the_same_address_are_different_buckets() {
+        // The whole point of the `Probe` variant. If these two hashed alike, draining one would
+        // drain the other -- which is precisely the defect binary-smoke.sh caught, where forged
+        // download tokens from 127.0.0.1 made `/health` answer 429.
+        let l = RateLimiter::new(10.0, 0.0);
+        let addr: IpAddr = "127.0.0.1".parse().unwrap();
+        for _ in 0..10 {
+            assert!(l.check(&Subject::Ip(addr), 1.0));
+        }
+        assert!(!l.check(&Subject::Ip(addr), 1.0), "the anonymous bucket is not exhausted");
+        assert!(
+            l.check(&Subject::Probe(addr), 1.0),
+            "the probe bucket was drained by the anonymous one at the same address"
+        );
+        // And the reverse, so neither direction can leak into the other.
+        for _ in 0..9 {
+            assert!(l.check(&Subject::Probe(addr), 1.0));
+        }
+        assert!(!l.check(&Subject::Probe(addr), 1.0), "the probe bucket is not charged at all");
     }
 
     #[test]

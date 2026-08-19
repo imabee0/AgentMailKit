@@ -95,6 +95,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "tracing",
  "uuid",
 ]
 

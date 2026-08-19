@@ -80,11 +80,34 @@ async fn main() {
             std::process::exit(exit::FAILURE);
         }
     };
+    let blobs = match config::blob_root() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(exit::FAILURE);
+        }
+    };
+    // A blob store with no way to hand anything out is half a feature, and the failure would
+    // surface as a 500 on the first download rather than here.
+    match config::master_key() {
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(exit::FAILURE);
+        }
+        Ok(None) if blobs.is_some() => {
+            eprintln!(
+                "AMK_BLOB_ROOT is set but AMK_MASTER_KEY is not; signed download URLs cannot be \
+                 minted without it."
+            );
+            std::process::exit(exit::FAILURE);
+        }
+        Ok(_) => {}
+    }
     let app_config = config::app_config();
 
     let result = match role {
-        AmkdRole::Api => server::serve_api(&url, &bind, app_config, keyring).await,
-        AmkdRole::Smtpd => server::serve_smtpd(&url, &bind, app_config, smtp_tls).await,
+        AmkdRole::Api => server::serve_api(&url, &bind, app_config, keyring, blobs).await,
+        AmkdRole::Smtpd => server::serve_smtpd(&url, &bind, app_config, smtp_tls, blobs).await,
         AmkdRole::Worker | AmkdRole::All => {
             unreachable!("not_yet_implemented already rejected worker/all")
         }
