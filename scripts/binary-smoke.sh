@@ -616,6 +616,8 @@ if [ -n "${SEND:-}" ]; then
     grep -qi '^DKIM-Signature:' "$WORK/sent.eml" \
       && ok "the retained raw of a sent message carries its DKIM-Signature" \
       || bad "the stored raw is unsigned -- it was captured before signing"
+    # Kept for the replay negative below: a SECOND blob that genuinely exists on disk.
+    OTHER_BLOB=${surl#*/v0/blobs/}; OTHER_BLOB=${OTHER_BLOB%%\?*}
   else
     bad "the raw of a message this binary sent is not retrievable"
   fi
@@ -623,9 +625,28 @@ fi
 
 
 if [ -n "${RAW_URL:-}" ]; then
+  # The MINTING endpoint stays authenticated -- only the fetch is credential-free. Asserted HERE,
+  # before the refusals below: each of those is charged the auth-failure surcharge, and once the
+  # anonymous bucket is in debt this answers 429 -- still a refusal, but not the one under test.
+  c=$(curl -sS -o /dev/null -w '%{http_code}' \
+        "http://${HTTP}/v0/inboxes/$(enc "$INBOX")/messages/${MID_ENC}/raw" 2>/dev/null)
+  case "$c" in
+    401|403) ok "minting a URL still requires a credential ($c)" ;;
+    *)       bad "GET .../raw answered $c with no credential -- anyone can mint download URLs" ;;
+  esac
+
   # --- the negatives, each an independent way in ----------------------------------------------
+  # Each refusal below is a 403 and therefore carries the 20x auth-failure surcharge, and five of
+  # them exhaust the anonymous bucket for this address -- so the sixth would read 429 and tell us
+  # nothing about the sixth way in. Giving each probe its own Bearer puts it on its own bucket.
+  # The header is IGNORED by this endpoint (the query-string token is the entire authorisation),
+  # so the code path under test is identical; only which bucket pays for it differs. The
+  # anonymous path gets its own assertion immediately after.
+  DENY_N=0
   deny() { # $1=label  $2=url
-    local c; c=$(curl -sS -o /dev/null -w '%{http_code}' "$2" 2>/dev/null)
+    DENY_N=$((DENY_N + 1))
+    local c; c=$(curl -sS -o /dev/null -w '%{http_code}' \
+                   -H "authorization: Bearer smoke-bucket-$DENY_N" "$2" 2>/dev/null)
     [ "$c" = 403 ] && ok "$1 -> 403" || bad "$1 -> $c (must be an indistinguishable 403)"
   }
   TOKEN=${RAW_URL#*\?token=}
@@ -638,20 +659,22 @@ if [ -n "${RAW_URL:-}" ]; then
   deny "an empty token"                     "${BASE}?token="
   # The MAC covers the blob id, so a token minted for one object must not open another. Without
   # that binding, one legitimate download URL is a key to the whole store.
-  other=$(printf 'not the same object' | sha256sum | cut -d' ' -f1)
-  deny "a valid token replayed against a different blob" \
-       "http://${HTTP}/v0/blobs/${other}?token=${TOKEN}"
+  # The replay target must be a blob that REALLY EXISTS. Falsifying this gate against a build
+  # with `download::verify` stubbed out showed why: pointed at an invented id, this assertion
+  # still passed -- on the 403 the missing object produces, not on the signature. An assertion
+  # that passes for the wrong reason is the same false green the Gate 3 note records.
+  if [ -n "${OTHER_BLOB:-}" ] && [ "$OTHER_BLOB" != "$RAW_BLOB" ]; then
+    deny "a valid token replayed against a different blob that exists" \
+         "http://${HTTP}/v0/blobs/${OTHER_BLOB}?token=${TOKEN}"
+  else
+    bad "no second blob to replay against -- the binding assertion did not run"
+  fi
+  deny "a token for a blob that does not exist" \
+       "http://${HTTP}/v0/blobs/$(printf 'absent' | sha256sum | cut -d' ' -f1)?token=${TOKEN}"
   # Path traversal cannot survive BlobId::parse, but the assertion belongs where an attacker would
   # aim rather than only in the unit test for the parser.
   deny "a traversal in the blob id" "http://${HTTP}/v0/blobs/..%2f..%2fetc%2fpasswd?token=${TOKEN}"
 
-  # The MINTING endpoint stays authenticated -- only the fetch is credential-free.
-  c=$(curl -sS -o /dev/null -w '%{http_code}' \
-        "http://${HTTP}/v0/inboxes/$(enc "$INBOX")/messages/${MID_ENC}/raw" 2>/dev/null)
-  case "$c" in
-    401|403) ok "minting a URL still requires a credential ($c)" ;;
-    *)       bad "GET .../raw answered $c with no credential -- anyone can mint download URLs" ;;
-  esac
 fi
 
   # --- what those six refusals did to the bucket, and what they must NOT have done -------------
@@ -661,10 +684,15 @@ fi
   # is what happened next on the first run of this gate: `/health` answered 429, which in a
   # cluster is a liveness failure and a pod restart. A burst of bad tokens must never be able to
   # restart the API server.
-  c=$(curl -sS -o /dev/null -w '%{http_code}' "http://${HTTP}/v0/blobs/${RAW_BLOB}?token=" 2>/dev/null)
-  [ "$c" = 429 ] \
-    && ok "the anonymous bucket IS in debt after six refusals (429)" \
-    || ok "anonymous bucket not yet throttled ($c) -- the surcharge is bounded, not the point here"
+  throttled_at=""
+  for n in $(seq 1 12); do
+    c=$(curl -sS -o /dev/null -w '%{http_code}' "http://${HTTP}/v0/blobs/${RAW_BLOB}?token=" 2>/dev/null)
+    if [ "$c" = 429 ]; then throttled_at=$n; break; fi
+    [ "$c" = 403 ] || bad "an anonymous forged token answered $c, expected 403 or 429"
+  done
+  [ -n "$throttled_at" ] \
+    && ok "forging tokens anonymously throttles the caller (429 at attempt $throttled_at)" \
+    || bad "12 forged tokens from one address were never throttled -- guessing is free"
   for probe in /health /ready /metrics; do
     c=$(curl -sS -o /dev/null -w '%{http_code}' "http://${HTTP}${probe}" 2>/dev/null)
     [ "$c" = 200 ] \
