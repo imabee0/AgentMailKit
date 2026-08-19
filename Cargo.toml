@@ -27,6 +27,17 @@ publish = false
 # Pins verified in P-1 item 15 (reference/fixtures/15-compile-spike.txt): every
 # version below resolves AND the APIs we rely on compile. Do not bump without
 # re-running that spike.
+[profile.release]
+# Symbols stripped by CARGO, not by a `strip` invocation in the Dockerfile.
+#
+# Two reasons, and the second is the one that matters. (1) `rust:*-slim` is not guaranteed to ship
+# binutils, so calling `strip` there is a bet on the base image's package list. (2) The Dockerfile
+# used to strip while `ci.yml`'s build-bins job did not -- so the binaries CI uploaded as its
+# artifact and the binaries inside the image were DIFFERENT BYTES for the same commit, which
+# quietly undermines the build-once story those two jobs exist to tell. Declaring it here makes
+# every release build identical, wherever it runs.
+strip = "symbols"
+
 [workspace.dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

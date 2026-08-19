@@ -207,6 +207,22 @@ check ci-workflows-present yes \
     [ -f .github/actions/setup-rust/action.yml ] || exit 1
     grep -q "^  ci-ok:" .github/workflows/ci.yml'
 
+# Has the container image ever actually been BUILT?
+#
+# Not due yet, and PENDING is the honest state: as of 2026-08-19 it has not, because this
+# environment's egress policy blocks Docker Hub's blob CDN
+# (production.cloudfront.docker.com:443), so no base image can be pulled and no build can start.
+# Recorded in reference/fixtures/39-image-build.txt with what WAS verified without a pull.
+#
+# This exists so "the image has never been built" is a tracked obligation rather than a caveat in
+# a report somebody stops re-reading. It flips to MET when a fixture records a real build --
+# ci.yml's docker job is the first place that can happen.
+check ci-image-built no "container image built at least once, with the evidence captured" \
+  bash -c '
+    f=reference/fixtures/39-image-build.txt
+    [ -f "$f" ] || exit 1
+    grep -q "^VERDICT: built" "$f"'
+
 # Python dependencies hash-pinned AND the hashes actually enforced.
 #
 # Before 2026-08-19 only the TOP-LEVEL package was version-pinned: `schemathesis==4.24.3` with its
@@ -325,6 +341,7 @@ DEFERRALS=$(cat <<'EOF'
 25-p1-gate-conformance.txt|P1 gate diff, asserted by the conformance run
 26-p1-gate-sdk-smoke.txt|P1 gate SDK smoke, asserted by plan-ledger
 28-p2-lane-l.txt|P2 Lane L transcript, asserted by plan-ledger
+39-image-build.txt|image build evidence, asserted by plan-ledger
 C1-domain-shape.txt|amk-types domain shapes, P5
 EOF
 )

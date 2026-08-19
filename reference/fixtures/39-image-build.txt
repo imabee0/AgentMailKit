@@ -1,0 +1,84 @@
+Fixture 39 — Docker image build attempt, 2026-08-19
+
+VERDICT: the image was NOT BUILT. Blocked by egress policy, not by the Dockerfile.
+Everything verifiable without a registry pull WAS verified, and is recorded below.
+
+WHY THIS FIXTURE EXISTS
+An earlier report claimed "no Docker daemon in this sandbox". That was wrong, and the correction
+is the point of this file: `dockerd` and `containerd` are both installed at /usr/bin, and the
+daemon starts in about two seconds. The original conclusion came from running `docker info`,
+seeing "cannot connect to the daemon", and stopping — never asking whether a daemon could be
+started. A gate reported as unavailable for the wrong reason is worse than one reported as
+unavailable, because the stated reason is what somebody later tries to fix.
+
+== daemon: STARTS ==
+$ dockerd &   # then docker info
+ Server Version: 29.3.1
+ Storage Driver: overlayfs
+ Cgroup Driver: cgroupfs   Cgroup Version: 1
+ CPUs: 4   Total Memory: 15.7GiB
+daemon up after 2s
+
+== build: BLOCKED, and by what exactly ==
+$ docker pull debian:bookworm-slim
+bookworm-slim: Pulling from library/debian
+039e6f9f9752: Pulling fs layer
+failed to copy: httpReadSeeker: failed open: ... Forbidden
+
+$ curl -sS "$HTTPS_PROXY/__agentproxy/status"
+  "recentRelayFailures": [{ "kind": "connect_rejected",
+    "detail": "gateway answered 403 to CONNECT (policy denial or upstream failure)",
+    "host": "production.cloudfront.docker.com:443" }]
+
+BLOCKED HOST: production.cloudfront.docker.com:443 — Docker Hub's blob CDN.
+Manifests resolve (registry-1.docker.io is reachable; the pull reached "Pulling fs layer") but no
+layer blob can be fetched, so NO base image can be pulled and no image can be built here at all.
+
+/root/.ccr/README.md: "403 / 407 from the proxy — The destination host is not allowed by your
+organization's egress policy for this session. Do not retry or route around it — report the
+blocked host." Reported here. Base images were NOT swapped to a reachable registry to work around
+it: that would be routing around a deliberate denial, and would change a production base image to
+suit a sandbox.
+
+== what WAS verified, with no pull ==
+
+1. GRAMMAR. BuildKit's built-in frontend parsed all 6.15 kB and reached base-image resolution with
+   no syntax error, which exercises `--mount=type=cache`, `COPY --chmod` and `ARG` in `FROM`:
+     #1 [internal] load build definition from Dockerfile
+     #1 transferring dockerfile: 6.15kB done
+     #1 DONE 0.0s
+   Failure came at #2, load metadata — i.e. after the file was accepted.
+
+2. debian:bookworm-slim metadata DID resolve (#3 DONE 1.1s); only rust:*-slim's config blob 403'd.
+   Both digests recorded in the Dockerfile were resolved live from registry-1.docker.io, so they
+   are real, not invented.
+
+3. hadolint 2.12.0: CLEAN, at failure-threshold=warning.
+   Four findings were raised and each was addressed rather than silenced:
+     DL3006 x2 — false positive; the tag AND digest live in an ARG hadolint does not resolve.
+     DL3008 x2 — REAL, and now a stated residual in the file: Debian stable carries one version
+                 per package per suite, so `pkg=version` breaks the build the moment a security
+                 update lands. The apt layer is NOT bit-reproducible across time. Fixing it
+                 properly means snapshot.debian.org.
+   Falsified: appending `FROM ubuntu` + an unpinned apt-get still trips DL3006/DL3008, so the
+   ignores are scoped to their instruction and are not a global mute.
+
+== two real defects found by attempting this ==
+
+A. `cargo install cargo-chef --version 0.1.68` — the version exists (checked against
+   index.crates.io: 80 versions, 0.1.68 present) but is stale; latest is 0.1.78. Bumped.
+
+B. STRIP MISMATCH, the one that mattered. The Dockerfile ran `strip` on its binaries and
+   ci.yml's build-bins job did not — so for the same commit, the artifact CI uploads and the
+   binary inside the image were DIFFERENT BYTES, quietly undermining the build-once story those
+   two jobs exist to tell. Moved to `[profile.release] strip = "symbols"` in Cargo.toml, so every
+   release build is identical wherever it runs, and no base image needs to ship binutils.
+     $ file target/release/amkd
+     ELF 64-bit LSB pie executable, ..., stripped
+
+== still NOT RUN, and not claimed otherwise ==
+The image has never been built or run. Unverified: that the cargo-chef layer split actually caches
+(touch a source file, dependency layer must be CACHED; touch Cargo.lock, it must invalidate), that
+it runs as uid 10001, that amkd fails closed without AMK_DATABASE_URL from inside the container,
+and the final image size. ci.yml's `docker` job is the first real build; `dockerfile-lint` runs
+on PRs, where the docker job does not.

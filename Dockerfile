@@ -1,6 +1,11 @@
-# syntax=docker/dockerfile:1.7
-#
 # AgentMailKit runtime image.
+#
+# NO `# syntax=` directive, deliberately. It pulls an external frontend image over the network at
+# every build, and a bare tag (`docker/dockerfile:1.7`) is mutable -- which this file's own rule
+# forbids two lines below, where both bases are pinned by digest. Pinning the frontend by digest
+# too would be consistent, but nothing here needs it: Docker's BUILT-IN frontend has supported
+# every feature used below (`--mount=type=cache`, `COPY --chmod`, `ARG` in `FROM`) since 24.x, and
+# the project targets Docker 29. One fewer network dependency, one fewer mutable reference.
 #
 # Two properties this file exists to hold, both of which are easy to lose silently:
 #
@@ -35,15 +40,26 @@ ARG RUST_IMAGE=rust:1.94.1-slim-bookworm@sha256:cf9dd0ec73e75f827fe59123fff9dc65
 ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
 # ---------------------------------------------------------------------------- chef
+# DL3006 wants an explicit tag. There is one, and a digest besides -- both live in RUST_IMAGE
+# above, and hadolint does not resolve ARG defaults. Suppressed with the reason rather than
+# silenced globally, so a genuinely untagged FROM added later still trips it.
+# hadolint ignore=DL3006
 FROM ${RUST_IMAGE} AS chef
 WORKDIR /build
 # `ring` and `aws-lc-sys` compile C, and sqlx/mail-send need a linker. `--no-install-recommends`
 # keeps this layer from dragging in a toolchain we do not use.
+# DL3008 wants `pkg=version`. Deliberately not done, and this is a STATED RESIDUAL rather than an
+# oversight: Debian stable carries exactly one version of each package per suite, so a pin breaks
+# the build the moment a security update lands -- turning a reproducibility measure into an
+# availability outage. The base image digest fixes the starting filesystem; `apt-get update` then
+# takes current packages, so THIS LAYER IS NOT BIT-REPRODUCIBLE ACROSS TIME. Closing that properly
+# means building against snapshot.debian.org, which is the right fix and is not this change.
+# hadolint ignore=DL3008
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
       pkg-config libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked --version 0.1.68
+RUN cargo install cargo-chef --locked --version 0.1.78
 
 # ---------------------------------------------------------------------------- planner
 # Produces a recipe describing ONLY the dependency graph. Source changes do not alter it, which is
@@ -66,13 +82,18 @@ COPY . .
 # rust-toolchain.toml is COPYed with the source above, so this build uses the same pinned compiler
 # as CI and as a developer's machine. A toolchain named here instead would be a second record of
 # that fact, free to drift from the file.
-RUN cargo build --release -p amk-cli --bins \
- && strip target/release/amk target/release/amkd
+# No `strip` here: `[profile.release] strip = "symbols"` in Cargo.toml does it, so the binary in
+# this image is byte-identical to the one ci.yml's build-bins job uploads. Stripping in one place
+# and not the other is how those two artifacts silently diverged.
+RUN cargo build --release -p amk-cli --bins
 
 # ---------------------------------------------------------------------------- runtime
+# hadolint ignore=DL3006
 FROM ${RUNTIME_IMAGE} AS runtime
 # ca-certificates is not optional: outbound SMTP does STARTTLS to every MX, and DKIM verification
 # resolves over TLS. Without it every send fails at handshake.
+# Same residual as the builder stage; see the note there.
+# hadolint ignore=DL3008
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
