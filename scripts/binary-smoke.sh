@@ -46,6 +46,20 @@ find_psql() {
              | sort -Vr); do
     [ -x "$d/psql" ] && { echo "$d/psql"; return 0; }
   done
+  # This workstation publishes Postgres as docker `amk-dev-postgres` and has no host client.
+  # `--network host` keeps the same 127.0.0.1:55432 DSN the rest of the gate uses.
+  if command -v docker >/dev/null 2>&1 \
+     && docker image inspect postgres:17-alpine >/dev/null 2>&1; then
+    local w
+    w=$(mktemp "${TMPDIR:-/tmp}/amk-psql.XXXXXX")
+    cat >"$w" <<'WRAP'
+#!/bin/bash
+exec docker run --rm --network host --entrypoint psql postgres:17-alpine "$@"
+WRAP
+    chmod +x "$w"
+    echo "$w"
+    return 0
+  fi
   return 1
 }
 
@@ -65,6 +79,7 @@ cleanup() {
   "$PSQL" "$MAINT" -qc "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
   # The work directory holds a private key. Removing it is part of the test, not tidiness.
   rm -rf "$WORK"
+  case "$PSQL" in "${TMPDIR:-/tmp}/amk-psql."*) rm -f "$PSQL" ;; esac
   echo "teardown: processes stopped, database dropped, key material removed from $WORK"
 }
 trap cleanup EXIT
@@ -733,10 +748,17 @@ assert r["size"] == 25, ("size is not the DECODED length (25)", r["size"])
 print(r["download_url"])
 ') || { bad "the attachment response is not the documented shape"; AURL=""; }
     if [ -n "$AURL" ]; then
-      got=$(curl -fsS "$AURL" 2>/dev/null)
-      [ "$got" = "%PDF-1.4 smoke attachment" ] \
-        && ok "the download returns the DECODED attachment body, credential-free" \
-        || bad "downloaded body is wrong: '$got'"
+      # The anonymous IP bucket is already in debt from the forged-token loop above.
+      # A bare GET would 429 and this assertion would read as "empty body". The blob
+      # endpoint still authorises on the query token; the Bearer only picks a fresh bucket.
+      acode=$(curl -sS -o "$WORK/att.bin" -w '%{http_code}' \
+                -H "authorization: Bearer smoke-bucket-att-dl" "$AURL" 2>/dev/null)
+      got=$(cat "$WORK/att.bin" 2>/dev/null || true)
+      if [ "$acode" = 200 ] && [ "$got" = "%PDF-1.4 smoke attachment" ]; then
+        ok "the download returns the DECODED attachment body, credential-free"
+      else
+        bad "downloaded body is wrong: http $acode '$got'"
+      fi
     fi
     # And the miss: an invented id on the same message is the flat 404.
     c=$(curl -sS -o /dev/null -w '%{http_code}' -K "$CURLRC" \

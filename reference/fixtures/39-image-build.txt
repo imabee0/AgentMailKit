@@ -1,84 +1,95 @@
-Fixture 39 — Docker image build attempt, 2026-08-19
+Fixture 39 — Docker image build, 2026-08-19, workstation
 
-VERDICT: the image was NOT BUILT. Blocked by egress policy, not by the Dockerfile.
-Everything verifiable without a registry pull WAS verified, and is recorded below.
+VERDICT: built
 
 WHY THIS FIXTURE EXISTS
-An earlier report claimed "no Docker daemon in this sandbox". That was wrong, and the correction
-is the point of this file: `dockerd` and `containerd` are both installed at /usr/bin, and the
-daemon starts in about two seconds. The original conclusion came from running `docker info`,
-seeing "cannot connect to the daemon", and stopping — never asking whether a daemon could be
-started. A gate reported as unavailable for the wrong reason is worse than one reported as
-unavailable, because the stated reason is what somebody later tries to fix.
+The previous revision recorded VERDICT: the image was NOT BUILT, blocked by Claude sandbox
+egress (production.cloudfront.docker.com:443). That was true in the sandbox and is not
+true here. `scripts/plan-ledger.sh`'s `ci-image-built` check greps this file for
+`^VERDICT: built`.
 
-== daemon: STARTS ==
-$ dockerd &   # then docker info
- Server Version: 29.3.1
- Storage Driver: overlayfs
- Cgroup Driver: cgroupfs   Cgroup Version: 1
- CPUs: 4   Total Memory: 15.7GiB
-daemon up after 2s
+== environment ==
+$ docker version
+ Client 29.6.2   Server 29.6.2   Storage Driver: overlayfs
+$ df -h /
+ /dev/mapper/cryptroot  464G  306G  133G
+$ rustc --version
+ rustc 1.94.1 (e408947bf 2026-03-25)
 
-== build: BLOCKED, and by what exactly ==
-$ docker pull debian:bookworm-slim
-bookworm-slim: Pulling from library/debian
-039e6f9f9752: Pulling fs layer
-failed to copy: httpReadSeeker: failed open: ... Forbidden
+== what was fixed BEFORE the first build, so the pipe was not sent broken ==
 
-$ curl -sS "$HTTPS_PROXY/__agentproxy/status"
-  "recentRelayFailures": [{ "kind": "connect_rejected",
-    "detail": "gateway answered 403 to CONNECT (policy denial or upstream failure)",
-    "host": "production.cloudfront.docker.com:443" }]
+1. Base images pulled by digest first (not during `cargo build`):
+   rust:1.94.1-slim-bookworm@sha256:cf9dd0ec73e75f827fe59123fff9dc65af1a1c8363c3c31ee8d7f8ad0b6a5fb2
+   debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+   cargo-chef 0.1.78 present on crates.io (cksum ada79886…e2ef76fc).
 
-BLOCKED HOST: production.cloudfront.docker.com:443 — Docker Hub's blob CDN.
-Manifests resolve (registry-1.docker.io is reachable; the pull reached "Pulling fs layer") but no
-layer blob can be fetched, so NO base image can be pulled and no image can be built here at all.
+2. No `.dockerignore`. Context was 8.9G (`target/` + venvs). Added `.dockerignore` so
+   `COPY . .` is 3.31MB, not a 9G transfer that also invalidates chef on every local compile.
 
-/root/.ccr/README.md: "403 / 407 from the proxy — The destination host is not allowed by your
-organization's egress policy for this session. Do not retry or route around it — report the
-blocked host." Reported here. Base images were NOT swapped to a reachable registry to work around
-it: that would be routing around a deliberate denial, and would change a production base image to
-suit a sandbox.
+3. `DOCKER_BUILDKIT=1 docker build` failed immediately: "BuildKit is enabled but the buildx
+   component is missing". Engine 29 has BuildKit; the CLI plugin was absent
+   (`/usr/lib/docker/cli-plugins` had only docker-compose). Installed user-local
+   `~/.docker/cli-plugins/docker-buildx` v0.36.1. Did not retry the same command until that
+   existed. Did not disable BuildKit: the Dockerfile uses `--mount=type=cache`.
 
-== what WAS verified, with no pull ==
+== build ==
+$ SOURCE_DATE_EPOCH=1787172494 docker build --progress=plain -t amk:local-validate .
+ start=2026-08-19T22:32:38Z  elapsed_sec=100  end=2026-08-19T22:34:18Z
+ context transferred: 3.31MB
+ chef cook: compiled the 308-dep graph (~40s)
+ cargo build --release -p amk-cli --bins: 14.54s (workspace only)
+ id=sha256:9afadd312bbdf556865145316d15d692d1ad280c84d1c5891429ced25594c076
+ size_bytes=41564593
+ created=2026-08-19T20:48:14Z   # SOURCE_DATE_EPOCH from commit, not the clock
 
-1. GRAMMAR. BuildKit's built-in frontend parsed all 6.15 kB and reached base-image resolution with
-   no syntax error, which exercises `--mount=type=cache`, `COPY --chmod` and `ARG` in `FROM`:
-     #1 [internal] load build definition from Dockerfile
-     #1 transferring dockerfile: 6.15kB done
-     #1 DONE 0.0s
-   Failure came at #2, load metadata — i.e. after the file was accepted.
+== properties, each a command ==
+$ docker run --rm --entrypoint id amk:local-validate
+ uid=10001(amk) gid=10001(amk) groups=10001(amk)
 
-2. debian:bookworm-slim metadata DID resolve (#3 DONE 1.1s); only rust:*-slim's config blob 403'd.
-   Both digests recorded in the Dockerfile were resolved live from registry-1.docker.io, so they
-   are real, not invented.
+$ docker run --rm amk:local-validate --role api
+ AMK_DATABASE_URL is not set. This must be the Postgres connection string to use for this
+ deployment; there is no default, so a missing value never silently falls back to a
+ development database.
+ exit=1
 
-3. hadolint 2.12.0: CLEAN, at failure-threshold=warning.
-   Four findings were raised and each was addressed rather than silenced:
-     DL3006 x2 — false positive; the tag AND digest live in an ARG hadolint does not resolve.
-     DL3008 x2 — REAL, and now a stated residual in the file: Debian stable carries one version
-                 per package per suite, so `pkg=version` breaks the build the moment a security
-                 update lands. The apt layer is NOT bit-reproducible across time. Fixing it
-                 properly means snapshot.debian.org.
-   Falsified: appending `FROM ubuntu` + an unpinned apt-get still trips DL3006/DL3008, so the
-   ignores are scoped to their instruction and are not a global mute.
+$ docker run --rm --entrypoint amk amk:local-validate --help
+ COMMANDS: init, migrate, doctor
 
-== two real defects found by attempting this ==
+$ docker run --rm --entrypoint amkd amk:local-validate --help
+ ROLES: api, smtpd, worker (not implemented — amk-jobs), all (not implemented)
 
-A. `cargo install cargo-chef --version 0.1.68` — the version exists (checked against
-   index.crates.io: 80 versions, 0.1.68 present) but is stale; latest is 0.1.78. Bumped.
+$ docker run --rm --user 0 --entrypoint ls amk:local-validate /etc/ssl/certs/ca-certificates.crt
+ /etc/ssl/certs/ca-certificates.crt
 
-B. STRIP MISMATCH, the one that mattered. The Dockerfile ran `strip` on its binaries and
-   ci.yml's build-bins job did not — so for the same commit, the artifact CI uploads and the
-   binary inside the image were DIFFERENT BYTES, quietly undermining the build-once story those
-   two jobs exist to tell. Moved to `[profile.release] strip = "symbols"` in Cargo.toml, so every
-   release build is identical wherever it runs, and no base image needs to ship binutils.
-     $ file target/release/amkd
-     ELF 64-bit LSB pie executable, ..., stripped
+== cargo-chef, both directions ==
+Source-only (appended `// chef-cache-probe` to crates/amk-http/src/lib.rs, then reverted):
+  #14 RUN cargo chef cook --release --recipe-path recipe.json
+  #14 CACHED
+  #16 RUN cargo build --release -p amk-cli --bins
+  Finished `release` in 14.12s
+  elapsed_sec=20
 
-== still NOT RUN, and not claimed otherwise ==
-The image has never been built or run. Unverified: that the cargo-chef layer split actually caches
-(touch a source file, dependency layer must be CACHED; touch Cargo.lock, it must invalidate), that
-it runs as uid 10001, that amkd fails closed without AMK_DATABASE_URL from inside the container,
-and the final image size. ci.yml's `docker` job is the first real build; `dockerfile-lint` runs
-on PRs, where the docker job does not.
+Cargo.lock trailing newline (content change, recipe.json identical):
+  #14 CACHED
+  elapsed_sec=20
+  Touching the lockfile is NOT enough if the dependency graph is unchanged. The cook
+  layer is keyed on recipe.json, which is the graph, not the lockfile's bytes. A real
+  dep bump would invalidate cook; a blank line must not.
+
+== container against host Postgres (127.0.0.1:55432, docker amk-dev-postgres) ==
+First attempt failed before listen:
+  AMK_DKIM_KEYS is set but unusable: cannot read /keys: Permission denied (os error 13)
+  uid 10001 vs a 0700 host mount. Fail-closed, not an image defect. chmod 755/644 on the
+  key dir and retry the RUN, not the BUILD.
+
+$ docker run --network host -v $KEYS:/keys:ro -e AMK_DATABASE_URL=... -e AMK_DKIM_KEYS=/keys \
+    -e AMK_BIND=127.0.0.1:8198 amk:local-validate --role api
+ health=200 body=ok
+ ready=ready code=200
+ log: "DKIM keyring loaded" keys=s20260819._domainkey.smoke.test count=1
+ 11 of 11 migrations applied via `amk migrate` in the same image.
+
+== not claimed ==
+GHA `cache-from: type=gha` is untested here (no Actions run). `ci.yml`'s docker job still
+only runs on push to main. `hadolint` was not re-run; fixture 39 previous revision already
+recorded CLEAN at failure-threshold=warning.

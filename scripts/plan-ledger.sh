@@ -209,14 +209,9 @@ check ci-workflows-present yes \
 
 # Has the container image ever actually been BUILT?
 #
-# Not due yet, and PENDING is the honest state: as of 2026-08-19 it has not, because this
-# environment's egress policy blocks Docker Hub's blob CDN
-# (production.cloudfront.docker.com:443), so no base image can be pulled and no build can start.
-# Recorded in reference/fixtures/39-image-build.txt with what WAS verified without a pull.
-#
-# This exists so "the image has never been built" is a tracked obligation rather than a caveat in
-# a report somebody stops re-reading. It flips to MET when a fixture records a real build --
-# ci.yml's docker job is the first place that can happen.
+# Flips to MET when reference/fixtures/39-image-build.txt starts with `VERDICT: built`.
+# The first revision recorded a sandbox egress 403 (Docker Hub CDN). The workstation
+# build is recorded in the same file.
 check ci-image-built no "container image built at least once, with the evidence captured" \
   bash -c '
     f=reference/fixtures/39-image-build.txt

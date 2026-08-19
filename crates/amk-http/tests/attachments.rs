@@ -115,7 +115,7 @@ async fn seed_message_with_attachment(
             preview: None,
             attachments: Some(vec![
                 Attachment {
-                    attachment_id: attachment_id.clone(),
+                    attachment_id,
                     filename: Some("report.pdf".into()),
                     size: BODY.len() as u64,
                     content_type: Some("application/pdf".into()),
@@ -123,7 +123,7 @@ async fn seed_message_with_attachment(
                     content_id: None,
                 },
                 Attachment {
-                    attachment_id: bodyless_id.clone(),
+                    attachment_id: bodyless_id,
                     filename: Some("lost.bin".into()),
                     size: 3,
                     content_type: None,
