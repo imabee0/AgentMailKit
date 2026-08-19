@@ -86,9 +86,9 @@ Outside contributions are not being accepted yet, while the API surface is still
 
 That is a scope decision, not a tooling one: as of 2026-08-18 the project does have CI
 (`.github/workflows/ci.yml`), so a pull request from outside would be gated the same way any
-internal change is. What is still missing before the repository could genuinely take
-contributions is a `LICENSE` file (the AGPL-3.0-or-later text — the licence is declared in
-`Cargo.toml` and here, but the text is absent), a `SECURITY.md`, and a `CONTRIBUTING.md`.
+internal change is, and `LICENSE` now carries the full AGPL-3.0 text. What is still missing
+before the repository could genuinely take contributions is a `SECURITY.md` (no disclosure
+route for a server that terminates SMTP from the public internet) and a `CONTRIBUTING.md`.
 
 ## License
 

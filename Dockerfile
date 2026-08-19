@@ -51,6 +51,12 @@ USER 10001:10001
 COPY --from=builder /build/target/release/amk  /usr/local/bin/amk
 COPY --from=builder /build/target/release/amkd /usr/local/bin/amkd
 
+# The licence travels with the binaries. Under AGPL-3.0 section 13 a network server is
+# distribution to everyone who interacts with it, so shipping the terms inside the image is the
+# baseline obligation rather than a courtesy. The org.opencontainers.image.licenses label below
+# only NAMES the licence; this is the text.
+COPY LICENSE /usr/share/licenses/agentmailkit/LICENSE
+
 # tini reaps zombies and forwards signals, so a rollout's SIGTERM reaches amkd and in-flight SMTP
 # sessions close cleanly instead of being killed at the end of the grace period.
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/amkd"]
