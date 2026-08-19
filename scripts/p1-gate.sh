@@ -16,7 +16,7 @@ set -uo pipefail
 # missing — found by cross-checking a "still failing" gate result against a manual curl of the
 # freshly built binary, which passed. `dirname "$0"` is this script's own directory regardless of
 # caller cwd, so `.. ` from `scripts/` is always the repository root THIS script is part of.
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 DB=amk_p1gate
 PORT=55432

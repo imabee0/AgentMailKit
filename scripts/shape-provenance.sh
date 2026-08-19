@@ -16,7 +16,7 @@
 # Structural leakage is what this catches. SEMANTIC leakage — a correctly-named field that
 # behaves differently — is caught only by the dual-target conformance diff. Both are required.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 # amk-http joined on 2026-08-16, at its merge. The plan's boundary-type rule names the three
 # shape-DEFINING crates, deliberately — but amk-http has no legitimate use for a stalwart-labs

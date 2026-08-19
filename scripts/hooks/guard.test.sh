@@ -14,7 +14,7 @@
 # is written inside the project, no real lock is read or touched, and the verdict is the same
 # whether or not a fan-out is running.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || { echo "FATAL: cannot cd to the hooks directory" >&2; exit 1; }
 SRC="$PWD/guard.sh"
 
 ROOT="$(mktemp -d)/repo"

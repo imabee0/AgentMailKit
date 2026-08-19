@@ -20,7 +20,7 @@
 # SAYS SO and differs from a clean pass, because "did not run" reported as "passed" is the exact
 # failure mode this file exists to prevent.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 FAST=0
 [ "${1:-}" = "--fast" ] && FAST=1

@@ -1,0 +1,100 @@
+# The slow half. Everything too expensive to run on every pull request, plus the two checks that
+# only mean something when they run on a schedule rather than on a diff.
+#
+# Why these are NOT per-PR:
+#   - a CVE disclosed against a pinned transitive dependency must not fail an unrelated PR, but it
+#     must be visible within a day;
+#   - mutation testing takes far longer than a review cycle;
+#   - a cold-cache run is meaningless if every run is cold.
+name: nightly
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: advisories, licences, bans, sources
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: audit
+          tools: cargo-deny
+      # deny.toml's allow-list was DERIVED from `cargo metadata` rather than guessed, so a new
+      # licence appearing here is a real supply-chain change and not a config oversight.
+      - run: cargo deny check advisories licenses bans sources
+
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # `rust-version = "1.85"` in Cargo.toml is a CLAIM. Nothing checked it -- rust-toolchain.toml
+      # pins 1.94.1, so every other job builds with a compiler four minors newer and a
+      # 1.86-only feature would land unnoticed. This is where the claim becomes a test.
+      - run: |
+          rustup toolchain install 1.85 --profile minimal
+          cargo +1.85 check --workspace --all-targets
+
+  cold-cache:
+    name: cold cache (reproducibility)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: amk, POSTGRES_PASSWORD: amk-dev-local, POSTGRES_DB: amk }
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      AMK_REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # cache: false is the entire point. A green pipeline that only passes warm is a pipeline
+      # depending on cache state, which is a bug that hides until the day the cache is evicted.
+      - uses: ./.github/actions/setup-rust
+        with: { cache: "false" }
+      - run: sudo apt-get install -qq -y postgresql-client
+      - run: cargo test --workspace
+      - run: ./scripts/shape-provenance.sh && ./scripts/plan-ledger.sh
+
+  mutants:
+    name: mutation testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: mutants
+          tools: cargo-mutants
+      # Replaces the honour-system `attest mutation-at-gate` line in plan-ledger.sh, which PRINTS
+      # and never fails -- so "mutation was run" has been an assertion rather than a fact. Scoped
+      # to the two crates where a surviving mutant means silent data exposure rather than a bug:
+      # amk-core is scope/permission/label logic, amk-types is every wire shape.
+      #
+      # Survivors do not fail the build yet: the baseline is unmeasured, and a first run that fails
+      # on an unknown number of pre-existing survivors teaches everyone to ignore this job. It
+      # reports, and the count becomes a budget once there is a baseline to hold.
+      - run: cargo mutants --package amk-core --package amk-types --no-shuffle -j 2 || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-${{ github.run_id }}
+          path: mutants.out/
+          if-no-files-found: warn

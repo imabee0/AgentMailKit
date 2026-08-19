@@ -13,7 +13,7 @@
 # machine-checked are printed as ATTEST lines rather than omitted: an omitted check reads as a
 # passing one, which is how this project got eleven of them.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 # The single source of truth for where we are. Everything below keys its due-ness off this.
 CURRENT_PHASE=P0
@@ -102,14 +102,51 @@ check harness-agent-frontmatter yes \
 # prevent: the two disagree eventually, and the one that disagrees quietly wins. `.github/` may now
 # hold non-CI GitHub metadata (issue templates, CODEOWNERS); `.github/workflows/` may not.
 
-# CI layer: DECIDED 2026-08-15 by the user — local-only, no forge CI. This is a deliberate
-# departure from the plan's "CI remains the authoritative gate", recorded there with what it costs.
-# Kept as a check rather than an attestation so the decision cannot be reversed by accident: a
-# workflow file appearing here means someone added CI without reopening the decision. It survived
-# the GitHub migration unchanged: moving forge does not reopen the CI decision.
-check ci-layer-local-only yes \
-  "no forge CI — local-only gating, decided" \
-  bash -c '[ ! -d .gitea/workflows ] && [ ! -d .github/workflows ]'
+# `ci-layer-local-only` ("no forge CI — local-only gating, decided") was RETIRED 2026-08-19, and
+# is kept as a comment for the same reason `harness-no-github` above is: a check that vanishes and
+# a check that never existed are indistinguishable later.
+#
+# It asserted `[ ! -d .gitea/workflows ] && [ ! -d .github/workflows ]`, pinning the user's
+# 2026-08-15 decision that this project has no forge CI. That decision rested on a premise — one
+# operator, one machine, every gate run by the person reading its output — and the 2026-08-17
+# GitHub migration ended it: the repository moved specifically so cloud sandboxes could drive it,
+# and a gate that runs in the same session as the agent it gates is not an independent gate.
+#
+# What the premise cost, measured on 2026-08-19 rather than argued:
+#   - 336 of 705 tests (48%) skipped themselves without Postgres while `check.sh` printed PASS;
+#   - `main` sat RED on `every_fixture_is_either_asserted_or_explicitly_deferred` from 0e7d345
+#     onward, because the fixture landed in a docs-only commit and nobody re-ran the suite;
+#   - `amkd --role api` could not send a single message, with every local gate green.
+# All three are the same shape: a verification that nothing independent re-ran.
+#
+# The decision is REVERSED, not bypassed. `.github/workflows/` now holds ci/release/nightly/
+# conformance, and the checks below (`ci-workflows-present`) assert they exist rather than that
+# they do not — the obligation moved, it was not dropped.
+
+# The inverse of what `ci-layer-local-only` used to assert. Deleting the pipeline is now the
+# regression, so it is what fails the build. `ci-ok` is named explicitly because it is the single
+# required status check: a workflow that stopped defining it would leave branch protection
+# gating on a job that never reports.
+check ci-workflows-present yes \
+  "forge CI exists: ci/release/nightly/conformance, with ci-ok as the required check" \
+  bash -c '
+    for w in ci release nightly conformance; do
+      [ -f ".github/workflows/$w.yml" ] || exit 1
+    done
+    [ -f .github/actions/setup-rust/action.yml ] || exit 1
+    grep -q "^  ci-ok:" .github/workflows/ci.yml'
+
+# Every third-party action pinned to a full 40-hex commit SHA. A tag is mutable: `@v4` is whatever
+# the tag points at today, which is a supply-chain hole a compromised action repository walks
+# straight through. Asserted mechanically because it is exactly the discipline that erodes when
+# someone adds "just one" action in a hurry.
+check ci-actions-sha-pinned yes \
+  "every third-party action is pinned to a commit SHA, not a tag" \
+  bash -c '
+    bad=$(grep -rhoE "uses: [^ ]+@[^ ]+" .github/workflows .github/actions \
+          | grep -v "uses: \./" \
+          | grep -vE "@[0-9a-f]{40}$" || true)
+    [ -z "$bad" ] || { printf "%s\n" "$bad"; exit 1; }'
 
 # ---------------------------------------------------------------- dispatch contracts
 # 'Every implementer dispatch states, explicitly and in full' six things. Four of six is skipped.

@@ -1,0 +1,92 @@
+# Lane R: the one check that needs a credential.
+#
+# `docs/PLAN.md`'s Lane L / Lane R split exists because most gates need nothing but this
+# repository, and exactly one needs an AgentMail API key -- the dual-target conformance diff, whose
+# manifest is 18 GETs and a single `DELETE /v0/auth/me` probe. Nothing is created on the reference
+# account, so a READ-ONLY key is sufficient and is what should be configured.
+#
+# Never on `pull_request`. A workflow triggered by a fork PR must not be able to reach a secret,
+# and the cheapest way to guarantee that is for the secret to live only in a workflow that PRs
+# cannot trigger at all.
+name: conformance
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly. The reference API is someone else's production service and this spends real requests
+    # against the user's own account; per-commit polling would be rude and would tell us nothing
+    # new between upstream releases.
+    - cron: "23 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conformance
+  cancel-in-progress: false
+
+jobs:
+  dual-target:
+    name: dual-target diff vs api.agentmail.to
+    runs-on: ubuntu-latest
+    # Absent secret -> the job says so and stops. It must never look like a pass: "not run"
+    # reported as "passed" is the failure mode this whole audit was about.
+    environment: conformance
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: amk, POSTGRES_PASSWORD: amk-dev-local, POSTGRES_DB: amk }
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+
+      - name: Require the reference key
+        env:
+          REF_KEY: ${{ secrets.AGENTMAIL_READONLY_KEY }}
+        run: |
+          if [ -z "${REF_KEY:-}" ]; then
+            echo "::error::AGENTMAIL_READONLY_KEY is not configured. This gate is NOT RUN, which is not the same as passed."
+            exit 1
+          fi
+          echo "reference key present (value never printed)"
+
+      - uses: ./.github/actions/setup-rust
+        with: { shared-key: release }
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conformance/requirements-*.txt
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: conformance/package-lock.json
+
+      - run: sudo apt-get install -qq -y postgresql-client
+      - run: cargo build --release -p amk-cli --bins
+
+      - name: Stand up a candidate and diff it against the reference
+        env:
+          # /proc/<pid>/environ is owner-only; argv is world-readable. The key travels by
+          # environment, never on a command line -- the same rule scripts/p1-gate.sh records
+          # having learned the hard way.
+          AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_READONLY_KEY }}
+        run: |
+          set -euo pipefail
+          export AMK_DATABASE_URL="postgres://amk:amk-dev-local@127.0.0.1:55432/amk_conf"
+          psql "postgres://amk:amk-dev-local@127.0.0.1:55432/postgres" -qc 'CREATE DATABASE amk_conf'
+          export AMK_PRIMARY_DOMAIN=appsynergy.io AMK_PRODUCT_NAME=AgentMailKit AMK_BIND=127.0.0.1:8111
+          ./target/release/amk migrate
+          CAND_KEY=$(./target/release/amk init | sed -n 's/.*root api key: *//p' | tr -d ' ')
+          ./target/release/amkd --role api &
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null -H "Authorization: Bearer $CAND_KEY" http://127.0.0.1:8111/v0/auth/me && break
+            sleep 0.5
+          done
+          REF_KEY="$AGENTMAIL_API_KEY" CAND_BASE="http://127.0.0.1:8111" CAND_KEY="$CAND_KEY" \
+            python3 conformance/dual_target.py conformance/manifest.json

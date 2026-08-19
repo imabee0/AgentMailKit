@@ -1,0 +1,58 @@
+name: Set up Rust
+description: >-
+  The pinned toolchain plus a warmed cargo cache. Used by every Rust job so setup exists in one
+  place -- a copy-pasted setup block is where two jobs quietly start building different things.
+
+inputs:
+  cache:
+    description: >-
+      Restore and save the cargo/target cache. Set to "false" for the weekly cold-cache run, whose
+      whole purpose is to prove no job depends on cache state to pass.
+    required: false
+    default: "true"
+  shared-key:
+    description: >-
+      Cache partition. Jobs that build the same profile should share one so they warm each other;
+      clippy gets its own, because its artifacts differ from a test build and mixing them thrashes
+      the cache rather than sharing it.
+    required: false
+    default: "build"
+  tools:
+    description: Space-separated cargo binaries to install (e.g. "cargo-deny cargo-audit").
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # No toolchain is named here. rust-toolchain.toml pins the channel and its components, and
+    # rustup honours it on first invocation -- so the version CI uses is the version the file says,
+    # with no second place to keep in sync. Naming a toolchain in the workflow would be exactly the
+    # duplicate record that drifts.
+    - name: Show the pinned toolchain
+      shell: bash
+      run: |
+        rustup show active-toolchain
+        cargo --version && rustc --version && cargo fmt --version && cargo clippy --version
+
+    - name: Cache cargo registry and target
+      if: inputs.cache == 'true'
+      uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
+      with:
+        shared-key: ${{ inputs.shared-key }}
+        # The lockfile is committed and every dependency is pinned exactly, so the key is stable
+        # and a hit is a genuine hit rather than a partial restore.
+        cache-all-crates: "true"
+
+    - name: Install cargo tools
+      if: inputs.tools != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        for t in ${{ inputs.tools }}; do
+          if command -v "$t" >/dev/null 2>&1; then
+            echo "$t already present"
+          else
+            cargo install --locked "$t"
+          fi
+        done

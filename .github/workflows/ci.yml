@@ -1,0 +1,387 @@
+# The gate. Everything a pull request must satisfy before it can merge.
+#
+# Reversing a recorded decision: `docs/PLAN.md` recorded 2026-08-15 that this project has no forge
+# CI, on the premise of one operator on one machine. The 2026-08-17 GitHub migration -- made so
+# cloud sandboxes could drive the repo -- ended that premise, and an audit on 2026-08-19 found the
+# cost: 336 of 705 tests (48%) silently skipped without Postgres while `check.sh` printed PASS,
+# `main` sitting red on a fixture tripwire nobody had run, and a binary that could not send mail
+# with every local gate green. The `ci-layer-local-only` ledger check is retired accordingly.
+#
+# Design notes live next to the thing they explain; the short version:
+#   affected-only    scripts/affected-crates.sh, reverse-dependency closure, fails OPEN
+#   build once       one release build, uploaded, consumed by every downstream job
+#   one required     `ci-ok` aggregates, so branch protection never needs editing again
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege at the top; jobs elevate individually and only where they must.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs; NEVER cancel on main, where a half-finished run can leave a
+  # published image or a release tag behind. The asymmetry is deliberate.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # A build that fetches during compilation is a build whose inputs are not the lockfile.
+  CARGO_NET_RETRY: "3"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # ---------------------------------------------------------------------------------------------
+  changes:
+    name: what changed
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      conformance: ${{ steps.filter.outputs.conformance }}
+      docker: ${{ steps.filter.outputs.docker }}
+      crates: ${{ steps.affected.outputs.crates }}
+      any_crate: ${{ steps.affected.outputs.any_crate }}
+      source_date_epoch: ${{ steps.sde.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A PR needs its merge base to diff against; main needs the previous commit.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The commit timestamp, for reproducible image builds: file mtimes inside the image derive
+      # from this, so the same commit built twice produces the same digest instead of two that
+      # differ only in when they were built.
+      - id: sde
+        run: echo "epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
+
+      # Coarse buckets, for deciding which JOBS run at all.
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'rustfmt.toml'
+              - 'scripts/**'
+              - '.github/**'
+            conformance:
+              - 'conformance/**'
+              - 'reference/**'
+            docker:
+              - 'Dockerfile'
+              - 'crates/**'
+              - 'Cargo.lock'
+
+      # Fine selection, for deciding WHICH CRATES those jobs touch. This is a separate step from
+      # the filter above on purpose: path filtering answers "did Rust change", and only the
+      # dependency graph can answer "what does that change reach". See affected-crates.sh.
+      - id: affected
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          # A first push to a branch, a force-push, or a shallow history leaves no usable base.
+          # Widening is the only safe answer -- an empty diff would select nothing and pass.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "no usable merge base; testing the whole workspace"
+            changed=""
+          else
+            changed=$(git diff --name-only "$base"...HEAD)
+          fi
+          if [ -z "$changed" ]; then
+            sel="ALL"
+          else
+            printf '%s\n' "$changed" | sed 's/^/  /'
+            sel=$(printf '%s\n' "$changed" | ./scripts/affected-crates.sh | tr '\n' ' ')
+          fi
+          sel=$(echo "$sel" | xargs || true)
+          echo "selection: '${sel}'"
+          if [ "$sel" = "ALL" ]; then
+            echo "crates=--workspace" >> "$GITHUB_OUTPUT"
+            echo "any_crate=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$sel" ]; then
+            echo "crates=" >> "$GITHUB_OUTPUT"
+            echo "any_crate=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "crates=$sel" >> "$GITHUB_OUTPUT"
+            echo "any_crate=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ---------------------------------------------------------------------------------------------
+  # fmt / clippy / test-unit / test-db / guards / build-bins all depend only on `changes`, so they
+  # start together. Nothing here waits on anything it does not actually need.
+  fmt:
+    name: fmt
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+        with: { shared-key: fmt }
+      # Always whole-workspace: formatting is not a per-crate property and the check is seconds.
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    needs: changes
+    if: needs.changes.outputs.any_crate == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+        with: { shared-key: clippy }
+      - run: cargo clippy ${{ needs.changes.outputs.crates }} --all-targets -- -D warnings
+
+  test-unit:
+    name: tests (no database)
+    needs: changes
+    if: needs.changes.outputs.any_crate == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+      # AMK_REQUIRE_DB is deliberately UNSET here: this job is the pure-logic half and must pass
+      # with no database at all. The DB-backed half is `test-db`, which requires one.
+      - run: cargo test ${{ needs.changes.outputs.crates }}
+
+  test-db:
+    name: tests (Postgres required)
+    needs: changes
+    if: needs.changes.outputs.any_crate == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: amk
+          POSTGRES_PASSWORD: amk-dev-local
+          POSTGRES_DB: amk
+        # The suite reaches the cluster on 55432 -- the same port dev-db.sh uses locally, so the
+        # DSN in test support needs no CI-specific branch.
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      # THE POINT OF THIS JOB. Unset, 336 of 705 tests skip themselves and the run still reports
+      # success; set, an unreachable database panics. This single line is the largest thing CI
+      # buys over the local gate.
+      AMK_REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+      - run: cargo test ${{ needs.changes.outputs.crates }} -- --nocapture
+      - name: Assert the database half actually ran
+        run: |
+          set -euo pipefail
+          # A green `cargo test` proves nothing about coverage if the DB tests opted out. Ask the
+          # database whether the suite ever created anything in it.
+          command -v psql >/dev/null || sudo apt-get install -qq -y postgresql-client
+          n=$(psql "postgres://amk:amk-dev-local@127.0.0.1:55432/postgres" -tAc \
+                "SELECT count(*) FROM pg_database WHERE datname LIKE 'amk%'")
+          echo "amk-prefixed databases seen by the run: $n"
+          [ "${n:-0}" -ge 1 ] || { echo "::error::AMK_REQUIRE_DB was set but no test database was ever created"; exit 1; }
+
+  guards:
+    name: guards (always, whole repo)
+    needs: changes
+    # NO `if:`. shape-provenance asserts the dependency graph and plan-ledger asserts repo-wide
+    # obligations; both need full visibility and neither is scoped by what changed. Making these
+    # conditional is precisely the "weakening coverage" the audit called out.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+        with: { shared-key: guards }
+      - run: ./scripts/shape-provenance.sh
+      - run: ./scripts/plan-ledger.sh
+      - run: ./scripts/hooks/guard.test.sh
+      - run: ./scripts/affected-crates.test.sh
+
+  # ---------------------------------------------------------------------------------------------
+  build-bins:
+    name: build (once)
+    needs: changes
+    if: needs.changes.outputs.any_crate == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+        with: { shared-key: release }
+      # Release, because that is the artifact everything downstream consumes and eventually ships.
+      # Compiled exactly once per run: binary-smoke, sdk-smoke and the image all download this.
+      - run: cargo build --release -p amk-cli --bins
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bins-${{ github.sha }}
+          path: |
+            target/release/amk
+            target/release/amkd
+          retention-days: 7
+          if-no-files-found: error
+
+  binary-smoke:
+    name: binary smoke (composed binary)
+    needs: [changes, build-bins]
+    if: needs.changes.outputs.any_crate == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: amk
+          POSTGRES_PASSWORD: amk-dev-local
+          POSTGRES_DB: amk
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bins-${{ github.sha }}
+          path: target/release
+      - run: chmod +x target/release/amk target/release/amkd
+      - name: Install a psql client
+        run: sudo apt-get install -qq -y postgresql-client
+      - name: Run the smoke gate
+        # AMK_SMOKE_SKIP_BUILD tells the script the binaries are already here -- rebuilding them
+        # would defeat the build-once rule this job exists to honour.
+        env:
+          AMK_SMOKE_SKIP_BUILD: "1"
+        run: |
+          set -uo pipefail
+          ./scripts/binary-smoke.sh
+          rc=$?
+          echo "binary-smoke exited $rc"
+          # Exit 2 is "prerequisites unavailable". Locally that is an honest skip; HERE the
+          # services block guarantees Postgres, so a 2 means the workflow is broken and must fail
+          # rather than quietly verifying nothing -- the same rule the script itself enforces.
+          [ "$rc" -eq 0 ] || exit 1
+
+  # ---------------------------------------------------------------------------------------------
+  secrets-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------------------------
+  docker:
+    name: image (build once, push by digest)
+    needs: [changes, build-bins, test-db, guards]
+    # Only on main. A PR proves the image BUILDS via the same cached layers; publishing from an
+    # unmerged branch would put an unreviewed digest in the registry.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=main
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # BuildKit layer cache. Paired with cargo-chef in the Dockerfile, this is what stops the
+          # 308-dependency layer rebuilding on every source edit -- without chef the cache buys
+          # almost nothing, because one changed line invalidates the whole cargo build layer.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ needs.changes.outputs.source_date_epoch }}
+
+  # ---------------------------------------------------------------------------------------------
+  ci-ok:
+    name: ci-ok
+    # THE ONE REQUIRED CHECK. Branch protection names this and nothing else, so adding a job above
+    # never means editing a protection rule -- and a job that is accidentally never required
+    # cannot hide, because it is a `needs:` here.
+    if: always()
+    needs: [changes, fmt, clippy, test-unit, test-db, guards, build-bins, binary-smoke, secrets-scan, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verdict
+        env:
+          # Through the environment, not interpolated into the script body: expression output
+          # spliced into shell source is an injection seam, and it is free to avoid.
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS"
+          # `skipped` is SUCCESS: a docs-only PR legitimately skips every Rust job, and failing on
+          # that would make the required check unsatisfiable. `cancelled` is FAILURE -- a cancelled
+          # run verified nothing, and treating it as a pass would let a superseded run merge a PR.
+          bad=$(printf '%s' "$RESULTS" | jq -r '
+            to_entries
+            | map(select(.value.result == "failure" or .value.result == "cancelled") | .key)
+            | join(" ")')
+          if [ -n "$bad" ]; then
+            echo "::error::failed or cancelled: $bad"
+            exit 1
+          fi
+          echo "all required jobs succeeded or were legitimately skipped"
+
+  auto-merge:
+    name: enable auto-merge
+    # Automation, not approval: a green PR opened by the agent merges without a human round trip.
+    # This does NOT bypass review -- GitHub still enforces whatever branch protection requires; it
+    # only removes the "someone must come back and click merge" step once conditions are met.
+    needs: ci-ok
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge --auto --squash "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}"

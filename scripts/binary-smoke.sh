@@ -23,7 +23,7 @@
 #      a distinct degraded line for this, because "did not run" reported as "passed" is the exact
 #      class of failure this script was written to end.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 PORT=55432
 DB=amk_binary_smoke
@@ -69,11 +69,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-step "build (release profile -- the artifact CI promotes)"
-# Debug would be faster, but then the gate proves something about a binary nobody ships.
-cargo build --release -p amk-cli --bins 2>&1 | tail -2 || exit 1
+step "release binaries"
 AMK=./target/release/amk
 AMKD=./target/release/amkd
+# CI builds once, uploads the artifact, and every downstream job downloads it -- so this gate must
+# NOT rebuild there. Locally the build is the convenience; in CI rebuilding would break the
+# build-once rule and, worse, mean the gate exercised a different binary from the one shipped.
+if [ "${AMK_SMOKE_SKIP_BUILD:-0}" = "1" ]; then
+  for b in "$AMK" "$AMKD"; do
+    [ -x "$b" ] || { echo "AMK_SMOKE_SKIP_BUILD=1 but $b is missing or not executable"; exit 1; }
+  done
+  echo "  using the prebuilt binaries (AMK_SMOKE_SKIP_BUILD=1)"
+else
+  # Release, not debug: a gate that proves something about a binary nobody ships proves nothing.
+  cargo build --release -p amk-cli --bins 2>&1 | tail -2 || exit 1
+fi
 
 step "mint a throwaway DKIM key"
 KEYS="$WORK/keys"; mkdir -p "$KEYS"

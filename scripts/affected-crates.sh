@@ -24,7 +24,7 @@
 # has not been taught about is a path whose blast radius is unknown, and the safe answer to
 # "unknown" in a gate is "run everything" -- never "run nothing".
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 if [ "$#" -gt 0 ]; then changed=$(printf '%s\n' "$@"); else changed=$(cat); fi
 changed=$(printf '%s\n' "$changed" | sed '/^[[:space:]]*$/d')

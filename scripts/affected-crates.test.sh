@@ -4,7 +4,7 @@
 # saving evaporating silently). `guard.test.sh` is the precedent -- a gate that is not itself
 # tested is a gate that stops working without telling anyone.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 pass=0; fail=0
 run() { ./scripts/affected-crates.sh "$@" </dev/null | tr '\n' ' ' | sed 's/ *$//'; }
