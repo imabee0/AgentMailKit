@@ -1267,6 +1267,49 @@ mod tests {
     }
 
     #[test]
+    fn c2_decision_thread_aggregates_are_recomputed_from_visible_members_only() {
+        // REGISTER C2, CLOSED BY DECISION 2026-08-19 rather than by observation.
+        //
+        // The open question was whether a thread's labels are a strict union of its members'.
+        // It cannot be settled from what we have: every threaded message in
+        // `16-threading-matrix/` and `09b` is homogeneously labelled, so no fixture contains a
+        // mixed thread, and inducing one needs a spam-classified message threaded to a clean one
+        // -- which cannot be reliably provoked on someone else's production API.
+        //
+        // So it is DECIDED, and this test is the record. The fail-closed reading holds: when a
+        // member is hidden, membership is filtered AND every aggregate derived from membership is
+        // recomputed from what remains. If upstream turns out to publish union labels, this is
+        // still correct -- admitting the thread would admit every member and this path is simply
+        // unreachable. If upstream does something else, we under-disclose, which is the direction
+        // to be wrong in.
+        //
+        // What this pins is the disclosure channel: `message_count` must NOT count a message the
+        // caller cannot see. A count that includes hidden members tells a caller exactly how much
+        // is being kept from it -- the same defect class as the `?limit=1` cursor walk that made
+        // restricted-label exclusion a storage predicate rather than a post-filter.
+        let grants = no_label_flags();
+        let access = LabelAccess::by_id(&grants);
+        let mut t = mixed_thread();
+
+        let members_before = t.messages.len() as u64;
+        let count_before = t.item.message_count;
+        assert!(count_before > 0);
+
+        assert_eq!(redact_thread(&mut t, &access), ThreadRedaction::Redacted);
+
+        let visible = t.messages.len() as u64;
+        assert!(visible < members_before, "the fixture must actually hide a member");
+        assert_eq!(
+            t.item.message_count, visible,
+            "message_count still counts a message the caller cannot see -- that is the leak"
+        );
+        assert!(
+            t.item.message_count < count_before,
+            "the aggregate was not recomputed after a member was hidden"
+        );
+    }
+
+    #[test]
     fn redaction_strips_the_label_it_exists_to_hide() {
         // The disclosure this pins: the body came back with no spam message, message_count
         // recomputed, and `spam` still standing in `labels` — naming exactly the fact the

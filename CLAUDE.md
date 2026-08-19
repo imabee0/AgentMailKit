@@ -173,9 +173,12 @@ Each was observed live; the fixture is the authority.
 
 ## Open at the boundary (do not silently resolve)
 
-- Thread labels vs member labels is **unobserved** — no fixture has a mixed-label thread. The
-  fail-closed choice (filter membership, recompute aggregates) is implemented and marked
-  `[INFERRED]` in one function. Register C2. **This is the only one still open.**
+**Nothing is open.** C2 — thread labels vs member labels — was the last, and it is closed by
+decision (2026-08-19), not by observation: no fixture has a mixed-label thread and inducing one
+means provoking a spam classification on someone else's production API. The fail-closed choice
+(filter membership, recompute aggregates) ships, is marked `[INFERRED]` on one function, is pinned
+by a test named for the assumption, and is declared in `conformance/manifest.json`'s
+`expected_divergences`. It reopens only if a mixed-label thread is ever observed.
 
 Closed by probe, and both reversed an implemented choice — check the fixture before trusting code:
 
