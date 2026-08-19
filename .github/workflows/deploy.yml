@@ -23,9 +23,19 @@ on:
         required: true
         type: string
       digest:
-        description: The immutable sha256:… digest produced by the build job.
+        description: The immutable sha256 digest produced by the build job.
         required: true
         type: string
+    secrets:
+      KUBE_CONFIG:
+        description: >
+          base64-encoded kubeconfig for the target cluster. Declared explicitly rather than
+          relying on `secrets: inherit`, which hands the called workflow EVERY secret the caller
+          holds — indefensible in a workflow that runs kubectl against production. Marked
+          not-required so a repository without it still parses; the job's first step hard-fails
+          when it is empty, so the loud failure happens at run time rather than becoming a
+          silent no-op deploy.
+        required: false
 
 permissions:
   contents: read

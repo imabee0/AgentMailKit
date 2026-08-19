@@ -314,6 +314,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
 
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.12"
           cache: pip
@@ -329,13 +330,18 @@ jobs:
 
       # The two virtualenvs p1-gate.sh expects. Keyed on the requirements files themselves, so a
       # pin change invalidates and nothing else does.
+      # Keyed on the EXACT interpreter as well as the pins. A virtualenv is a tree of symlinks into
+      # one specific Python install, so a cache restored across a patch bump (3.12.13 -> 3.12.14)
+      # has dangling symlinks and presents as "bin/python3: no such file" — which is precisely how
+      # the Lane L gate failed on its first CI run. p1-gate.sh's ensure_venv now repairs that, so
+      # this key is defence in depth: it avoids restoring a venv that would only be thrown away.
       - name: Cache conformance virtualenvs
         uses: actions/cache@v4
         with:
           path: |
             .venv-gate
             .venv-schemathesis
-          key: venvs-${{ runner.os }}-py3.12-${{ hashFiles('conformance/requirements-gate.txt', 'conformance/requirements-schemathesis.txt') }}
+          key: venvs-${{ runner.os }}-${{ steps.py.outputs.python-version }}-${{ hashFiles('conformance/requirements-gate.txt', 'conformance/requirements-schemathesis.txt') }}
 
       - name: Install the official Node SDK
         working-directory: conformance
@@ -402,6 +408,41 @@ jobs:
   # Staging first, unconditionally. Production is a separate call to the SAME reusable workflow
   # with a different environment, and GitHub's environment protection rules are what hold the
   # manual approval — not an `if:` a contributor could edit in a pull request.
+  # ---------------------------------------------------------------- promote the same digest
+  # Staging first, unconditionally. Production is a separate call to the SAME reusable workflow
+  # with a different environment, and GitHub's environment protection rules are what hold the
+  # manual approval — not an `if:` a contributor could edit in a pull request.
+  deploy-staging:
+    name: deploy staging
+    needs: image
+    # Opt-in. Until the cluster credentials exist, deployment is OFF rather than silently
+    # succeeding: set the repository variable DEPLOY_ENABLED=true when the environments are
+    # provisioned. A no-op deploy that reports green is the same defect as a skipped test that
+    # reports green, and this project has already been bitten by the second one.
+    if: vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: staging
+      image: ${{ needs.image.outputs.image }}
+      digest: ${{ needs.image.outputs.digest }}
+    # Named explicitly rather than `secrets: inherit`. Inherit passes EVERY secret the caller
+    # holds into a workflow that runs kubectl against a cluster; naming the one it needs is the
+    # same least-privilege rule the `permissions:` blocks follow.
+    secrets:
+      KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
+  deploy-production:
+    name: deploy production
+    needs: [image, deploy-staging]
+    if: vars.DEPLOY_ENABLED == 'true'
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: production
+      image: ${{ needs.image.outputs.image }}
+      digest: ${{ needs.image.outputs.digest }}
+    secrets:
+      KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
   # ---------------------------------------------------------------- the required check
   # Branch protection points at THIS job and nothing else.
   #

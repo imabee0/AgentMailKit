@@ -391,7 +391,16 @@ Fan out ONLY when all four hold: (i) the crates share no files; (ii) neither dep
 
 ### Branching hygiene
 - `main` is protected; nothing lands except a merge that passed a phase gate.
-- One branch per crate per phase: `amk/<phase>/<crate>` (e.g. `amk/p2/ingest`); one worktree per branch under `.claude/worktrees/`; each worktree gets a task-scoped CLAUDE.md carrying the crate's contract.
+- ~~One branch per crate per phase: `amk/<phase>/<crate>` (e.g. `amk/p2/ingest`)~~ — **RETIRED 2026-08-19 by user decision.** Branch names are not a plan rule; whatever the session harness assigns is fine. Struck rather than deleted, because the rule was real and what it was protecting still is.
+
+  It was a **proxy** for three requirements and enforced none of them: `grep -c 'amk/' scripts/hooks/guard.sh` returned **0**, so no hook ever read a branch name, and the repository accumulated three competing schemes (`amk/*`, `claude/*`, `execute-plan/*`) with nothing to stop it. The guard scopes writes by worktree **path**, and branch protection targets the name-agnostic `gate` job. A convention nothing validates is documentation, not a control.
+
+  The three requirements it stood for are kept, and two are now mechanical:
+  - **One crate per pull request.** Identity lives in the PR title, which already follows conventional commits (`feat(amk-ingest): …`) and is visible where reviewers actually look.
+  - **Merged in crate write order.** Now enforced by `scripts/plan-ledger.sh`'s `crate-write-order`: if a crate is present, every crate upstream of it in `amk-types → amk-core → amk-store → amk-http → ingest+outbound → events+jobs → dns+mcp+reply-extract → import` must be present too. Falsified by hiding `amk-core` and confirming the ledger goes red.
+  - **No branch outliving its phase.** Still a hygiene rule; `hygiene-worktrees-swept` covers the worktree half.
+
+  One worktree per dispatch under `.claude/worktrees/` is **unchanged** — that is the boundary the guard actually enforces. Each worktree still gets a task-scoped CLAUDE.md carrying the crate's contract.
 - Commits conventional and atomic: one logical change, tests in the same commit as the code they cover; no "wip" commits on a branch that will be reviewed.
 - Merge order follows write order — never merge a downstream crate before its upstream is on main.
 - Rebase onto main before review, never merge-commit into the branch; the reviewed diff must be the diff that lands.

@@ -324,6 +324,31 @@ characters.
 
 ---
 
+## 8. Branches and merge order
+
+Branch **names** are not a rule. Whatever the session harness assigns is fine, and CI does not look
+at them — branch protection targets the `gate` job, which is name-agnostic.
+
+That is a deliberate retirement, not an omission. The plan used to mandate `amk/<phase>/<crate>`,
+which was a proxy for three real requirements and enforced none of them: no hook ever read a branch
+name (`grep -c 'amk/' scripts/hooks/guard.sh` → 0), and the repository accumulated three competing
+schemes with nothing to stop it. What the rule stood for is kept:
+
+| Requirement | How it is held now |
+|---|---|
+| One crate per pull request | The PR title, which already follows conventional commits (`feat(amk-ingest): …`) |
+| Merged in crate write order | `plan-ledger.sh` → `crate-write-order`, run by the `ledger` job on every event |
+| One worktree per dispatch | `scripts/hooks/guard.sh`, which scopes writes by worktree **path** — unchanged |
+| No branch outliving its phase | Hygiene; `hygiene-worktrees-swept` covers the worktree half |
+
+`crate-write-order` asserts that if a crate is present, every crate upstream of it in
+`amk-types → amk-core → amk-store → amk-http → ingest+outbound → events+jobs →
+dns+mcp+reply-extract → import` is present too. A downstream crate landing before its upstream
+means the upstream's types were not frozen when the downstream was written against them, which is
+the thing the naming convention only gestured at.
+
+---
+
 ## 8. What CI does *not* replace
 
 The lane split from `docs/PLAN.md` still holds, and CI runs exactly one side of it.

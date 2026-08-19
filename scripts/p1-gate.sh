@@ -34,6 +34,39 @@ cd "$(dirname "$0")/.."
 LANE_L_ONLY=0
 [ "${1:-}" = "--lane-l" ] && LANE_L_ONLY=1
 
+# ONE definition of "make this virtualenv usable", because trusting a venv directory instead of
+# verifying it has now failed twice in different ways:
+#   1. a venv that existed but had no packages was reused, and sdk_smoke.py failed with
+#      ModuleNotFoundError as though the official SDK were broken (2026-08-18, local);
+#   2. `python3 -m venv` left a HALF-CREATED tree with no bin/python3 at all, and the next line
+#      ran bin/pip out of it: "cannot execute: required file not found", exit 127
+#      (2026-08-19, first CI run of the Lane L gate).
+#
+# So: a directory that is not a working venv is REMOVED and rebuilt, never patched around, and a
+# creation that fails stops the gate instead of leaving the next command to fail confusingly. This
+# also makes a restored CI cache safe — a venv cached against a different Python patch version has
+# dangling symlinks, which presents exactly as case 2.
+# Proof that a venv works, not evidence that it looks like one. `[ -x bin/python ]` is not enough
+# and neither is running it with no output check: a ZERO-BYTE executable file passes -x, and bash
+# executes an empty file as a shell script and exits 0, so both tests pass on a venv that cannot
+# run anything. Found by falsifying this very function against the shape CI actually produced.
+# Demanding the interpreter PRINT something is what makes this a test.
+venv_works() {
+  [ -x "$1/bin/python" ] && [ -x "$1/bin/pip" ] &&
+    [ "$("$1/bin/python" -c 'print("amk-ok")' 2>/dev/null)" = "amk-ok" ]
+}
+
+ensure_venv() {
+  local dir="$1" req="$2"
+  if ! venv_works "$dir"; then
+    rm -rf "$dir"
+    python3 -m venv "$dir" || { echo "FATAL: could not create $dir" >&2; return 1; }
+  fi
+  venv_works "$dir" || { echo "FATAL: $dir is not a working virtualenv after creation" >&2; return 1; }
+  "$dir/bin/pip" install -q --disable-pip-version-check -r "$req" \
+    || { echo "FATAL: could not install $req into $dir" >&2; return 1; }
+}
+
 DB=amk_p1gate
 PORT=55432
 BIND=127.0.0.1:8111
@@ -200,8 +233,7 @@ echo "== P1 gate, second half: the unmodified official Python SDK against the sa
 # exactly that on 2026-08-18. `pip install -r` is a no-op in about a second when already
 # satisfied, so syncing unconditionally costs nothing and removes the whole failure class. This
 # also makes a restored CI cache safe: a stale cache is corrected, never trusted.
-[ -x .venv-gate/bin/python ] || python3 -m venv .venv-gate
-.venv-gate/bin/pip install -q --disable-pip-version-check -r conformance/requirements-gate.txt
+ensure_venv .venv-gate conformance/requirements-gate.txt || exit 1
 AMK_BASE="http://${BIND}" AMK_KEY="$CAND_KEY" .venv-gate/bin/python conformance/sdk_smoke.py
 SMOKE_EXIT=$?
 echo "sdk_smoke.py exit: $SMOKE_EXIT"
@@ -275,8 +307,7 @@ echo "== P1 gate, fourth part: schemathesis over the implemented paths =="
 # at — response shapes, content types, no 5xx — plus three checks of our own carrying the
 # invariants no OpenAPI document can express (conformance/schemathesis_checks.py).
 # Same reasoning as .venv-gate above: create if absent, sync every run.
-[ -x .venv-schemathesis/bin/python ] || python3 -m venv .venv-schemathesis
-.venv-schemathesis/bin/pip install -q --disable-pip-version-check -r conformance/requirements-schemathesis.txt
+ensure_venv .venv-schemathesis conformance/requirements-schemathesis.txt || exit 1
 # `SCOPE_EXIT=$?` after a `mapfile < <(...)` reads MAPFILE's status, not the script's — which is
 # always 0, so a router/spec disagreement would have been announced and then ignored. Capture the
 # script's own exit through a command substitution, which propagates it.

@@ -85,10 +85,12 @@ jobs, idempotency. **P2: message/thread landed.** `amk-outbound` is partial.
 
 ## Branching, dispatch and merge
 
-- **One branch per crate per phase, named `amk/<phase>/<crate>`** — `amk/p2/ingest`,
-  `amk/p1/http-extractors`. One worktree per branch under `.claude/worktrees/<name>/`. No branch
-  outlives its phase: one open across a phase boundary is a drift signal, so close it or restart it
-  from the new base.
+- ~~**One branch per crate per phase, named `amk/<phase>/<crate>`**~~ — **retired 2026-08-19.**
+  Branch names are not a rule; no hook ever read one, and three schemes accumulated. What it stood
+  for is kept: **one crate per pull request** (identity lives in the conventional-commit PR title),
+  and **merge in crate write order**, now enforced mechanically by `plan-ledger.sh`'s
+  `crate-write-order`. One worktree per dispatch under `.claude/worktrees/<name>/` is unchanged —
+  that is the boundary the guard actually enforces. No branch outlives its phase.
 - **Commits conventional and atomic** — one logical change, tests in the same commit as the code
   they cover, no `wip` commits on a branch that will be reviewed.
 - **Rebase onto `main` before review; never merge-commit into the branch.** The reviewed diff must

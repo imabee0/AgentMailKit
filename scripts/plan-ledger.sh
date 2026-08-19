@@ -364,6 +364,40 @@ check p1-gate-sdk-smoke no "P1 gate: both official SDKs drive a live server; pin
     [ -n "$py" ] && [ -n "$nd" ] &&
     grep -q "agentmail==$py" "$f" &&
     grep -q "agentmail@$nd" "$f"'
+# CRATE WRITE ORDER, mechanically. Added 2026-08-19 when the `amk/<phase>/<crate>` branch-naming
+# rule was retired: that rule was a PROXY for this requirement and enforced none of it, because no
+# hook ever read a branch name. The requirement itself is checkable on any tree, so it is checked.
+#
+# The order is a dependency chain, not a preference — a downstream crate merged before its upstream
+# is on `main` means the upstream's types were not frozen when the downstream was written against
+# them. If a crate at tier N exists, every crate in tiers 1..N-1 must exist too.
+#
+# amk-cli is deliberately absent from the tiers: it is a binary that consumes the libraries and
+# gates nothing, so ordering it would assert a dependency the plan does not make.
+check crate-write-order yes \
+  "crate write order: no crate present before its upstreams (types -> core -> store -> http -> ...)" \
+  bash -c '
+    tiers="amk-types|amk-core|amk-store|amk-http|amk-ingest amk-outbound|amk-events amk-jobs|amk-dns amk-mcp reply-extract|amk-import"
+    seen_missing=""
+    n=0
+    IFS="|"
+    for tier in $tiers; do
+      n=$((n+1))
+      unset IFS
+      for c in $tier; do
+        if [ -d "crates/$c" ]; then
+          [ -z "$seen_missing" ] || {
+            echo "    $c (tier $n) is present but its upstream(s) are not:$seen_missing" >&2
+            exit 1; }
+        else
+          seen_missing="$seen_missing $c"
+        fi
+      done
+      IFS="|"
+    done
+    unset IFS
+    exit 0'
+
 # P2 Lane L. The transcript's own conjunct exit lines, read verbatim — the same pattern as the P1
 # checks above, and the reason `28-p2-lane-l.txt` can sit in the fixture test's DEFERRED table
 # claiming "asserted by plan-ledger" without that being a lie.
