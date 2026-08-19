@@ -317,6 +317,28 @@ mapfile -t INCLUDE <<< "$INCLUDE_ARGS"
 if [ "$SCOPE_EXIT" -ne 0 ]; then
   echo "FATAL: router() and openapi.json disagree — run scripts/derive-implemented-paths.sh"
 fi
+# PROFILE. Measured on this repository, 45 mounted operations, one full local run:
+#
+#   coverage  1519s   deterministic edge-case generation per parameter — the single biggest cost
+#   fuzzing   1039s   property-based, scales with --max-examples
+#   stateful   249s   follows OpenAPI links
+#   examples     0s
+#
+# ~47 minutes of schemathesis, which overran a 45-minute CI job and got killed at 45.3 minutes
+# having produced nothing. Paying that on every pull request is the most expensive thing in the
+# pipeline and the least proportionate.
+#
+# So the phase set and example budget are knobs, defaulting to the FULL set so that a bare run of
+# this script is still the real gate. Continuous integration lowers them for pull requests and
+# restores them on main. Whichever ran is printed, because a reduced run must never be mistaken
+# for the full guard — the same reason --lane-l prints its lane.
+ST_PHASES="${AMK_ST_PHASES:-examples,coverage,fuzzing,stateful}"
+ST_EXAMPLES="${AMK_ST_EXAMPLES:-40}"
+if [ "$ST_PHASES" = "examples,coverage,fuzzing,stateful" ] && [ "$ST_EXAMPLES" = "40" ]; then
+  echo "   profile: FULL (all phases, ${ST_EXAMPLES} examples)"
+else
+  echo "   profile: REDUCED (phases=${ST_PHASES}, examples=${ST_EXAMPLES}) — NOT the full guard"
+fi
 PYTHONPATH=. SCHEMATHESIS_HOOKS=conformance.schemathesis_checks AMK_KEY="$CAND_KEY" \
   .venv-schemathesis/bin/st --config-file conformance/schemathesis.toml \
     run reference/openapi.json \
@@ -324,7 +346,8 @@ PYTHONPATH=. SCHEMATHESIS_HOOKS=conformance.schemathesis_checks AMK_KEY="$CAND_K
     "${INCLUDE[@]}" \
     --checks not_a_server_error,content_type_conformance,response_schema_conformance,optionals_are_omitted_never_null,timestamps_are_wire_exact,error_shape_is_one_of_the_two \
     --mode all \
-    --max-examples "${AMK_ST_EXAMPLES:-40}" \
+    --phases "$ST_PHASES" \
+    --max-examples "$ST_EXAMPLES" \
     --seed 1 \
     --continue-on-failure \
     --output-sanitize true

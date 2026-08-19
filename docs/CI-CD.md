@@ -164,13 +164,49 @@ One workflow, `.github/workflows/ci.yml`. The job graph:
 | `fixtures` | with `build` | always | — | fixture corpus reconciliation |
 | `provenance` | with `build` | always | — | no Stalwart/JMAP shapes |
 | `audit` | if dependencies changed | always | **yes** | advisories land without this repo changing |
-| `gate-lane-l` | if Rust/conformance/migrations changed | always | — | minutes; schemathesis + both official SDKs |
+| `gate-lane-l` | **reduced** (~3 min) if Rust/conformance/migrations changed | **full** (~50 min) | — | schemathesis + both official SDKs |
 | `image` | — | if `PUBLISH_IMAGE` | — | off by default — see below |
 | `deploy-*` | — | if `DEPLOY_ENABLED` | — | promotion, gated by environments |
 
 The pattern: **cheap checks run on everything; expensive checks run when their inputs changed; on
 `main` everything runs regardless.** A pull request cannot skip its way to green, because `main`
 re-runs the full set before anything is built or deployed.
+
+### The Lane L gate runs at two depths
+
+It is the most expensive thing in the pipeline. Measured on this repository, 45 mounted operations,
+one full local run:
+
+| schemathesis phase | time |
+|---|---|
+| coverage (deterministic edge cases) | 1519s — 25 min |
+| fuzzing (property-based, scales with `--max-examples`) | 1039s — 17 min |
+| stateful (follows OpenAPI links) | 249s — 4 min |
+| examples | 0.2s |
+
+About **47 minutes of schemathesis**, ~50 for the job. It first ran with `timeout-minutes: 45`, was
+killed at 45.3 minutes mid-run, and produced nothing — the most expensive way this pipeline could
+fail. The ceiling is now 90.
+
+Paying 50 minutes on every pull request is disproportionate; never paying it is not a gate. So:
+
+| Trigger | Profile | Measured |
+|---|---|---|
+| pull request | reduced — `examples,fuzzing`, 5 examples | **2m 51s** |
+| pull request labelled `full-gate` | full | ~50 min |
+| push to `main` | full | ~50 min |
+| `workflow_dispatch` | full | ~50 min |
+
+The reduced profile still stands up a real server, runs **both official SDK smokes in full**, and
+fuzzes **every** mounted operation. It lowers depth, not surface coverage. Coverage and stateful —
+the two most expensive phases — are what it drops.
+
+`full-gate` is the pre-merge escape hatch: label a pull request and the full guard runs on it
+before merge. Otherwise the full guard runs on `main` immediately after merge, which is a
+deliberate cost trade and is stated here rather than left implicit.
+
+The gate prints which profile ran (`profile: FULL` / `profile: REDUCED — NOT the full guard`), for
+the same reason `--lane-l` prints its lane: a narrower run must never read as the wider one.
 
 ### `gate` — the required status check
 

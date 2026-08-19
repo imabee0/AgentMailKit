@@ -286,7 +286,11 @@ jobs:
       needs.changes.outputs.migrations == 'true' ||
       needs.changes.outputs.full == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Sized for the FULL profile, which measured ~50 minutes locally. The previous 45 was smaller
+    # than the work: the job ran 45.3 minutes, was killed mid-schemathesis, and produced nothing —
+    # the most expensive way this pipeline could possibly fail. The reduced profile finishes in
+    # about three minutes, so this ceiling only ever applies to a full run.
+    timeout-minutes: 90
     services:
       postgres:
         image: postgres:17-alpine
@@ -349,6 +353,33 @@ jobs:
 
       # p1-gate.sh creates either virtualenv if it is absent, so a cache miss is slower, never
       # broken. Both are pinned, so a hit is exact.
+      # WHICH GUARD RUNS, AND WHEN. Measured on this repository with 45 mounted operations:
+      # coverage 1519s, fuzzing 1039s, stateful 249s — about 47 minutes of schemathesis, and the
+      # single most expensive thing here. Paying it on every pull request is disproportionate;
+      # never paying it is not a gate. So:
+      #
+      #   pull request          reduced — examples+fuzzing, 5 examples, ~3 minutes measured
+      #   pull request labelled `full-gate`   full, on demand, before merging something risky
+      #   push to main          full
+      #   workflow_dispatch     full
+      #
+      # The reduced profile still stands up a real server, runs both official SDK smokes in full,
+      # and fuzzes every mounted operation — it lowers depth, not coverage of the surface. The
+      # gate prints which profile ran, so a reduced pass cannot be read as the full guard.
+      - name: Choose the gate profile
+        run: |
+          FULL='${{ github.event_name != 'pull_request'
+                 || contains(github.event.pull_request.labels.*.name, 'full-gate') }}'
+          if [ "$FULL" = "true" ]; then
+            echo "AMK_ST_PHASES=examples,coverage,fuzzing,stateful" >> "$GITHUB_ENV"
+            echo "AMK_ST_EXAMPLES=40" >> "$GITHUB_ENV"
+            echo "::notice::Lane L gate: FULL profile"
+          else
+            echo "AMK_ST_PHASES=examples,fuzzing" >> "$GITHUB_ENV"
+            echo "AMK_ST_EXAMPLES=5" >> "$GITHUB_ENV"
+            echo "::notice::Lane L gate: REDUCED profile (label a PR 'full-gate' for the full one)"
+          fi
+
       - name: Run the Lane L gate
         run: ./scripts/verify.sh gate-lane-l
 
