@@ -33,31 +33,59 @@ use axum::routing::{delete, get, post};
 use axum::Router;
 use sqlx::PgPool;
 
+pub mod observability;
+pub mod ratelimit;
+
 pub use config::AppConfig;
 pub use error::AppError;
+pub use observability::Metrics;
+pub use ratelimit::RateLimiter;
 
 /// Everything a handler needs beyond the request itself: the database pool, deployment
 /// configuration, the DKIM keyring, and the outbound transport.
 ///
 /// `Clone` is cheap — `PgPool` and the keyring/`Transport` are reference-counted. [`Self::new`]
-/// installs an empty keyring (fail closed) and a live SMTP transport from `config`. Tests that
+/// takes the keyring as an ARGUMENT and derives a live SMTP transport from `config`. Tests that
 /// send mail call [`Self::with_outbound`] with a fixture keyring and a
 /// [`amk_outbound::RecordingTransport`].
+///
+/// # Why the keyring is a parameter and not a default
+///
+/// It used to be neither: `new` called `Keyring::new()` unconditionally, so **every deployment
+/// answered every send with `NoSigningKey`** — the crate compiled, all 697 tests passed, three
+/// review lenses were clean, and the product could not send mail. Nothing caught it because
+/// nothing tested the composed binary; `amk-outbound` was exercised as a library and `amk-http`
+/// through handlers that injected their own keyring.
+///
+/// Making it a parameter is the fix that generalises: a caller must now say what it is doing.
+/// `amk-cli` passes `config::dkim_keyring()`; a read-only test passes `Keyring::new()` and means
+/// it. `scripts/binary-smoke.sh` is the gate that keeps it honest end to end.
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
     pub config: AppConfig,
     pub keyring: Arc<Keyring>,
     pub transport: OutboundTransport,
+    /// Shared, lock-free counters behind `GET /metrics`. `Arc` because `AppState` is cloned per
+    /// request and every clone must increment the SAME counters -- a per-clone copy would report
+    /// one request per request forever.
+    pub metrics: Arc<Metrics>,
+    /// Shared token buckets. `Arc` for the same reason `metrics` is: every clone must consult the
+    /// SAME buckets, or the limit is per-request and limits nothing.
+    pub limiter: Arc<RateLimiter>,
+    /// Where raw MIME and attachment bodies live. `None` keeps the pre-blob behaviour -- parse and
+    /// discard -- so a deployment without a configured root still sends and receives; only
+    /// `GET .../raw` degrades, and it degrades to a 404 rather than to a lie.
+    pub blobs: Option<amk_store::blobs::FsBlobStore>,
 }
 
 impl AppState {
-    pub fn new(pool: PgPool, config: AppConfig) -> Self {
+    pub fn new(pool: PgPool, config: AppConfig, keyring: Keyring) -> Self {
         let transport = match &config.smtp_smarthost {
             Some((host, port)) => OutboundTransport::smarthost(host, *port),
             None => OutboundTransport::direct_mx(),
         };
-        Self::with_outbound(pool, config, Keyring::new(), transport)
+        Self::with_outbound(pool, config, keyring, transport)
     }
 
     pub fn with_outbound(
@@ -66,7 +94,15 @@ impl AppState {
         keyring: Keyring,
         transport: OutboundTransport,
     ) -> Self {
-        Self { pool, config, keyring: Arc::new(keyring), transport }
+        Self {
+            pool,
+            config,
+            keyring: Arc::new(keyring),
+            transport,
+            metrics: Arc::new(Metrics::new()),
+            limiter: Arc::new(RateLimiter::default()),
+            blobs: None,
+        }
     }
 }
 
@@ -185,11 +221,51 @@ pub fn router(state: AppState) -> Router {
                 .delete(handlers::threads::delete_inbox),
         )
         // Unknown path -> 404 envelope.
+        // ---- raw message fetch + the signed download it points at ----
+        .route("/v0/inboxes/{inbox_id}/messages/{message_id}/raw", get(handlers::messages::raw))
+        // ---- get-attachment, on its four non-draft mounts. The three draft-scoped mounts in the
+        // spec wait for drafts themselves; recording the exclusion here is what keeps the
+        // reconciliation's gap explained rather than an oversight. ----
+        .route(
+            "/v0/inboxes/{inbox_id}/messages/{message_id}/attachments/{attachment_id}",
+            get(handlers::attachments::get_message),
+        )
+        .route(
+            "/v0/inboxes/{inbox_id}/threads/{thread_id}/attachments/{attachment_id}",
+            get(handlers::attachments::get_inbox_thread),
+        )
+        .route(
+            "/v0/threads/{thread_id}/attachments/{attachment_id}",
+            get(handlers::attachments::get_org_thread),
+        )
+        .route(
+            "/v0/pods/{pod_id}/threads/{thread_id}/attachments/{attachment_id}",
+            get(handlers::attachments::get_pod_thread),
+        )
+        // Unauthenticated by design: the token IS the authorisation. Mounted under /v0 because it
+        // is part of the product surface a client follows, unlike /health and /metrics below.
+        .route("/v0/blobs/{blob_id}", get(handlers::messages::download_blob))
         .fallback(not_found_fallback)
         // A path that exists but with the wrong method -> the SAME 404 envelope, never axum's
         // default 405 — the dispatch contract is explicit: "There is no 405."
         .method_not_allowed_fallback(not_found_fallback)
+        // ---- operational surface (3) — NOT part of the AgentMail API ----
+        //
+        // Unversioned and outside /v0 deliberately. These are not reference-API operations, and
+        // mounting them under /v0 would make `derive-implemented-paths.sh` count them against the
+        // 130 the spec describes -- inflating the coverage number with endpoints AgentMail does
+        // not have. The conformance diff would then flag three paths the reference never serves.
+        .route("/health", get(observability::health))
+        .route("/ready", get(observability::ready))
+        .route("/metrics", get(observability::metrics))
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        // Outermost, so it sees every request including ones rejected by routing or the body
+        // limit -- a 404 or a 413 is exactly the kind of thing worth counting, and a layer added
+        // after `.with_state` would never observe them.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            observability::trace_requests,
+        ))
         .with_state(state)
 }
 
@@ -224,7 +300,7 @@ mod tests {
     async fn router_builds_without_touching_the_database() {
         let pool = PgPool::connect_lazy("postgres://amk:amk-dev-local@127.0.0.1:55432/amk")
             .expect("lazy connect never touches the network");
-        let state = AppState::new(pool, AppConfig::default());
+        let state = AppState::new(pool, AppConfig::default(), Keyring::new());
         let _ = router(state);
     }
 

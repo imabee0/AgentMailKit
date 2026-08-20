@@ -12,6 +12,7 @@ use amk_core::scope::{Mount, Resolved, Scope};
 use amk_core::threading::{
     InMemoryThreadIndex, ReferenceChainThreading, ThreadAssigner, ThreadAssignment, ThreadCandidate,
 };
+use amk_store::blobs::{BlobStore, FsBlobStore};
 use amk_store::messages::{self, NewMessage};
 use amk_store::threads::{self, NewThread, ThreadMember};
 use amk_store::StoreError;
@@ -58,6 +59,15 @@ pub struct AcceptRequest<'a> {
     pub envelope: Envelope,
     pub dest: Delivery,
     pub max_message_bytes: usize,
+    /// The blob the raw bytes were stored under, if they were. Passed IN rather than computed
+    /// here: the raw form needs no parse, so `StorePersist` can store it before this function
+    /// ever runs, and a row can therefore never point at a raw object that does not exist.
+    pub raw_blob_id: Option<String>,
+    /// Where DECODED attachment bodies go. Unlike the raw bytes, these only exist after the
+    /// parse, so they cannot be passed in the way `raw_blob_id` is -- the store itself has to be.
+    /// `None` keeps the metadata-only behaviour (`GET .../attachments/{id}` is then a 404), which
+    /// is also what keeps the unit tests filesystem-free.
+    pub blobs: Option<&'a FsBlobStore>,
 }
 
 /// SPF/DKIM via `mail-auth`, or a test stub. No `mail_auth::` type is public.
@@ -211,6 +221,10 @@ pub trait Persist: Send + Sync {
 pub struct StorePersist {
     pub pool: PgPool,
     pub auth: Authenticator,
+    /// Where the original bytes go. `None` keeps the pre-blob behaviour -- parse and discard --
+    /// so a deployment without a configured blob root still accepts mail rather than refusing it.
+    /// `GET .../raw` is then a 404, which is the honest answer.
+    pub blobs: Option<FsBlobStore>,
 }
 
 impl Persist for StorePersist {
@@ -221,6 +235,25 @@ impl Persist for StorePersist {
         dest: &Delivery,
         max_message_bytes: usize,
     ) -> Result<Option<Accepted>, IngestError> {
+        // The raw bytes go to the blob store BEFORE the row is written, so a row can never point
+        // at an object that does not exist. The other order fails in the worse direction: a
+        // `raw_blob_id` referring to nothing is a 404 on a message the API otherwise serves
+        // happily, which reads as data loss rather than as a missing feature.
+        //
+        // A blob-store failure is NOT fatal to the delivery. The message itself is fine; refusing
+        // it would turn "the disk is full" into "we reject your mail", and an MTA that bounces on
+        // a local storage problem loses mail that a 4xx would have had redelivered. Logged loudly,
+        // stored without its raw.
+        let raw_blob_id = match &self.blobs {
+            None => None,
+            Some(store) => match store.put(raw).await {
+                Ok(id) => Some(id.to_string()),
+                Err(e) => {
+                    tracing::error!(error = %e, "could not store raw MIME; accepting without it");
+                    None
+                }
+            },
+        };
         accept(
             &self.pool,
             &self.auth,
@@ -229,6 +262,8 @@ impl Persist for StorePersist {
                 envelope: envelope.clone(),
                 dest: dest.clone(),
                 max_message_bytes,
+                raw_blob_id,
+                blobs: self.blobs.as_ref(),
             },
         )
         .await
@@ -297,7 +332,32 @@ pub async fn accept(
         return Err(reject("Missing Message-ID"));
     }
 
-    let attachments = collect_attachments(&parsed)?;
+    let collected = collect_attachments(&parsed)?;
+    // Bodies to the blob store BEFORE the row is written, mirroring the raw-blob ordering in
+    // `StorePersist::persist` and for the same reason: the map may under-promise (a store failure
+    // drops that entry, loudly) but must never point at an object that does not exist. Failure is
+    // non-fatal per body, not per message -- one unwritable attachment must not take down a
+    // delivery, and must not take the OTHER attachments' bodies with it.
+    let mut attachment_blobs: Option<BTreeMap<String, String>> = None;
+    if let (Some(store), Some(pairs)) = (req.blobs, collected.as_ref()) {
+        let mut map = BTreeMap::new();
+        for (meta, body) in pairs {
+            match store.put(body).await {
+                Ok(id) => {
+                    map.insert(meta.attachment_id.to_string(), id.to_string());
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        attachment = %meta.attachment_id,
+                        "could not store attachment body; keeping metadata without it"
+                    );
+                }
+            }
+        }
+        attachment_blobs = (!map.is_empty()).then_some(map);
+    }
+    let attachments = collected.map(|pairs| pairs.into_iter().map(|(m, _)| m).collect::<Vec<_>>());
 
     let in_reply_to = structured_in_reply_to(&parsed);
     let references = structured_references(&parsed);
@@ -407,6 +467,8 @@ pub async fn accept(
             html,
             extracted_text,
             extracted_html,
+            raw_blob_id: req.raw_blob_id.clone(),
+            attachment_blobs,
         },
     )
     .await;
@@ -717,7 +779,16 @@ fn raw_header_map(raw: &[u8], msg: &Message<'_>) -> BTreeMap<String, String> {
     map
 }
 
-fn collect_attachments(msg: &Message<'_>) -> Result<Option<Vec<Attachment>>, IngestError> {
+/// Metadata plus the DECODED body bytes of each attachment, in the same order.
+///
+/// The body comes back alongside the metadata rather than from a second walk, because the pairing
+/// is by position in `msg.attachments()` and two walks would have to re-derive it -- an off-by-one
+/// there stores one attachment's bytes under another's id, which is a cross-attachment disclosure
+/// inside a message rather than a crash. One walk makes the pairing correct by construction.
+/// Metadata paired with its decoded body — the return shape of [`collect_attachments`].
+type CollectedAttachments = Vec<(Attachment, Vec<u8>)>;
+
+fn collect_attachments(msg: &Message<'_>) -> Result<Option<CollectedAttachments>, IngestError> {
     let mut out = Vec::new();
     for part in msg.attachments() {
         let filename = part.attachment_name().map(ToOwned::to_owned);
@@ -733,19 +804,33 @@ fn collect_attachments(msg: &Message<'_>) -> Result<Option<Vec<Attachment>>, Ing
         });
         let content_disposition = part.content_disposition().map(|cd| cd.ctype().to_string());
         let content_id = part.content_id().map(ToOwned::to_owned);
-        out.push(Attachment {
-            attachment_id: AttachmentId::new_random(),
-            filename,
-            size,
-            content_type,
-            content_disposition,
-            content_id,
-        });
+        out.push((
+            Attachment {
+                attachment_id: AttachmentId::new_random(),
+                filename,
+                size,
+                content_type,
+                content_disposition,
+                content_id,
+            },
+            part_body(part),
+        ));
     }
     if out.is_empty() {
         Ok(None)
     } else {
         Ok(Some(out))
+    }
+}
+
+/// The decoded bytes of a part -- what `part_len` measures, so the stored object's length always
+/// equals the `size` the metadata advertises.
+fn part_body(part: &mail_parser::MessagePart<'_>) -> Vec<u8> {
+    match &part.body {
+        PartType::Text(t) | PartType::Html(t) => t.as_bytes().to_vec(),
+        PartType::Binary(b) | PartType::InlineBinary(b) => b.to_vec(),
+        PartType::Message(m) => m.raw_message().to_vec(),
+        PartType::Multipart(_) => Vec::new(),
     }
 }
 

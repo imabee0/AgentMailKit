@@ -2,6 +2,7 @@
 //! identity + organization, pods, inboxes, api-keys.
 
 pub mod api_keys;
+pub mod attachments;
 pub mod identity;
 pub mod inboxes;
 pub mod messages;

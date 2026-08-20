@@ -1,0 +1,15 @@
+# The third leg of P1's gate: "schemathesis over implemented paths".
+#
+# Installed into its OWN venv (.venv-schemathesis), never into .venv-gate. The SDK smokes pin
+# `agentmail` exactly and the whole point of that pin is that the resolver never moves it;
+# schemathesis pulls in a large transitive tree (hypothesis, httpx, werkzeug, jsonschema) and one
+# shared environment is one resolution away from silently upgrading the client the gate is meant to
+# hold still. Two venvs cost a few seconds at gate time and remove that entirely.
+#
+#   python3 -m venv .venv-schemathesis
+#   .venv-schemathesis/bin/pip install -r conformance/requirements-schemathesis.txt
+#
+# Pinned exactly, same reasoning as the SDK pins: a fuzzer whose generation strategies changed under
+# us produces a differently-shaped run, and "the gate passed" then means something different from
+# what the captured transcript says it means.
+schemathesis==4.24.3

@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Domain logic: scope resolution, permission intersection, label rules, threading. Pure logic, no I/O."
 
 [dependencies]
@@ -17,6 +18,12 @@ thiserror.workspace = true
 # scope.rs compares `Identity::scope_id` (a text column) against `PodId` (a UUID) by VALUE, not
 # by rendering — otherwise a brace-wrapped or uppercase scope_id locks a key out of its own pod.
 uuid.workspace = true
+# `download.rs` mints and verifies the signed URL tokens fixture 06 describes. Pure computation
+# over bytes -- no I/O, no storage -- which is why it lives in this crate and not amk-store.
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+base64.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

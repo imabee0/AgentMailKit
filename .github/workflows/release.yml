@@ -1,0 +1,86 @@
+# Release: PROMOTE what CI already built. Nothing here compiles Rust.
+#
+# The rule this enforces is "build once": the binaries and the image attached to a release are the
+# exact artifacts `ci.yml` produced for that commit, identified by digest. Recompiling at release
+# time would produce a DIFFERENT artifact from the one that passed the gate -- bit-for-bit, and
+# potentially in behaviour -- which makes the gate's verdict apply to something nobody ships.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+# Never cancel a release in flight: a half-published tag is worse than a slow one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: promote ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub release
+      packages: write   # re-tag the existing image
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+
+      - name: Find the CI run that gated this commit
+        id: run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The tagged commit must already have a SUCCESSFUL ci run. Releasing a commit CI never
+          # passed -- or never saw -- is the failure this lookup exists to make impossible.
+          id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+                 --commit "$GITHUB_SHA" --status success --limit 1 --json databaseId \
+                 --jq '.[0].databaseId // empty')
+          if [ -z "$id" ]; then
+            echo "::error::no successful ci.yml run for $GITHUB_SHA -- refusing to release an ungated commit"
+            exit 1
+          fi
+          echo "run_id=$id" >> "$GITHUB_OUTPUT"
+
+      - name: Download the gated binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh run download "${{ steps.run.outputs.run_id }}" --repo "$GITHUB_REPOSITORY" \
+            --name "bins-$GITHUB_SHA" --dir dist
+          chmod +x dist/amk dist/amkd
+          # Recorded in the release so a downloaded binary can be matched to its build.
+          (cd dist && sha256sum amk amkd > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Re-tag the existing image, do not rebuild it
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          img="ghcr.io/${GITHUB_REPOSITORY,,}"
+          # By digest-bearing sha tag, which ci.yml pushed. `buildx imagetools create` copies the
+          # manifest -- it does not pull, rebuild or re-push layers -- so the release tag and the
+          # main tag are the SAME digest. This is what "avoid rebuilding identical artifacts
+          # between environments" means concretely.
+          docker buildx imagetools create \
+            --tag "${img}:${GITHUB_REF_NAME}" \
+            --tag "${img}:latest" \
+            "${img}:sha-${GITHUB_SHA}"
+          docker buildx imagetools inspect "${img}:${GITHUB_REF_NAME}" --format '{{.Manifest.Digest}}'
+
+      - uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
+        with:
+          files: |
+            dist/amk
+            dist/amkd
+            dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

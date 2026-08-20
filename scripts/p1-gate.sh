@@ -16,7 +16,7 @@ set -uo pipefail
 # missing — found by cross-checking a "still failing" gate result against a manual curl of the
 # freshly built binary, which passed. `dirname "$0"` is this script's own directory regardless of
 # caller cwd, so `.. ` from `scripts/` is always the repository root THIS script is part of.
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 DB=amk_p1gate
 PORT=55432
@@ -50,7 +50,20 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== build =="
-cargo build -p amk-cli --bins 2>&1 | tail -2
+# CI compiles once in `build-bins` (release) and every downstream job downloads that artifact.
+# Rebuilding here would be a second compile of the same crate, and — worse — a *debug* compile,
+# so the gate would exercise a different binary from the one shipped. Same contract as
+# `scripts/binary-smoke.sh`'s `AMK_SMOKE_SKIP_BUILD`.
+BIN=./target/debug
+if [ "${AMK_GATE_SKIP_BUILD:-0}" = "1" ]; then
+  BIN=./target/release
+  for b in amk amkd; do
+    [ -x "$BIN/$b" ] || { echo "FATAL: AMK_GATE_SKIP_BUILD=1 but $BIN/$b is missing or not executable" >&2; exit 1; }
+  done
+  echo "  using prebuilt $BIN (AMK_GATE_SKIP_BUILD=1)"
+else
+  cargo build -p amk-cli --bins 2>&1 | tail -2 || exit 1
+fi
 
 echo "== throwaway database =="
 "$PSQL" "$MAINT_DSN" -qc "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1
@@ -66,10 +79,10 @@ export AMK_PRODUCT_NAME=AgentMailKit
 export AMK_BIND="$BIND"
 
 echo "== migrate =="
-./target/debug/amk migrate || exit 1
+"$BIN/amk" migrate || exit 1
 
 echo "== init (root key captured, never printed) =="
-INIT_OUT=$(./target/debug/amk init) || exit 1
+INIT_OUT=$("$BIN/amk" init) || exit 1
 CAND_KEY=$(printf '%s\n' "$INIT_OUT" | sed -n 's/.*root api key: *//p' | tr -d ' ')
 printf '%s\n' "$INIT_OUT" | sed -E 's/(root api key: *).*/\1<redacted>/'
 [ -n "$CAND_KEY" ] || { echo "FATAL: could not capture the root key"; exit 1; }
@@ -100,7 +113,7 @@ echo "== operator configuration (direct UPDATE — no endpoint sets these; that 
      authentication_id='p1gate-auth', authentication_type='p1gate-type'" >/dev/null
 
 echo "== serve =="
-./target/debug/amkd --role api &
+"$BIN/amkd" --role api &
 AMKD_PID=$!
 for _ in $(seq 1 40); do
   curl -fsS -o /dev/null -K "$CURLRC" "http://${BIND}/v0/auth/me" && break
@@ -153,16 +166,20 @@ for r in pods inboxes api-keys; do
 done
 
 echo
+# Lane L is everything that needs only this repository. Lane R is the dual-target diff, which
+# needs a read-only AgentMail key. CI sets AMK_GATE_LANE=L so a missing key cannot look like a
+# pass, and so a PR never reaches api.agentmail.to.
 echo "== dual-target conformance diff: api.agentmail.to vs localhost =="
-# The real gate: conformance/dual_target.py's own structural diff, not the ad hoc key-set probe
-# that established the four divergences in the first place (that was a debugging aid run by hand;
-# this is the thing p1-gate-conformance actually reads). Its own summary line ("N requests, M
-# compared, X skipped, Y with structural diffs") is the ledger's pass/fail criterion verbatim.
-AGENTMAIL_API_KEY='sdxd:agentmail' CAND_KEY="$CAND_KEY" sdxd run -- bash -c '
-  REF_KEY="$AGENTMAIL_API_KEY" CAND_BASE="http://127.0.0.1:8111" CAND_KEY="$CAND_KEY" \
-    python3 conformance/dual_target.py conformance/manifest.json'
-GATE_EXIT=$?
-echo "dual_target.py exit: $GATE_EXIT"
+if [ "${AMK_GATE_LANE:-all}" = "L" ]; then
+  echo "  skipped (AMK_GATE_LANE=L) — needs AGENTMAIL_READONLY_KEY; not a pass"
+  GATE_EXIT=0
+else
+  AGENTMAIL_API_KEY='sdxd:agentmail' CAND_KEY="$CAND_KEY" sdxd run -- bash -c '
+    REF_KEY="$AGENTMAIL_API_KEY" CAND_BASE="http://127.0.0.1:8111" CAND_KEY="$CAND_KEY" \
+      python3 conformance/dual_target.py conformance/manifest.json'
+  GATE_EXIT=$?
+  echo "dual_target.py exit: $GATE_EXIT"
+fi
 
 echo
 echo "== P1 gate, second half: the unmodified official Python SDK against the same server =="
@@ -172,7 +189,7 @@ echo "== P1 gate, second half: the unmodified official Python SDK against the sa
 # required field the model insists on), so neither half subsumes the other.
 if [ ! -x .venv-gate/bin/python ]; then
   python3 -m venv .venv-gate
-  .venv-gate/bin/pip install -q -r conformance/requirements-gate.txt
+  .venv-gate/bin/pip install -q --require-hashes -r conformance/requirements-gate.txt
 fi
 AMK_BASE="http://${BIND}" AMK_KEY="$CAND_KEY" .venv-gate/bin/python conformance/sdk_smoke.py
 SMOKE_EXIT=$?
@@ -246,9 +263,12 @@ echo "== P1 gate, fourth part: schemathesis over the implemented paths =="
 # diffs ours against the LIVE reference's for every request. What is kept is what the spec is good
 # at — response shapes, content types, no 5xx — plus three checks of our own carrying the
 # invariants no OpenAPI document can express (conformance/schemathesis_checks.py).
-if [ ! -x .venv-schemathesis/bin/st ]; then
+# A tracked venv from another machine has a shebang that does not exist here; `-x` is true and
+# `st` then fails with "required file not found". Probe by running it, not by looking at the bit.
+if ! .venv-schemathesis/bin/st --version >/dev/null 2>&1; then
   python3 -m venv .venv-schemathesis
-  .venv-schemathesis/bin/pip install -q -r conformance/requirements-schemathesis.txt
+  .venv-schemathesis/bin/pip install --require-hashes -r conformance/requirements-schemathesis.txt \
+    || { echo "FATAL: could not install schemathesis from the hash-pinned requirements" >&2; exit 1; }
 fi
 # `SCOPE_EXIT=$?` after a `mapfile < <(...)` reads MAPFILE's status, not the script's — which is
 # always 0, so a router/spec disagreement would have been announced and then ignored. Capture the
@@ -257,7 +277,8 @@ INCLUDE_ARGS=$(python3 conformance/schemathesis_scope.py --include-args)
 SCOPE_EXIT=$?
 mapfile -t INCLUDE <<< "$INCLUDE_ARGS"
 if [ "$SCOPE_EXIT" -ne 0 ]; then
-  echo "FATAL: router() and openapi.json disagree — run scripts/derive-implemented-paths.sh"
+  echo "FATAL: router() and openapi.json disagree — run scripts/derive-implemented-paths.sh" >&2
+  exit 1
 fi
 PYTHONPATH=. SCHEMATHESIS_HOOKS=conformance.schemathesis_checks AMK_KEY="$CAND_KEY" \
   .venv-schemathesis/bin/st --config-file conformance/schemathesis.toml \

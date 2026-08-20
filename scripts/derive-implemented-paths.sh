@@ -7,5 +7,5 @@
 # for its `--include-path` arguments — one owner, so the gate and the contract can never scope
 # themselves differently. Exits non-zero when router() and the spec disagree.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 exec python3 conformance/schemathesis_scope.py --list

@@ -14,8 +14,32 @@ use crate::body::validation_error;
 use crate::error::AppError;
 
 /// `limit`: default 100 when the caller omits it, `[ASSUMED]` — no fixture observed an omitted
-/// `limit`. There is deliberately **no maximum**: see [`parse_limit`].
+/// `limit`.
 pub const DEFAULT_LIMIT: u64 = 100;
+
+/// The largest number of rows one page will actually FETCH. `[INFERRED]`
+///
+/// The caller's value is never rejected and never altered in the response — `?limit=101` is 200
+/// and echoes `"limit":101`, which `[SPEC:reference/fixtures/27-malformed-request-handling.txt]`
+/// §1 observed live and which the reference explicitly does not cap. That behaviour is preserved
+/// exactly; this bounds only the `LIMIT` that reaches Postgres.
+///
+/// Why it is needed: `?limit=18446744073709551615` was accepted verbatim and became
+/// `LIMIT i64::MAX`. `amk-store` already stops that OVERFLOWING (`saturating_add(1).min(i64::MAX)`
+/// in `messages::list`), so the bug was never a panic — it was that any authenticated caller,
+/// including a low-privilege scoped key, could ask the database to materialise an entire table in
+/// one query and hold it in memory.
+///
+/// Why 1000: an order of magnitude above the reference CLI's documented page size of 100 and above
+/// the largest value anyone has probed (101), so no realistic caller notices, while a page stays
+/// bounded. Marked `[INFERRED]` because the reference's own true ceiling is UNOBSERVED — fixture
+/// 27 tested 101 and stopped, deliberately: finding a production API's real limit means firing
+/// progressively larger requests at somebody else's service.
+///
+/// A clamped page is not a silent truncation. `count` reports the rows actually returned and a
+/// `next_page_token` is issued, so a caller who genuinely wants more pages for it — which is what
+/// pagination is.
+pub const MAX_LIMIT: u64 = 1000;
 
 /// The query parameters for the four list endpoints that carry `ascending`.
 ///
@@ -209,9 +233,16 @@ fn resolve(
         Some(raw) => Some(parse_limit(raw)?),
         None => None,
     };
+    let requested = parsed.unwrap_or(DEFAULT_LIMIT);
+    if requested > MAX_LIMIT {
+        // Visible rather than silent: an operator seeing this repeatedly is watching someone
+        // probe, or a client with a bug.
+        tracing::debug!(requested, cap = MAX_LIMIT, "list limit clamped");
+    }
     Ok(Resolved {
-        limit: parsed.unwrap_or(DEFAULT_LIMIT),
-        // The caller's own value, uncapped — see the field's own doc.
+        // Clamped: this is the value that becomes `LIMIT` in SQL.
+        limit: requested.min(MAX_LIMIT),
+        // NOT clamped: the caller's own value, echoed verbatim, because the reference does.
         echo_limit: parsed,
         direction: direction_for(ascending),
         page_token,
@@ -265,9 +296,17 @@ mod tests {
         assert_eq!(r.limit, 101, "the caller's value reaches the query uncapped");
         assert_eq!(r.echo_limit, Some(101), "fixture 27 §1 echoes 101, not the old clamped 100");
 
-        let big = q("9999999").resolve().expect("no upper cap is enforced");
-        assert_eq!(big.limit, 9_999_999);
-        assert_eq!(big.echo_limit, Some(9_999_999));
+        // NARROWED 2026-08-19. This used to assert that `?limit=9999999` reached SQL as
+        // 9_999_999, citing "no upper cap is enforced" — but fixture 27 §1 probed 101 and
+        // stopped, deliberately, because finding a production API's real ceiling means firing
+        // progressively larger requests at somebody else's service. The test generalised one
+        // observation at 101 into a universal claim, and that claim was load-bearing: it is what
+        // made `?limit=18446744073709551615` reach Postgres as `LIMIT i64::MAX`.
+        let big = q("9999999")
+            .resolve()
+            .expect("a large limit is accepted, not rejected");
+        assert_eq!(big.echo_limit, Some(9_999_999), "the caller's value is still echoed verbatim");
+        assert_eq!(big.limit, MAX_LIMIT, "but the query itself is bounded");
     }
 
     /// The single `errors[]` entry the envelope actually carries — every assertion below reads
@@ -331,5 +370,47 @@ mod tests {
             .resolve()
             .expect("5 is a valid limit");
         assert_eq!(r.direction, SortDirection::Descending);
+    }
+
+    // ---------------------------------------------------------------- MAX_LIMIT
+    // Two properties that pull in opposite directions, so both are pinned: the SQL limit must be
+    // bounded, and the echoed limit must NOT be, because the reference echoes what it was asked.
+
+    #[test]
+    fn an_absurd_limit_is_clamped_before_it_reaches_sql() {
+        let r = resolve(Some("18446744073709551615"), None, None).expect("must not be rejected");
+        assert_eq!(r.limit, MAX_LIMIT, "u64::MAX reached the query unclamped");
+    }
+
+    #[test]
+    fn the_echoed_limit_is_the_callers_value_even_when_clamped() {
+        let r = resolve(Some("999999"), None, None).unwrap();
+        assert_eq!(r.echo_limit, Some(999_999));
+        assert_eq!(r.limit, MAX_LIMIT);
+    }
+
+    #[test]
+    fn the_one_over_limit_value_a_fixture_actually_observed_is_untouched() {
+        let r = resolve(Some("101"), None, None).unwrap();
+        assert_eq!(r.limit, 101, "101 must reach SQL unchanged -- fixture 27 pins it");
+        assert_eq!(r.echo_limit, Some(101));
+        // A const block on purpose: lowering MAX_LIMIT below a value the reference was OBSERVED
+        // to accept should fail the BUILD, not a test run.
+        const { assert!(MAX_LIMIT > 101, "the cap must sit above every observed value") };
+    }
+
+    #[test]
+    fn ordinary_limits_and_the_default_are_unaffected() {
+        assert_eq!(resolve(Some("25"), None, None).unwrap().limit, 25);
+        assert_eq!(resolve(None, None, None).unwrap().limit, DEFAULT_LIMIT);
+        assert_eq!(resolve(None, None, None).unwrap().echo_limit, None);
+        assert_eq!(resolve(Some("1000"), None, None).unwrap().limit, 1000);
+    }
+
+    #[test]
+    fn clamping_does_not_turn_a_rejection_into_an_acceptance() {
+        for bad in ["0", "-1", "", "1.5", "abc"] {
+            assert!(resolve(Some(bad), None, None).is_err(), "{bad:?} must still be rejected");
+        }
     }
 }

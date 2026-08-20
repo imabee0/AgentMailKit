@@ -19,6 +19,7 @@
 
 # Throwaway venv for the SDK phase gates; see conformance/requirements-gate.txt
 .venv-gate/
+.venv-schemathesis/
 
 # The Node half of the same gates. conformance/package.json and its lockfile ARE tracked — the
 # pin is the gate — but the installed tree is not.

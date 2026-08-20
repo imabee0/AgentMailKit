@@ -15,11 +15,29 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/Appsynergy-io/AgentMailKit"
+repository = "https://github.com/imabee0/AgentMailKit"
+# Nothing here is published to crates.io: the seven crates are one deployable unit that happens to
+# be split for the dependency-direction rule `scripts/shape-provenance.sh` enforces. Stating that
+# is not cosmetic -- `cargo deny check bans` treats a version-less path dependency as a WILDCARD
+# and fails on it for any crate it believes is publishable, because crates.io would reject the
+# manifest. Declared here so the fact lives in one place, and so an accidental `cargo publish`
+# refuses rather than uploading a private mail server.
+publish = false
 
 # Pins verified in P-1 item 15 (reference/fixtures/15-compile-spike.txt): every
 # version below resolves AND the APIs we rely on compile. Do not bump without
 # re-running that spike.
+[profile.release]
+# Symbols stripped by CARGO, not by a `strip` invocation in the Dockerfile.
+#
+# Two reasons, and the second is the one that matters. (1) `rust:*-slim` is not guaranteed to ship
+# binutils, so calling `strip` there is a bet on the base image's package list. (2) The Dockerfile
+# used to strip while `ci.yml`'s build-bins job did not -- so the binaries CI uploaded as its
+# artifact and the binaries inside the image were DIFFERENT BYTES for the same commit, which
+# quietly undermines the build-once story those two jobs exist to tell. Declaring it here makes
+# every release build identical, wherever it runs.
+strip = "symbols"
+
 [workspace.dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
@@ -56,6 +74,29 @@ mail-builder = "=0.4.4"
 mail-auth = "=0.12.0"
 mail-parser = "=0.11.6"
 smtp-proto = "=0.2.3"
+
+# Structured logging. `docs/PLAN.md`:190 requires "logs structured to stdout, key-ids never key
+# material" and :206 names a metrics surface; neither existed -- an audit found ZERO `tracing::`
+# or `log::` call sites workspace-wide and 26 `println!`s. Added now rather than after
+# amk-events/jobs/dns/mcp exist, because threading it through six more crates later costs several
+# times what threading it through four does.
+#
+# `tracing` is already in Cargo.lock at this exact version, pulled transitively by sqlx and
+# hickory, so naming it directly adds no crate to the build. `tracing-subscriber` is genuinely
+# new and is the only way anything is emitted; `json` is what makes the output structured rather
+# than pretty, and `env-filter` is what lets an operator raise a level without a rebuild.
+# Signed download URLs (amk-core::download). All three are ALREADY in Cargo.lock -- argon2 pulls
+# the digest stack and `hmac 0.13` pairs with `sha2 0.11` -- so naming them adds no crate to the
+# build. `subtle` is what makes signature comparison constant-time; `==` on a MAC is a byte-at-a-
+# time oracle that lets an attacker forge one signature byte at a time.
+hmac = "=0.13.0"
+sha2 = "=0.11.0"
+subtle = "=2.6.1"
+
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = [
+    "std", "fmt", "json", "env-filter", "ansi",
+] }
 
 axum = { version = "=0.8.9", features = ["ws"] }
 tower = "=0.5.3"

@@ -8,6 +8,7 @@ mod support;
 
 use amk_cli::commands::init;
 use amk_http::{router, AppConfig, AppState};
+use amk_outbound::Keyring;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
@@ -145,7 +146,7 @@ async fn the_router_amkd_mounts_answers_auth_me_with_the_root_key_from_init() {
     let outcome = init::run_with_pool(&db.pool, None)
         .await
         .expect("init must succeed");
-    let app = router(AppState::new(db.pool.clone(), AppConfig::default()));
+    let app = router(AppState::new(db.pool.clone(), AppConfig::default(), Keyring::new()));
 
     let request = Request::builder()
         .method("GET")

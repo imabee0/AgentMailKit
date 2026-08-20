@@ -1,0 +1,20 @@
+# The image is `cargo build --release -p amk-cli --bins`. Nothing else in the context
+# is an input, and without this file `docker build .` ships ~9 GB of `target/` and
+# venvs into the daemon — which also invalidates cargo-chef on every local compile.
+target/
+.git/
+.amk-dev-db/
+.venv-gate/
+.venv-schemathesis/
+.venv-*/
+conformance/node_modules/
+.schemathesis/
+.claude/worktrees/
+.grok/
+__pycache__/
+*.pyc
+**/*.rs.bk
+.amk-scope
+.amk-task.md
+.amk-brief.md
+.claude/fanout.lock

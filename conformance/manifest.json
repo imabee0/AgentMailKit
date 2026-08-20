@@ -1,5 +1,5 @@
 {
-  "_comment": "Dual-target manifest for the P1 control-plane gate. Covers the READ surface of the 25 operations amk-http mounts, plus the error-shape asymmetry. Ids are PLACEHOLDERS resolved per target at runtime (see `resolve`), because the reference account's pod is not our pod and `inbox_id` IS an email address \u2014 a hardcoded id can only ever exist on one side. Mutating requests are NOT here: every POST/PATCH/DELETE in this phase creates or destroys a real resource on the reference account, so they are exercised by the SDK smoke against the candidate and added here only against a throwaway scope.",
+  "_comment": "Dual-target manifest for the P1 control-plane gate. Covers the READ surface of the 25 operations amk-http mounts, plus the error-shape asymmetry. Ids are PLACEHOLDERS resolved per target at runtime (see `resolve`), because the reference account's pod is not our pod and `inbox_id` IS an email address — a hardcoded id can only ever exist on one side. Mutating requests are NOT here: every POST/PATCH/DELETE in this phase creates or destroys a real resource on the reference account, so they are exercised by the SDK smoke against the candidate and added here only against a throwaway scope.",
   "resolve": {
     "pod_id": {
       "from": "/v0/pods?limit=1",
@@ -11,8 +11,10 @@
     }
   },
   "expected_divergences": {
-    "$.billing_plan_id": "no billing surface (project non-negotiable) \u2014 nothing truthful to put here, and an invented value would be worse than omitting it. Pinned by a test in amk-types::pod.",
-    "$.clerk_organization_id": "AgentMail authenticates through Clerk; this deployment does not. Same reasoning as billing_plan_id."
+    "$.billing_plan_id": "no billing surface (project non-negotiable) — nothing truthful to put here, and an invented value would be worse than omitting it. Pinned by a test in amk-types::pod.",
+    "$.clerk_organization_id": "AgentMail authenticates through Clerk; this deployment does not. Same reasoning as billing_plan_id.",
+    "$.threads[*].labels": "Register C2, CLOSED BY DECISION 2026-08-19. Whether a thread's labels are a strict union of its members' is unobservable from any fixture we have -- every threaded message in 16-threading-matrix/ and 09b is homogeneously labelled, and inducing a mixed thread needs a spam-classified message threaded to a clean one, which cannot be reliably provoked on someone else's production API. The fail-closed reading is implemented: a hidden member is filtered from membership AND every aggregate derived from it (message_count, size, last_message_id, senders, recipients, preview) is recomputed from what remains. If upstream publishes union labels this path is unreachable and we match anyway; if it does not, we under-disclose, which is the direction to be wrong in. Pinned by amk-core::labels::tests::c2_decision_thread_aggregates_are_recomputed_from_visible_members_only.",
+    "GET /v0/blobs/{blob_id}": "OURS, and not in openapi.json -- deliberately. The reference's download_url points at cdn.agentmail.to, a CloudFront distribution with its own signature scheme that cannot be reproduced here. Fixture 06 measured what the CONTRACT is (a bearer-free URL that works, then 403s after ~1h) and that is what is reproduced; the URL's host and opaque interior are necessarily different. derive-implemented-paths.sh reports this path as 'mounted but not described', which is correct and expected: it cannot be schema-fuzzed because the reference has no such operation to fuzz against. Its behaviour is covered by amk-core::download's tests and by binary-smoke.sh instead."
   },
   "requests": [
     {

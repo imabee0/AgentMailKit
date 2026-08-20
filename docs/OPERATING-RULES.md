@@ -62,13 +62,14 @@ code opened this session. Smallest correct change; tests assert observable behav
 
 ## Structure and forge
 
-**GitHub, as of 2026-08-17** — `https://github.com/Appsynergy-io/AgentMailKit`, private. This
-reverses the standing "Gitea only, never GitHub" rule by explicit user instruction, for this
-project only, so the repo can be driven from Claude's cloud sandbox. The Gitea remote was dropped;
-a copy of the pre-migration history remains on `git.appsynergy.io` and is not maintained.
+**GitHub, as of 2026-08-17** — `https://github.com/imabee0/AgentMailKit`. This reverses the
+standing "Gitea only, never GitHub" rule by explicit user instruction, for this project only, so
+the repo can be driven from Claude's cloud sandbox. The Gitea remote was dropped; a copy of the
+pre-migration history remains on `git.appsynergy.io` and is not maintained.
 
-Default flow: branch → implement → verify → push → PR → merge. `main` is protected by convention,
-not by a server rule: nothing lands except a merge that passed a phase gate.
+Default flow: branch → implement → verify → push → PR → merge. `main` is protected by GitHub
+ruleset `protect-main` (no delete, no force-push, linear history, PR required). `ci-ok` becomes
+the single required check after its first green run exists.
 
 - **Isolation:** mutating work runs as a subagent in an isolated git worktree under
   `.claude/worktrees/`; the orchestrator does not write feature code on the primary checkout.

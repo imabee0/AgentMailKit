@@ -54,6 +54,12 @@ emit("CWD", d.get("cwd"))
 
 TOOL="${TOOL:-}"; FILE="${FILE:-}"; CMD="${CMD:-}"; CONTENT="${CONTENT:-}"; CWD="${CWD:-}"
 
+# Is the CALLER an implementer? For Bash there is no target path to key on, so this is CWD only --
+# the same partial signal rule 0 exists because of. It is why the fan-out-lock half above is keyed
+# on the lock rather than on identity, and why this half is the weaker of the two.
+IN_WORKTREE_CMD=0
+case "$CWD" in */.claude/worktrees/*|*/.grok/worktrees/*) IN_WORKTREE_CMD=1 ;; esac
+
 # ---------------------------------------------------------------- Bash rules
 if [ "$TOOL" = "Bash" ]; then
   # A refactor agent inheriting Bash has, in a reported incident, run `git reset` against a shared
@@ -70,6 +76,83 @@ Commit on your own branch; the orchestrator merges. If you believe you need this
       esac
       ;;
   esac
+
+  # ------------------------------------------------------------------ Bash writes to frozen paths
+  #
+  # Rules 0, 1, 2 and 4 below only ever see Write/Edit/NotebookEdit. An audit on 2026-08-19 pointed
+  # out the consequence: `sed -i`, `cp`, `tee` and plain `>` redirection reach exactly the same
+  # files and walked straight past every one of them. An agent forbidden to Edit crates/amk-types
+  # could `echo ... >> crates/amk-types/src/ids.rs` and nothing fired.
+  #
+  # WHAT THIS IS AND IS NOT. Deciding "does this shell command write to path X" is undecidable in
+  # general -- `python3 -c` with a base64 payload, a script written then executed, `eval` on a
+  # constructed string. This does not attempt it and does not claim to. It requires TWO things
+  # together: a write-shaped verb AND a frozen path named in the same command. That catches the
+  # accidental case outright and raises the cost of the deliberate one from "type a different
+  # command" to "write an obfuscator", which is a different kind of act and a visible one in a
+  # transcript.
+  #
+  # Stated plainly so nobody reads more into it: this NARROWS the hole. The honest backstop is
+  # still the orchestrator reviewing the returned diff before merging, exactly as the residual note
+  # under rule 3 already says.
+  #
+  # Both conditions are required to keep false positives near zero: `grep amk-types` and
+  # `cargo test -p amk-types` name a frozen path with no write verb, and `cp a.rs b.rs` is a write
+  # verb naming nothing frozen. Neither trips.
+  # Matched against a SPACE-PREFIXED copy. Without it the verb patterns have to choose between
+  # `*" cp "*`, which misses a command starting with `cp`, and `*"cp "*`, which matches inside
+  # `scp ` and `recp `. Prefixing normalises start-of-string to the same shape as mid-string, so
+  # one pattern is both correct and anchored on a word boundary. (The first version of this rule
+  # mixed the two forms and let `cp /tmp/x.rs crates/amk-types/src/ids.rs` through -- caught by
+  # its own test, which is why the negative cases below exist.)
+  bash_writes=0
+  case " $CMD" in
+    *">"*|*" sed -i"*|*" cp "*|*" mv "*|*" tee "*|*" install "*|*" truncate "*|*" dd "*|*" rm "*|*" chmod "*|*" touch "*|*" ln "*)
+      bash_writes=1 ;;
+  esac
+  if [ "$bash_writes" -eq 1 ]; then
+    # Frozen for EVERYONE while a dispatch is in flight -- the same set, and the same reasoning,
+    # as rule 0. Derived from the lock, not from who is asking.
+    if [ -f "$REPO/.claude/fanout.lock" ]; then
+      case "$CMD" in
+        *"crates/amk-types/"*|*"$PLAN_GLOB"*|*"$PLAN_IN_REPO"*|*".claude/plans/"*|*"scripts/hooks/"*)
+          deny "A fan-out is IN FLIGHT ($REPO/.claude/fanout.lock exists) and this Bash command
+appears to WRITE to a frozen path:
+
+  $CMD
+
+Frozen while dispatched: crates/amk-types/**, the plan, scripts/hooks/**.
+The shell reaches the same files Write/Edit does; the rule does not change because the tool did.
+
+If the change is genuinely needed now: stop the in-flight work, remove the lock, make the change,
+and re-dispatch from the new base."
+          ;;
+      esac
+    fi
+    # Frozen for IMPLEMENTERS at all times, lock or no lock -- rules 1 and 2, via the shell.
+    if [ "$IN_WORKTREE_CMD" -eq 1 ]; then
+      case "$CMD" in
+        *"crates/amk-types/"*)
+          deny "amk-types is FROZEN for implementer agents (plan: five non-negotiables #2), and
+that holds for the shell as much as for Edit:
+
+  $CMD
+
+If you need a type that does not exist, STOP and report -- do not add it."
+          ;;
+      esac
+      case "$CMD" in
+        *"$PLAN_GLOB"*|*"$PLAN_IN_REPO"*|*".claude/plans/"*|*"scripts/hooks/"*)
+          deny "The plan and the hooks are ORCHESTRATOR-ONLY, through any tool:
+
+  $CMD
+
+An agent that can rewrite the guard can disable every other rule.
+If the plan is wrong or ambiguous, STOP and report it -- do not edit it."
+          ;;
+      esac
+    fi
+  fi
   exit 0
 fi
 

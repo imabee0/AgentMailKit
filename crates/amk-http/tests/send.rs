@@ -680,6 +680,8 @@ async fn seed_named_parent(
             html: None,
             extracted_text: None,
             extracted_html: None,
+            raw_blob_id: None,
+            attachment_blobs: None,
         },
     )
     .await
@@ -753,6 +755,8 @@ async fn seed_parent_with_recipients(
             html: None,
             extracted_text: None,
             extracted_html: None,
+            raw_blob_id: None,
+            attachment_blobs: None,
         },
     )
     .await

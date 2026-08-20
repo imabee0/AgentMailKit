@@ -78,10 +78,10 @@ jobs, idempotency. **P2: message/thread landed.** `amk-outbound` is partial.
 
 ## Branching, dispatch and merge
 
-- **One branch per crate per phase, named `amk/<phase>/<crate>`** — `amk/p2/ingest`,
-  `amk/p1/http-extractors`. One worktree per branch under `.claude/worktrees/<name>/`. No branch
-  outlives its phase: one open across a phase boundary is a drift signal, so close it or restart it
-  from the new base.
+- **One branch per crate per phase, named `dev-<8hex>`** — eight lowercase hex digits
+  (e.g. `dev-8818b9cd`). Never `amk/<phase>/<crate>`. One worktree per branch under
+  `.claude/worktrees/<name>/`. No branch outlives its phase: one open across a phase boundary is a
+  drift signal, so close it or restart it from the new base.
 - **Commits conventional and atomic** — one logical change, tests in the same commit as the code
   they cover, no `wip` commits on a branch that will be reviewed.
 - **Rebase onto `main` before review; never merge-commit into the branch.** The reviewed diff must
@@ -173,9 +173,12 @@ Each was observed live; the fixture is the authority.
 
 ## Open at the boundary (do not silently resolve)
 
-- Thread labels vs member labels is **unobserved** — no fixture has a mixed-label thread. The
-  fail-closed choice (filter membership, recompute aggregates) is implemented and marked
-  `[INFERRED]` in one function. Register C2. **This is the only one still open.**
+**Nothing is open.** C2 — thread labels vs member labels — was the last, and it is closed by
+decision (2026-08-19), not by observation: no fixture has a mixed-label thread and inducing one
+means provoking a spam classification on someone else's production API. The fail-closed choice
+(filter membership, recompute aggregates) ships, is marked `[INFERRED]` on one function, is pinned
+by a test named for the assumption, and is declared in `conformance/manifest.json`'s
+`expected_divergences`. It reopens only if a mixed-label thread is ever observed.
 
 Closed by probe, and both reversed an implemented choice — check the fixture before trusting code:
 
@@ -194,7 +197,6 @@ say so plainly and rotate it.
 
 ## Forge
 
-**GitHub:** `https://github.com/Appsynergy-io/AgentMailKit` (private). Migrated from Gitea
-2026-08-17 by user instruction so the repo can be driven from Claude's cloud sandbox — this
-supersedes the global "Gitea only, never GitHub" rule for this project. The Gitea remote was
-dropped; that copy is unmaintained.
+**GitHub:** `https://github.com/imabee0/AgentMailKit`. Migrated from Gitea 2026-08-17 so the
+repo can be driven from Claude's cloud sandbox — this supersedes the global "Gitea only, never
+GitHub" rule for this project. The Gitea remote was dropped; that copy is unmaintained.

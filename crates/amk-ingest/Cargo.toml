@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Inbound SMTP state machine and persist. smtp-proto/mail-parser/mail-auth stay inside this crate."
 
 [dependencies]
@@ -12,12 +13,21 @@ amk-types = { path = "../amk-types" }
 amk-core = { path = "../amk-core" }
 amk-store = { path = "../amk-store" }
 thiserror.workspace = true
+# Structured logging for the delivery path -- a blob-store failure is non-fatal and must be loud.
+tracing.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 sqlx.workspace = true
 chrono.workspace = true
 mail-parser.workspace = true
 mail-auth.workspace = true
 smtp-proto.workspace = true
+# STARTTLS on inbound. Already in Cargo.lock via mail-send, so naming it adds no crate to the
+# build; `ring` matches the provider amk-outbound installs, and enabling a second one would
+# reintroduce the "cannot determine the CryptoProvider" panic that binary-smoke.sh caught.
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "logging", "tls12"] }
+# PEM parsing for the certificate and key. Small, single-purpose, and the alternative is
+# hand-writing a PEM decoder for key material -- exactly the wrong place to save a dependency.
+rustls-pemfile = "=2.2.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

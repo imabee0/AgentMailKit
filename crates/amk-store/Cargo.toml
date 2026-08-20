@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "Persistence: Postgres via sqlx, migrations, blob store, full-text search, signed downloads."
 
 [dependencies]
@@ -30,6 +31,10 @@ chrono.workspace = true
 # flagged version.
 argon2 = "=0.5.3"
 rand = "=0.8.7"
+# Content addressing for the blob store: the id IS the sha256 of the bytes. Already in the lock
+# via argon2, so this adds no crate.
+sha2.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
 
 # Deliberately absent, and each for a reason the plan states:
 #   serde       — this crate stores and retrieves; wire shapes live in amk-types. A Serialize

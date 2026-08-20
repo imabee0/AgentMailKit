@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 description = "The axum HTTP surface: auth layer, scope resolution, error envelope, P0/P1 handlers."
 
 [dependencies]
@@ -31,9 +32,15 @@ percent-encoding.workspace = true
 # `sqlx` pin (already vetted, already the exact version/feature set `amk-store` builds against)
 # is the smallest possible resolution — no SQL is written in this crate, only the type.
 sqlx.workspace = true
+# Structured logging. `tracing` ONLY, never `tracing-subscriber`: a library emits events, and
+# choosing where they go belongs to the binary (amk-cli). A library that installs a global
+# subscriber steals that decision from every consumer, including the test harness.
+tracing.workspace = true
 
 # Deliberately absent, per the dispatch contract:
 #   tower-http / governor / hyper (direct) — not sanctioned; rate limiting is a later dispatch.
+#     The request-id / trace middleware is `axum::middleware::from_fn` (in observability.rs),
+#     which needs no new crate — tower-http's TraceLayer would have been the obvious reach.
 #   mail-parser / mail-auth / mail-send / mail-builder / smtp-proto — stalwart-labs crates belong
 #     to amk-ingest and amk-outbound, converted at that boundary. A shape-provenance check fails
 #     the build if one appears here.

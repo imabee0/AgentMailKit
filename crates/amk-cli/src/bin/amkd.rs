@@ -24,6 +24,17 @@ async fn main() {
         AmkdCommand::Serve(role) => role,
     };
 
+    // FIRST. Everything below logs, and an event emitted before a subscriber exists is dropped
+    // silently -- including the config failures that are the most useful thing a failed start can
+    // tell an operator.
+    amk_cli::logging::init();
+    // DELIBERATE DEVIATION from "replace every println!". The `eprintln!`s below are fatal-exit
+    // messages: the last thing an operator sees before the process dies. They stay on stderr,
+    // unconditionally, because a `tracing::error!` is FILTERABLE -- `AMK_LOG=off` or a
+    // misconfigured filter would swallow the one message explaining why the daemon refused to
+    // start. Two of them also run before this line, during argument parsing, where no subscriber
+    // exists yet. Lifecycle and request events are structured; the refusal-to-start path is not.
+
     if let Some(message) = server::not_yet_implemented(role) {
         eprintln!("{message}");
         std::process::exit(exit::FAILURE);
@@ -37,11 +48,66 @@ async fn main() {
         }
     };
     let bind = config::bind_address();
+
+    // Both of these are read BEFORE any listener is bound, and a set-but-unusable value is fatal
+    // rather than silently absent. `AMK_SMTP_SMARTHOST` is validated here even though
+    // `config::app_config()` reads it again, because `app_config` returns the value and cannot
+    // return the error -- and a malformed smarthost that degraded to direct-to-MX would send mail
+    // out of the wrong path without saying so.
+    if let Err(e) = config::smtp_smarthost() {
+        eprintln!("{e}");
+        std::process::exit(exit::FAILURE);
+    }
+    // Before any listener exists. rustls cannot choose a provider on its own in this workspace
+    // (both `ring` and `aws-lc-rs` are compiled in via feature unification), and without one it
+    // panics inside the request path on the first outbound send rather than at boot.
+    // `amk_outbound::smtp` also guards its own delivery path; this is the boot-time half, so the
+    // failure -- if the chosen provider ever becomes unavailable -- surfaces here instead.
+    amk_outbound::smtp::install_crypto_provider();
+
+    let keyring = match config::dkim_keyring() {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(exit::FAILURE);
+        }
+    };
+    // Startup, in front of an operator -- not on the first sender that offers an upgrade.
+    let smtp_tls = match config::smtp_tls_acceptor() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(exit::FAILURE);
+        }
+    };
+    let blobs = match config::blob_root() {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(exit::FAILURE);
+        }
+    };
+    // A blob store with no way to hand anything out is half a feature, and the failure would
+    // surface as a 500 on the first download rather than here.
+    match config::master_key() {
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(exit::FAILURE);
+        }
+        Ok(None) if blobs.is_some() => {
+            eprintln!(
+                "AMK_BLOB_ROOT is set but AMK_MASTER_KEY is not; signed download URLs cannot be \
+                 minted without it."
+            );
+            std::process::exit(exit::FAILURE);
+        }
+        Ok(_) => {}
+    }
     let app_config = config::app_config();
 
     let result = match role {
-        AmkdRole::Api => server::serve_api(&url, &bind, app_config).await,
-        AmkdRole::Smtpd => server::serve_smtpd(&url, &bind, app_config).await,
+        AmkdRole::Api => server::serve_api(&url, &bind, app_config, keyring, blobs).await,
+        AmkdRole::Smtpd => server::serve_smtpd(&url, &bind, app_config, smtp_tls, blobs).await,
         AmkdRole::Worker | AmkdRole::All => {
             unreachable!("not_yet_implemented already rejected worker/all")
         }

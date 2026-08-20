@@ -84,6 +84,26 @@ impl FromRequestParts<AppState> for PathPodId {
 /// produces is byte-identical to an absent `pod_id`'s.
 pub struct PathPodIdString(pub PodId, pub String);
 
+/// [`PathPodIdString`] with a third segment — the pod-mounted attachment route's shape
+/// (`/v0/pods/{pod_id}/threads/{thread_id}/attachments/{attachment_id}`). Same masking: a
+/// `pod_id` segment that is not a UUID names no pod, so it is the pod-shaped not-found, never
+/// axum's plain-text rejection.
+pub struct PathPodIdStringString(pub PodId, pub String, pub String);
+
+impl FromRequestParts<AppState> for PathPodIdStringString {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        match Path::<(Uuid, String, String)>::from_request_parts(parts, state).await {
+            Ok(Path((id, a, b))) => Ok(Self(PodId::from(id), a, b)),
+            Err(_rejection) => Err(ScopeDenial::new(ResourceKind::Pod).into()),
+        }
+    }
+}
+
 impl FromRequestParts<AppState> for PathPodIdString {
     type Rejection = AppError;
 

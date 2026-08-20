@@ -50,6 +50,132 @@ pub struct NewMessage {
     pub html: Option<String>,
     pub extracted_text: Option<String>,
     pub extracted_html: Option<String>,
+    /// The original RFC 5322 bytes, as a blob id. `None` when no raw was captured -- a composed
+    /// draft, or a message stored before blobs existed. `GET .../raw` is a 404 for those, which is
+    /// the honest answer; inventing a value would be a lie the endpoint then has to serve.
+    pub raw_blob_id: Option<String>,
+    /// `attachment_id -> blob id`, for the bodies that were captured. Ours, never on the wire --
+    /// see migration 0011 for why it is a second column rather than a field on `Attachment`.
+    ///
+    /// May be sparse relative to `attachments`, or absent entirely: a blob-store failure is not
+    /// fatal to accepting a message, so metadata can exist without a body. The fetch endpoint
+    /// answers 404 for those, which is the same answer as "no such attachment" and deliberately
+    /// indistinguishable from it.
+    pub attachment_blobs: Option<BTreeMap<String, String>>,
+}
+
+/// The blob id and byte size of a message's raw form, scoped exactly like [`get`].
+///
+/// A separate query rather than a field on [`Message`], because `raw_blob_id` is OURS -- the
+/// reference exposes no such field, and putting it on the wire type would be an invented shape
+/// that the conformance diff would (correctly) flag.
+///
+/// The scope filter and the excluded-label predicate are applied in SQL, identically to `get`.
+/// That is not defensive duplication: a raw-fetch path that resolved the message with a laxer
+/// query than the read path would hand out the bytes of messages the caller cannot see, which is
+/// strictly worse than exposing the metadata.
+///
+/// `Ok(None)` covers three cases the caller must not distinguish for the client -- no such
+/// message, out of scope, or a message with no raw captured -- because telling them apart is an
+/// existence oracle on an id that is guessable (it is an RFC 5322 Message-ID).
+pub async fn raw_blob(
+    pool: &PgPool,
+    filter: &ScopeFilter,
+    inbox_id: &InboxId,
+    message_id: &MessageId,
+    excluded: &[String],
+) -> Result<Option<(String, u64)>, StoreError> {
+    let row: Option<(Option<String>, i64)> = sqlx::query_as(
+        "SELECT raw_blob_id, size FROM messages \
+         WHERE organization_id = $1 \
+           AND ($2::uuid IS NULL OR pod_id = $2) \
+           AND ($3::text IS NULL OR inbox_id = $3) \
+           AND inbox_id = $4 AND message_id = $5 \
+           AND NOT (labels && $6)",
+    )
+    .bind(filter.organization_id().as_str())
+    .bind(filter.pod_id().map(|p| p.0))
+    .bind(filter.inbox_id().map(|i| i.as_str()))
+    .bind(inbox_id.as_str())
+    .bind(message_id.as_str())
+    .bind(excluded)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(match row {
+        Some((Some(blob), size)) => Some((blob, size.max(0) as u64)),
+        // The message exists but has no raw -- stored before blobs, or composed rather than
+        // received. Same answer as "no such message": there is nothing to serve.
+        Some((None, _)) => None,
+        None => None,
+    })
+}
+
+/// One attachment's metadata and blob id, scoped exactly like [`get`].
+///
+/// `message_id` is optional: `None` searches every message in `thread_id`, which is what the
+/// thread-scoped attachment routes need. Exactly one of `message_id` and `thread_id` is used --
+/// passing neither would be a table scan across the organization, so the caller must supply one.
+///
+/// Every masking rule from [`raw_blob`] applies unchanged, and for the same reason: a fetch path
+/// that resolved an attachment with a laxer query than the read path would hand out the bytes of
+/// mail the caller cannot see. `Ok(None)` covers no-such-message, out-of-scope, no-such-attachment
+/// and metadata-without-a-body alike -- the caller must not distinguish them, because
+/// `attachment_id` is a UUID an attacker can enumerate far more cheaply than they can guess a
+/// Message-ID.
+pub async fn attachment_blob(
+    pool: &PgPool,
+    filter: &ScopeFilter,
+    scope: AttachmentScope<'_>,
+    attachment_id: &str,
+    excluded: &[String],
+) -> Result<Option<(String, Attachment)>, StoreError> {
+    // The blob id is extracted IN SQL rather than by deserialising the whole map: an attachment
+    // map is unbounded in principle, and this only ever wants one entry from it.
+    type BlobAndMeta = (Option<String>, Option<Json<Vec<Attachment>>>);
+    let row: Option<BlobAndMeta> = sqlx::query_as(
+        "SELECT attachment_blobs ->> $7, attachments FROM messages \
+         WHERE organization_id = $1 \
+           AND ($2::uuid IS NULL OR pod_id = $2) \
+           AND ($3::text IS NULL OR inbox_id = $3) \
+           AND ($4::text IS NULL OR inbox_id = $4) \
+           AND ($5::text IS NULL OR message_id = $5) \
+           AND ($6::uuid IS NULL OR thread_id = $6) \
+           AND NOT (labels && $8) \
+           AND attachment_blobs ? $7 \
+         LIMIT 1",
+    )
+    .bind(filter.organization_id().as_str())
+    .bind(filter.pod_id().map(|p| p.0))
+    .bind(filter.inbox_id().map(|i| i.as_str()))
+    .bind(scope.inbox_id.map(|i| i.normalized().as_str().to_owned()))
+    .bind(scope.message_id.map(|m| m.as_str().to_owned()))
+    .bind(scope.thread_id.map(|t| t.0))
+    .bind(attachment_id)
+    .bind(excluded)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some((Some(blob), attachments)) = row else {
+        return Ok(None);
+    };
+    // The row matched on `attachment_blobs`, so the metadata must agree. If it does not, the two
+    // columns have drifted and there is nothing honest to return -- the response is built from the
+    // metadata, and inventing a filename or a size would be worse than a 404.
+    let found = attachments
+        .map(|Json(v)| v)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|a| a.attachment_id.to_string() == attachment_id);
+    Ok(found.map(|a| (blob, a)))
+}
+
+/// Which message the attachment must belong to. Built by the handler from the route it matched.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AttachmentScope<'a> {
+    pub inbox_id: Option<&'a InboxId>,
+    pub message_id: Option<&'a MessageId>,
+    pub thread_id: Option<&'a ThreadId>,
 }
 
 pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
@@ -97,10 +223,10 @@ pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
             inbox_id, message_id, organization_id, pod_id, thread_id, labels, \"timestamp\", \
             from_address, to_addresses, cc_addresses, bcc_addresses, subject, preview, \
             attachments, in_reply_to, message_references, headers, smtp_id, size, reply_to, \
-            text, html, extracted_text, extracted_html \
+            text, html, extracted_text, extracted_html, raw_blob_id, attachment_blobs \
          ) VALUES ( \
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, \
-            $19, $20, $21, $22, $23, $24 \
+            $19, $20, $21, $22, $23, $24, $25, $26 \
          )",
     )
     .bind(inbox_id.as_str())
@@ -127,6 +253,8 @@ pub async fn insert(pool: &PgPool, msg: NewMessage) -> Result<(), StoreError> {
     .bind(&msg.html)
     .bind(&msg.extracted_text)
     .bind(&msg.extracted_html)
+    .bind(&msg.raw_blob_id)
+    .bind(msg.attachment_blobs.as_ref().map(Json))
     .execute(pool)
     .await?;
     Ok(())

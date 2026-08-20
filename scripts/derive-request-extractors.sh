@@ -14,7 +14,7 @@
 # generalises it: the derivation must enumerate the CLASS, not the instance that prompted it.
 # Every axum extractor with a `Rejection` type is a way out of the JSON error contract.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || { echo "FATAL: cannot cd to the repository root" >&2; exit 1; }
 
 H=crates/amk-http/src
 

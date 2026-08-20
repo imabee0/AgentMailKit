@@ -22,6 +22,7 @@
 pub mod args;
 pub mod commands;
 pub mod config;
+pub mod logging;
 pub mod redact;
 pub mod server;
 
