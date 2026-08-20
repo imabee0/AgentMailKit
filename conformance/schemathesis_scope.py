@@ -26,6 +26,12 @@ SPEC = ROOT / "reference" / "openapi.json"
 
 VERBS = ("get", "post", "patch", "put", "delete")
 
+# Mounted here, not in AgentMail's openapi.json. Fixture 06's download_url is a CloudFront
+# URL on the reference; we serve the same bytes from GET /v0/blobs/{blob_id}. Schema-fuzzing
+# that path against their spec is impossible, and treating it as a router/spec disagreement
+# made Lane L fail after the endpoint shipped.
+LOCAL_ONLY = {("GET", "/v0/blobs/{blob_id}")}
+
 
 def mounted():
     """Enumerate (METHOD, path) from the `.route(...)` calls in `router()`.
@@ -53,8 +59,8 @@ def spec_ops(spec):
 def reconcile(ops, spec):
     """Return (unspecified, unmounted_on_mounted_paths). Either being non-empty fails the gate."""
     described = spec_ops(spec)
-    unspecified = [o for o in ops if o not in described]
-    paths = {p for _, p in ops}
+    unspecified = [o for o in ops if o not in described and o not in LOCAL_ONLY]
+    paths = {p for _, p in ops} - {p for _, p in LOCAL_ONLY}
     unmounted = sorted(o for o in described if o[1] in paths and o not in ops)
     return unspecified, unmounted
 
@@ -66,8 +72,11 @@ def main():
 
     if "--include-args" in sys.argv:
         # Paths only: the reconciliation above has already proven method sets agree per path, so a
-        # path filter cannot pull in an operation we do not serve.
-        for path in sorted({p for _, p in ops}):
+        # path filter cannot pull in an operation we do not serve. LOCAL_ONLY paths are omitted
+        # — the spec does not describe them, so including them would fuzz a 404 against a
+        # missing schema.
+        skip = {p for _, p in LOCAL_ONLY}
+        for path in sorted({p for _, p in ops} - skip):
             print("--include-path")
             print(path)
         return 1 if (unspecified or unmounted) else 0
@@ -81,6 +90,11 @@ def main():
 
     print()
     print("=== 2. reconciliation against reference/openapi.json ===")
+    local = [o for o in ops if o in LOCAL_ONLY]
+    if local:
+        print("  LOCAL-ONLY (mounted here; AgentMail serves these elsewhere; not a gate failure):")
+        for verb, path in local:
+            print(f"    {verb:7} {path}")
     if unspecified:
         print("  MOUNTED BUT NOT DESCRIBED BY THE SPEC — cannot be schema-fuzzed:")
         for verb, path in unspecified:
@@ -90,9 +104,10 @@ def main():
         for verb, path in unmounted:
             print(f"    {verb:7} {path}")
     if not unspecified and not unmounted:
-        print(f"  clean: all {len(ops)} mounted operations are described, and the spec describes")
-        print("  no additional method on any mounted path — so filtering by PATH alone selects")
-        print("  exactly the implemented set, with no forked copy of the schema to drift.")
+        fuzzable = len(ops) - len(local)
+        print(f"  clean: {fuzzable} mounted operations are in the spec"
+              + (f" ({len(local)} local-only omitted from the fuzzer)" if local else "")
+              + "; no extra spec method on a mounted path.")
     total = len(spec_ops(spec))
     print(f"  spec describes {total} operations; this phase mounts {len(ops)}"
           f" ({total - len(ops)} out of scope for P1)")

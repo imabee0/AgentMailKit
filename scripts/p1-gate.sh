@@ -263,9 +263,12 @@ echo "== P1 gate, fourth part: schemathesis over the implemented paths =="
 # diffs ours against the LIVE reference's for every request. What is kept is what the spec is good
 # at — response shapes, content types, no 5xx — plus three checks of our own carrying the
 # invariants no OpenAPI document can express (conformance/schemathesis_checks.py).
-if [ ! -x .venv-schemathesis/bin/st ]; then
+# A tracked venv from another machine has a shebang that does not exist here; `-x` is true and
+# `st` then fails with "required file not found". Probe by running it, not by looking at the bit.
+if ! .venv-schemathesis/bin/st --version >/dev/null 2>&1; then
   python3 -m venv .venv-schemathesis
-  .venv-schemathesis/bin/pip install -q --require-hashes -r conformance/requirements-schemathesis.txt
+  .venv-schemathesis/bin/pip install --require-hashes -r conformance/requirements-schemathesis.txt \
+    || { echo "FATAL: could not install schemathesis from the hash-pinned requirements" >&2; exit 1; }
 fi
 # `SCOPE_EXIT=$?` after a `mapfile < <(...)` reads MAPFILE's status, not the script's — which is
 # always 0, so a router/spec disagreement would have been announced and then ignored. Capture the
@@ -274,7 +277,8 @@ INCLUDE_ARGS=$(python3 conformance/schemathesis_scope.py --include-args)
 SCOPE_EXIT=$?
 mapfile -t INCLUDE <<< "$INCLUDE_ARGS"
 if [ "$SCOPE_EXIT" -ne 0 ]; then
-  echo "FATAL: router() and openapi.json disagree — run scripts/derive-implemented-paths.sh"
+  echo "FATAL: router() and openapi.json disagree — run scripts/derive-implemented-paths.sh" >&2
+  exit 1
 fi
 PYTHONPATH=. SCHEMATHESIS_HOOKS=conformance.schemathesis_checks AMK_KEY="$CAND_KEY" \
   .venv-schemathesis/bin/st --config-file conformance/schemathesis.toml \

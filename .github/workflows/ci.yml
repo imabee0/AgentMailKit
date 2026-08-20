@@ -350,9 +350,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+      # gitleaks-action requires a paid GITLEAKS_LICENSE on organization repos
+      # (`imabee0` is an org). The CLI binary does not.
+      - name: gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.28.0"
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -C /tmp -xzf /tmp/gitleaks.tgz gitleaks
+          /tmp/gitleaks version
+          /tmp/gitleaks detect --source . --verbose --redact --exit-code 1
 
   # ---------------------------------------------------------------------------------------------
   docker:
