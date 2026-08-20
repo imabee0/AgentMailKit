@@ -17,6 +17,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_call:
 
 # Least privilege at the top; jobs elevate individually and only where they must.
 permissions:
@@ -280,6 +281,50 @@ jobs:
           # rather than quietly verifying nothing -- the same rule the script itself enforces.
           [ "$rc" -eq 0 ] || exit 1
 
+  lane-l:
+    name: lane L (SDK smokes + schemathesis)
+    needs: [changes, build-bins]
+    if: needs.changes.outputs.any_crate == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: amk
+          POSTGRES_PASSWORD: amk-dev-local
+          POSTGRES_DB: amk
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bins-${{ github.sha }}
+          path: target/release
+      - run: chmod +x target/release/amk target/release/amkd
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conformance/requirements-*.txt
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: conformance/package-lock.json
+      - run: sudo apt-get install -qq -y postgresql-client
+      - name: SDK smokes and schemathesis against the shipped binary
+        env:
+          AMK_GATE_SKIP_BUILD: "1"
+          AMK_GATE_LANE: "L"
+        run: |
+          set -euo pipefail
+          ./scripts/p1-gate.sh
+          echo "p1-gate Lane L exited $?"
+
   # ---------------------------------------------------------------------------------------------
   dockerfile-lint:
     name: dockerfile lint
@@ -371,7 +416,7 @@ jobs:
     # never means editing a protection rule -- and a job that is accidentally never required
     # cannot hide, because it is a `needs:` here.
     if: always()
-    needs: [changes, fmt, clippy, test-unit, test-db, guards, build-bins, binary-smoke, secrets-scan, dockerfile-lint, docker]
+    needs: [changes, fmt, clippy, test-unit, test-db, guards, build-bins, binary-smoke, lane-l, secrets-scan, dockerfile-lint, docker]
     runs-on: ubuntu-latest
     steps:
       - name: Verdict
