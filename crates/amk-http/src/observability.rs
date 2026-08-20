@@ -31,6 +31,9 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use uuid::Uuid;
 
+use amk_types::ErrorCode;
+
+use crate::error::AppError;
 use crate::ratelimit::{RateLimiter, Subject};
 use crate::AppState;
 
@@ -269,19 +272,15 @@ pub async fn trace_requests(
             .throttled_total
             .fetch_add(1, Ordering::Relaxed);
         tracing::warn!(?subject, "rate limited");
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [
-                (header::CONTENT_TYPE, HeaderValue::from_static("application/json")),
-                // Conservative and honest: the bucket refills continuously, so one second is
-                // always enough for at least one token at the configured rate.
-                (header::RETRY_AFTER, HeaderValue::from_static("1")),
-            ],
-            // The bare `{"message": ...}` shape, matching the auth layer -- a throttle is a
-            // gateway-level refusal, not an application error with a code and a docs link.
-            r#"{"message":"Too Many Requests"}"#,
-        )
-            .into_response();
+        // Full envelope, not the 401/403 bare body: clients branch on `code`, and
+        // `ErrorCode::RateLimitExceeded` is `rate_limit_exceeded` at 429. Schemathesis's
+        // `error_shape_is_one_of_the_two` (and docs.agentmail.to/errors) reject a third shape.
+        let mut resp = AppError::new(ErrorCode::RateLimitExceeded, "Too Many Requests").into_response();
+        resp.headers_mut().insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_static("1"),
+        );
+        return resp;
     }
 
     let method = request.method().clone();
