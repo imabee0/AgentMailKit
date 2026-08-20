@@ -275,11 +275,10 @@ pub async fn trace_requests(
         // Full envelope, not the 401/403 bare body: clients branch on `code`, and
         // `ErrorCode::RateLimitExceeded` is `rate_limit_exceeded` at 429. Schemathesis's
         // `error_shape_is_one_of_the_two` (and docs.agentmail.to/errors) reject a third shape.
-        let mut resp = AppError::new(ErrorCode::RateLimitExceeded, "Too Many Requests").into_response();
-        resp.headers_mut().insert(
-            header::RETRY_AFTER,
-            HeaderValue::from_static("1"),
-        );
+        let mut resp =
+            AppError::new(ErrorCode::RateLimitExceeded, "Too Many Requests").into_response();
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
         return resp;
     }
 
