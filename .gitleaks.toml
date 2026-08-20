@@ -1,0 +1,7 @@
+# Live captures in reference/fixtures/ include CloudFront signed-URL query strings
+# (`X-Amz-Credential=...`) from AgentMail's CDN. Those are not our secrets.
+title = "AgentMailKit"
+
+[allowlist]
+description = "AgentMail live-capture fixtures, not credentials we mint"
+paths = ['''reference/fixtures/''']

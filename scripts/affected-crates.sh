@@ -37,7 +37,11 @@ meta=$(cargo metadata --format-version 1 --no-deps 2>/dev/null) || {
   exit 0
 }
 
-printf '%s' "$meta" | CHANGED="$changed" python3 -c '
+# Paths go through a file, not argv and not the environment: a PR that untracks a venv
+# (thousands of paths) blew ARG_MAX via CHANGED=... python3 (`Argument list too long`).
+changed_file=$(mktemp)
+printf '%s\n' "$changed" >"$changed_file"
+printf '%s' "$meta" | python3 -c '
 import json, os, sys, pathlib
 
 meta = json.load(sys.stdin)
@@ -71,7 +75,7 @@ for p in meta["packages"]:
 # widen to ALL. Adding an over-broad exemption below breaks those tests.
 
 seeds, widen = set(), False
-for line in os.environ["CHANGED"].splitlines():
+for line in open(sys.argv[1]):
     line = line.strip()
     if not line:
         continue
@@ -111,4 +115,5 @@ if affected == names:
     print("ALL"); sys.exit(0)
 for n in sorted(affected):
     print(f"-p {n}")
-'
+' "$changed_file"
+rm -f "$changed_file"
