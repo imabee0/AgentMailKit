@@ -25,9 +25,6 @@ smtp-proto.workspace = true
 # build; `ring` matches the provider amk-outbound installs, and enabling a second one would
 # reintroduce the "cannot determine the CryptoProvider" panic that binary-smoke.sh caught.
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "logging", "tls12"] }
-# PEM parsing for the certificate and key. Small, single-purpose, and the alternative is
-# hand-writing a PEM decoder for key material -- exactly the wrong place to save a dependency.
-rustls-pemfile = "=2.2.0"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time"] }

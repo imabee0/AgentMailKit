@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use tokio_rustls::rustls::pki_types::pem::PemObject;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
@@ -53,7 +54,7 @@ pub fn acceptor_from_pem(cert_path: &Path, key_path: &Path) -> Result<TlsAccepto
 
     let cert_bytes =
         std::fs::read(cert_path).map_err(|e| err(cert_path, &format!("cannot read: {e}")))?;
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_bytes.as_slice())
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_bytes)
         .collect::<Result<_, _>>()
         .map_err(|_| err(cert_path, "not a PEM certificate chain"))?;
     if certs.is_empty() {
@@ -62,9 +63,8 @@ pub fn acceptor_from_pem(cert_path: &Path, key_path: &Path) -> Result<TlsAccepto
 
     let key_bytes =
         std::fs::read(key_path).map_err(|e| err(key_path, &format!("cannot read: {e}")))?;
-    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_bytes.as_slice())
-        .map_err(|_| err(key_path, "not a PEM private key"))?
-        .ok_or_else(|| err(key_path, "contains no private key"))?;
+    let key: PrivateKeyDer<'static> = PrivateKeyDer::from_pem_slice(&key_bytes)
+        .map_err(|_| err(key_path, "not a PEM private key"))?;
 
     // The provider is installed by `amk_outbound::smtp::install_crypto_provider` at startup. Both
     // `ring` and `aws-lc-rs` are in this workspace's graph through feature unification, so rustls
@@ -120,8 +120,8 @@ mod tests {
 
     #[test]
     fn an_empty_pem_is_rejected_rather_than_producing_an_empty_chain() {
-        // `rustls_pemfile::certs` on an empty file yields Ok(vec![]) -- an acceptor built from it
-        // would fail on every handshake instead of at startup.
+        // `CertificateDer::pem_slice_iter` on an empty file yields Ok(vec![]) -- an acceptor built
+        // from it would fail on every handshake instead of at startup.
         let c = tmp("empty.pem", b"");
         let k = tmp("empty.key", b"");
         let e = match acceptor_from_pem(&c, &k) {
