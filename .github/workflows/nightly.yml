@@ -36,17 +36,18 @@ jobs:
       - run: cargo deny check advisories licenses bans sources
 
   msrv:
-    name: MSRV (1.85)
+    name: MSRV (1.94)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
-      # `rust-version = "1.85"` in Cargo.toml is a CLAIM. Nothing checked it -- rust-toolchain.toml
-      # pins 1.94.1, so every other job builds with a compiler four minors newer and a
-      # 1.86-only feature would land unnoticed. This is where the claim becomes a test.
+      # `rust-version = "1.94"` in Cargo.toml is a CLAIM. Nothing checked it -- rust-toolchain.toml
+      # pins 1.94.1, so every other job builds with that exact compiler and a 1.94.1-only
+      # assumption would land unnoticed. This job is `cargo +1.94` (the floor). This is where
+      # the claim becomes a test.
       - run: |
-          rustup toolchain install 1.85 --profile minimal
-          cargo +1.85 check --workspace --all-targets
+          rustup toolchain install 1.94 --profile minimal
+          cargo +1.94 check --workspace --all-targets
 
   cold-cache:
     name: cold cache (reproducibility)

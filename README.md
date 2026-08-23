@@ -53,7 +53,7 @@ docs/PLAN.md         the full plan, phase gates and open registers
 
 ## Build and verify
 
-Requires Rust 1.85+. Postgres 17 is needed for the storage and HTTP integration tests.
+Requires Rust 1.94+. Postgres 17 is needed for the storage and HTTP integration tests.
 
 ```bash
 ./scripts/dev-db.sh up      # Postgres on 127.0.0.1:55432 (needs Docker)
