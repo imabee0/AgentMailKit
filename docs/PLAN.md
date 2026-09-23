@@ -558,7 +558,8 @@ than merely relaxed.
 What CI is **not** here: it does not replace `./scripts/check.sh`, the hooks, or the review panel,
 and it is not the authoritative gate for anything needing a credential or hardware — the Lane L /
 Lane R split above still governs. `ci-layer-local-only` is retired in `scripts/plan-ledger.sh` with
-its reasoning kept as a comment, and replaced by `ci-workflows-present`, `ci-actions-sha-pinned`
+its reasoning kept as a comment, and replaced by `ci-single-unified-workflow` (one `ci.yml`, no `schedule:` — unified 2026-09-23),
+`ci-actions-sha-pinned`
 and `ci-base-images-digest-pinned`, so deleting the pipeline is now the regression rather than the
 default.
 

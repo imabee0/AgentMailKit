@@ -28,8 +28,8 @@
 # from an artifact of a particular workflow run. Reproducibility and standalone buildability win.
 #
 # What "build once" guarantees here is the part that matters for promotion: ONE image digest is
-# built and then re-tagged, never rebuilt, for every environment it reaches (release.yml uses
-# `buildx imagetools create`, which copies a manifest and pulls no layers). The duplicated compile
+# built and then re-tagged, never rebuilt, for every environment it reaches (ci.yml's release job
+# uses `buildx imagetools create`, which copies a manifest and pulls no layers). The duplicated compile
 # is inside a single CI run and is absorbed by the cargo-chef + GHA layer cache.
 
 # The image carries no migration step: `sqlx::migrate!` compiles the migrations INTO the binary

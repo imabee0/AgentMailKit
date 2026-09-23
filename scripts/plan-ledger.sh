@@ -190,21 +190,22 @@ check harness-agent-frontmatter yes \
 #   - `amkd --role api` could not send a single message, with every local gate green.
 # All three are the same shape: a verification that nothing independent re-ran.
 #
-# The decision is REVERSED, not bypassed. `.github/workflows/` now holds ci/release/nightly/
-# conformance, and the checks below (`ci-workflows-present`) assert they exist rather than that
-# they do not — the obligation moved, it was not dropped.
+# The decision is REVERSED, not bypassed. `.github/workflows/` now holds the pipeline, and the check
+# below asserts it exists rather than that it does not -- the obligation moved, it was not dropped.
 
-# The inverse of what `ci-layer-local-only` used to assert. Deleting the pipeline is now the
-# regression, so it is what fails the build. `ci-ok` is named explicitly because it is the single
-# required status check: a workflow that stopped defining it would leave branch protection
-# gating on a job that never reports.
-check ci-workflows-present yes \
-  "forge CI exists: ci/release/nightly/conformance, with ci-ok as the required check" \
+# ONE workflow, no timers. The 2026-08-19 layer shipped four (ci/release/nightly/conformance) and
+# two of them ran on cron, which the user repeatedly asked not to have: on 2026-09-23 they were
+# folded into `ci.yml`, with the heavy checks behind workflow_dispatch inputs instead of a schedule.
+# So this asserts the SHAPE the user decided, not just presence: exactly one workflow file, no
+# `schedule:` trigger anywhere under `.github/`, and `ci-ok` -- the single required status check,
+# since a workflow that stopped defining it would leave branch protection gating on a job that
+# never reports. Replaces `ci-workflows-present`, which required the four-file split.
+check ci-single-unified-workflow yes \
+  "forge CI is ONE workflow (ci.yml), never scheduled, with ci-ok as the required check" \
   bash -c '
-    for w in ci release nightly conformance; do
-      [ -f ".github/workflows/$w.yml" ] || exit 1
-    done
+    [ "$(find .github/workflows -maxdepth 1 -type f | sort)" = ".github/workflows/ci.yml" ] || exit 1
     [ -f .github/actions/setup-rust/action.yml ] || exit 1
+    ! grep -rqE "^[[:space:]]*schedule:" .github || exit 1
     grep -q "^  ci-ok:" .github/workflows/ci.yml'
 
 # Has the container image ever actually been BUILT?

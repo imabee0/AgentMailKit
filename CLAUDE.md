@@ -125,9 +125,11 @@ Long form and the failures that bought each: `docs/OPERATING-RULES.md`.
   so dispatching before a restart runs under default model/effort/tools and nothing inside the
   dispatch can see that. `memory:` is deliberately absent — an unsupported key deregisters silently.
 
-No CI: gating is `./scripts/check.sh` plus the hooks, on the machine running them — a user decision
-with its cost recorded in the plan. `scripts/plan-ledger.sh` asserts no workflow directory exists;
-adding GitHub Actions is a deliberate plan change, not a migration side effect.
+**CI/CD is ONE GitHub Actions workflow: `.github/workflows/ci.yml`.** It is the gate (`ci-ok` is
+the single required check), the image publish and the `v*` release. It never runs on a timer:
+conformance (Lane R), mutation testing and the cold-cache run are `workflow_dispatch` inputs.
+`plan-ledger.sh`'s `ci-single-unified-workflow` fails on a second workflow file or any `schedule:` —
+a user decision, asked for repeatedly. Never add either. Locally, `./scripts/check.sh` still gates.
 
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
 writing to `amk-types`, to `docs/PLAN.md`, outside its dispatched `.amk-scope`, or introducing a

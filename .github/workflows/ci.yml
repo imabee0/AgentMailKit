@@ -1,4 +1,5 @@
-# The gate. Everything a pull request must satisfy before it can merge.
+# THE pipeline. One workflow, one required check (`ci-ok`), every CI/CD concern in one place:
+# gate, supply-chain audit, MSRV, image publish, release, and the on-demand heavy checks.
 #
 # Reversing a recorded decision: `docs/PLAN.md` recorded 2026-08-15 that this project has no forge
 # CI, on the premise of one operator on one machine. The 2026-08-17 GitHub migration -- made so
@@ -7,17 +8,39 @@
 # `main` sitting red on a fixture tripwire nobody had run, and a binary that could not send mail
 # with every local gate green. The `ci-layer-local-only` ledger check is retired accordingly.
 #
+# 2026-09-23: unified. The former ci/nightly/conformance/release split is folded into this one
+# file, and NOTHING runs on a timer. Every run traces to an event a person caused: a PR, a push to
+# main, a `v*` tag, or a manual dispatch. `plan-ledger.sh`'s `ci-single-unified-workflow` asserts
+# both halves -- one workflow file, no `schedule:` -- so a second workflow or a cron is a failure.
+#
 # Design notes live next to the thing they explain; the short version:
 #   affected-only    scripts/affected-crates.sh, reverse-dependency closure, fails OPEN
-#   build once       one release build, uploaded, consumed by every downstream job
+#   build once       one release build, uploaded, consumed by every downstream job and the release
+#   promote by tag   a `v*` tag re-tags main's image by digest; it never rebuilds it
 #   one required     `ci-ok` aggregates, so branch protection never needs editing again
+#   on demand        conformance (needs a credential), mutation testing and the cold-cache run are
+#                    workflow_dispatch inputs -- too slow or too costly for every push, never cron
 name: ci
 
 on:
   pull_request:
   push:
     branches: [main]
-  workflow_call:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      conformance:
+        description: "Lane R: dual-target diff vs api.agentmail.to (needs AGENTMAIL_READONLY_KEY)"
+        type: boolean
+        default: false
+      mutants:
+        description: "Mutation testing on amk-core + amk-types (up to 2h)"
+        type: boolean
+        default: false
+      cold_cache:
+        description: "Full test suite with every cache disabled (reproducibility)"
+        type: boolean
+        default: false
 
 # Least privilege at the top; jobs elevate individually and only where they must.
 permissions:
@@ -40,10 +63,13 @@ jobs:
   changes:
     name: what changed
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
-      rust: ${{ steps.filter.outputs.rust }}
-      conformance: ${{ steps.filter.outputs.conformance }}
-      docker: ${{ steps.filter.outputs.docker }}
+      # A tag push or a manual dispatch has no meaningful diff base, so the filter step is skipped
+      # and every bucket defaults to true. Widening is the only safe answer, as below.
+      rust: ${{ steps.filter.outputs.rust || 'true' }}
+      conformance: ${{ steps.filter.outputs.conformance || 'true' }}
+      docker: ${{ steps.filter.outputs.docker || 'true' }}
       crates: ${{ steps.affected.outputs.crates }}
       any_crate: ${{ steps.affected.outputs.any_crate }}
       source_date_epoch: ${{ steps.sde.outputs.epoch }}
@@ -62,6 +88,7 @@ jobs:
 
       # Coarse buckets, for deciding which JOBS run at all.
       - id: filter
+        if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
           filters: |
@@ -85,12 +112,20 @@ jobs:
       # the filter above on purpose: path filtering answers "did Rust change", and only the
       # dependency graph can answer "what does that change reach". See affected-crates.sh.
       - id: affected
+        # Through the environment, not spliced into the script: see ci-ok's note on injection.
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
+          if [ "$EVENT" = "pull_request" ]; then
+            base="$PR_BASE"
+          elif [ "$EVENT" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
+            base="$PUSH_BEFORE"
           else
-            base="${{ github.event.before }}"
+            base=""   # tag push / manual dispatch: always the whole workspace
           fi
           # A first push to a branch, a force-push, or a shallow history leaves no usable base.
           # Widening is the only safe answer -- an empty diff would select nothing and pass.
@@ -128,6 +163,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -141,6 +177,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -153,6 +190,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -166,6 +204,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17-alpine
@@ -207,6 +246,7 @@ jobs:
     # obligations; both need full visibility and neither is scoped by what changed. Making these
     # conditional is precisely the "weakening coverage" the audit called out.
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -217,12 +257,52 @@ jobs:
       - run: ./scripts/hooks/guard.test.sh
       - run: ./scripts/affected-crates.test.sh
 
+  supply-chain:
+    name: cargo-deny (${{ matrix.checks }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    # A CVE disclosed overnight against a pinned transitive dependency must be VISIBLE on the next
+    # run but must not fail an unrelated PR -- so advisories report without blocking, while bans,
+    # licences and sources (which only change when this repo changes) block. deny.toml's allow-list
+    # was DERIVED from `cargo metadata`, so a new licence here is a real supply-chain change.
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
+
+  msrv:
+    name: MSRV (1.94)
+    needs: changes
+    if: needs.changes.outputs.any_crate == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # `rust-version = "1.94"` in Cargo.toml is a CLAIM. rust-toolchain.toml pins 1.94.1, so every
+      # other job builds with that exact compiler and a 1.94.1-only assumption would land
+      # unnoticed. This job is `cargo +1.94` (the floor) -- where the claim becomes a test.
+      - run: rustup toolchain install 1.94 --profile minimal
+      - uses: ./.github/actions/setup-rust
+        with: { shared-key: msrv }
+      - run: cargo +1.94 check --workspace --all-targets
+
   # ---------------------------------------------------------------------------------------------
   build-bins:
     name: build (once)
     needs: changes
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -245,6 +325,7 @@ jobs:
     needs: [changes, build-bins]
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17-alpine
@@ -286,6 +367,7 @@ jobs:
     needs: [changes, build-bins]
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:17-alpine
@@ -331,6 +413,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -345,6 +428,7 @@ jobs:
   secrets-scan:
     name: secret scan
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -366,11 +450,17 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   docker:
     name: image (build once, push by digest)
-    needs: [changes, build-bins, test-db, guards]
-    # Only on main. A PR proves the image BUILDS via the same cached layers; publishing from an
-    # unmerged branch would put an unreviewed digest in the registry.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.docker == 'true'
+    needs: [changes, test-db, guards]
+    # Only on main, and on EVERY main push: a `v*` tag promotes the image of the commit it points at,
+    # so every main commit must have one. A docs-only push rebuilds nothing -- every layer is a GHA
+    # cache hit -- and yields the same digest. Publishing from an unmerged branch would put an
+    # unreviewed digest in the registry, so PRs get `dockerfile-lint` instead.
+    # `!cancelled()` + no failure: test-db is legitimately SKIPPED on a docs-only push.
+    if: >-
+      !cancelled() && !contains(needs.*.result, 'failure')
+      && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -419,14 +509,149 @@ jobs:
             SOURCE_DATE_EPOCH=${{ needs.changes.outputs.source_date_epoch }}
 
   # ---------------------------------------------------------------------------------------------
+  # ON DEMAND. Actions -> ci -> Run workflow, tick the box. Never on a timer, never on a PR.
+
+  conformance:
+    name: lane R (dual-target diff vs api.agentmail.to)
+    needs: build-bins
+    # workflow_dispatch only: a PR-triggered run -- a fork's above all -- must never reach this
+    # secret, and the cheapest guarantee is that no PR event can start this job at all. The
+    # manifest is 18 GETs and one `DELETE /v0/auth/me` probe; nothing is created on the reference
+    # account, so a READ-ONLY key is sufficient and is what should be configured.
+    if: github.event_name == 'workflow_dispatch' && inputs.conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: conformance
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: amk, POSTGRES_PASSWORD: amk-dev-local, POSTGRES_DB: amk }
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - name: Require the reference key
+        env:
+          REF_KEY: ${{ secrets.AGENTMAIL_READONLY_KEY }}
+        run: |
+          # Absent secret -> fail loudly. "Not run" reported as "passed" is the failure mode the
+          # 2026-08-19 audit was about.
+          if [ -z "${REF_KEY:-}" ]; then
+            echo "::error::AGENTMAIL_READONLY_KEY is not configured. This gate is NOT RUN, which is not the same as passed."
+            exit 1
+          fi
+          echo "reference key present (value never printed)"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # The gated binary from build-bins, not a second compile.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bins-${{ github.sha }}
+          path: target/release
+      - run: chmod +x target/release/amk target/release/amkd
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: conformance/requirements-*.txt
+      - run: sudo apt-get install -qq -y postgresql-client
+      - name: Stand up a candidate and diff it against the reference
+        env:
+          # /proc/<pid>/environ is owner-only; argv is world-readable. The key travels by
+          # environment, never on a command line -- the same rule scripts/p1-gate.sh records.
+          AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_READONLY_KEY }}
+        run: |
+          set -euo pipefail
+          export AMK_DATABASE_URL="postgres://amk:amk-dev-local@127.0.0.1:55432/amk_conf"
+          psql "postgres://amk:amk-dev-local@127.0.0.1:55432/postgres" -qc 'CREATE DATABASE amk_conf'
+          export AMK_PRIMARY_DOMAIN=appsynergy.io AMK_PRODUCT_NAME=AgentMailKit AMK_BIND=127.0.0.1:8111
+          ./target/release/amk migrate
+          CAND_KEY=$(./target/release/amk init | sed -n 's/.*root api key: *//p' | tr -d ' ')
+          ./target/release/amkd --role api &
+          for _ in $(seq 1 60); do
+            curl -fsS -o /dev/null -H "Authorization: Bearer $CAND_KEY" http://127.0.0.1:8111/v0/auth/me && break
+            sleep 0.5
+          done
+          REF_KEY="$AGENTMAIL_API_KEY" CAND_BASE="http://127.0.0.1:8111" CAND_KEY="$CAND_KEY" \
+            python3 conformance/dual_target.py conformance/manifest.json
+
+  mutants:
+    name: mutation testing
+    if: github.event_name == 'workflow_dispatch' && inputs.mutants
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+        with:
+          shared-key: mutants
+          tools: cargo-mutants
+      # Scoped to the two crates where a surviving mutant means silent data exposure rather than a
+      # bug: amk-core is scope/permission/label logic, amk-types is every wire shape. Survivors
+      # report without failing until a measured baseline exists to hold as a budget.
+      - run: cargo mutants --package amk-core --package amk-types --no-shuffle -j 2 || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutants-${{ github.run_id }}
+          path: mutants.out/
+          if-no-files-found: warn
+
+  cold-cache:
+    name: cold cache (reproducibility)
+    if: github.event_name == 'workflow_dispatch' && inputs.cold_cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: amk, POSTGRES_PASSWORD: amk-dev-local, POSTGRES_DB: amk }
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U amk"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      AMK_REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # cache: false is the entire point. A pipeline that only passes warm depends on cache state,
+      # which is a bug that hides until the day the cache is evicted.
+      - uses: ./.github/actions/setup-rust
+        with: { cache: "false" }
+      - run: sudo apt-get install -qq -y postgresql-client
+      - run: cargo test --workspace
+      - run: ./scripts/shape-provenance.sh && ./scripts/plan-ledger.sh
+
+  # ---------------------------------------------------------------------------------------------
   ci-ok:
     name: ci-ok
     # THE ONE REQUIRED CHECK. Branch protection names this and nothing else, so adding a job above
     # never means editing a protection rule -- and a job that is accidentally never required
     # cannot hide, because it is a `needs:` here.
     if: always()
-    needs: [changes, fmt, clippy, test-unit, test-db, guards, build-bins, binary-smoke, lane-l, secrets-scan, dockerfile-lint, docker]
+    needs:
+      - changes
+      - fmt
+      - clippy
+      - test-unit
+      - test-db
+      - guards
+      - supply-chain
+      - msrv
+      - build-bins
+      - binary-smoke
+      - lane-l
+      - secrets-scan
+      - dockerfile-lint
+      - docker
+      - conformance
+      - mutants
+      - cold-cache
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Verdict
         env:
@@ -457,6 +682,7 @@ jobs:
     needs: ci-ok
     if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
       pull-requests: write
@@ -464,3 +690,64 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr merge --auto --squash "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}"
+
+  # ---------------------------------------------------------------------------------------------
+  release:
+    name: release ${{ github.ref_name }}
+    # PROMOTE, never rebuild. The binaries are the ones build-bins produced and ci-ok gated IN THIS
+    # RUN; the image is the one main's run already published for this commit, re-tagged by digest.
+    # Recompiling here would ship a different artifact from the one the gate passed.
+    needs: [ci-ok, build-bins]
+    if: >-
+      !cancelled() && needs.ci-ok.result == 'success' && needs.build-bins.result == 'success'
+      && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Never cancel a release in flight: a half-published tag is worse than a slow one.
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write   # create the GitHub release
+      packages: write   # re-tag the existing image
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bins-${{ github.sha }}
+          path: dist
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          chmod +x dist/amk dist/amkd
+          # Recorded in the release so a downloaded binary can be matched to its build.
+          (cd dist && sha256sum amk amkd > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Re-tag the existing image, do not rebuild it
+        run: |
+          set -euo pipefail
+          img="ghcr.io/${GITHUB_REPOSITORY,,}"
+          src="${img}:sha-${GITHUB_SHA}"
+          # `docker` publishes sha-<commit> on every main push. A tag on a commit main never saw
+          # has no gated image, and releasing one is exactly what this refuses to do.
+          if ! docker buildx imagetools inspect "$src" >/dev/null 2>&1; then
+            echo "::error::no image $src -- tag a commit that has passed ci on main"
+            exit 1
+          fi
+          # `imagetools create` copies the manifest -- no pull, no rebuild, no layer push -- so the
+          # release tag and the main tag are the SAME digest.
+          docker buildx imagetools create --tag "${img}:${GITHUB_REF_NAME}" --tag "${img}:latest" "$src"
+          docker buildx imagetools inspect "${img}:${GITHUB_REF_NAME}" --format '{{.Manifest.Digest}}'
+      - uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
+        with:
+          files: |
+            dist/amk
+            dist/amkd
+            dist/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

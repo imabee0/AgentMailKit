@@ -9,8 +9,8 @@
 #
 # `channel = "1.94.1"` is the exact compiler for rustfmt and clippy.
 #
-# MSRV is verified separately, in `.github/workflows/nightly.yml`, which builds against the
-# rust-version floor (1.94) as well as this pin. Bumping the channel here is a deliberate act:
+# MSRV is verified separately, by the `msrv` job in `.github/workflows/ci.yml`, which builds
+# against the rust-version floor (1.94) as well as this pin. Bumping the channel here is a deliberate act:
 # re-run `./scripts/check.sh` in full and expect new clippy lints, exactly as bumping a
 # dependency pin requires re-running the compile spike (`reference/fixtures/15-compile-spike.txt`).
 [toolchain]
