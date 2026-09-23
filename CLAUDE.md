@@ -134,7 +134,9 @@ conformance (Lane R), mutation testing and the cold-cache run are `workflow_disp
 a compiling/Postgres/image job not behind `gate-cheap` (`ci-cheap-gates-expensive`) — user
 decisions, asked for repeatedly. Never undo any of them. Every chained job states `!cancelled()` in
 its `if:` (`ci-explicit-status-on-chained-jobs`): GitHub's implicit `success()` skips a job when
-ANY ancestor was skipped, which once left `ci-ok` green with nothing tested behind it. Locally, `./scripts/check.sh` still gates.
+ANY ancestor was skipped, which once left `ci-ok` green with nothing tested behind it.
+The workflow never merges PRs (`ci-no-github-token-merge`): a GITHUB_TOKEN merge starts no CI on
+`main`. Enable auto-merge as the PR author (`gh pr merge --auto --squash`, or the GitHub integration). Locally, `./scripts/check.sh` still gates.
 
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
 writing to `amk-types`, to `docs/PLAN.md`, outside its dispatched `.amk-scope`, or introducing a

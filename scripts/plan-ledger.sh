@@ -268,6 +268,13 @@ if bad:
     sys.exit("chained jobs relying on implicit success(): " + " ".join(bad))
 '
 
+# The workflow never merges a PR itself. A merge made with GITHUB_TOKEN is a push GitHub will not
+# start workflows from, so main's merge commit goes untested and unpublished -- which is exactly
+# what happened to #14's merge (0a669db: no ci run). Auto-merge belongs to the PR author's identity.
+check ci-no-github-token-merge yes \
+  "the workflow never merges PRs itself (GITHUB_TOKEN merges skip main's CI run)" \
+  bash -c '! grep -rhE "gh pr merge|merge_pull_request|pulls/[^ ]*/merge" .github | grep -qvE "^[[:space:]]*#"'
+
 # Has the container image ever actually been BUILT?
 #
 # Flips to MET when reference/fixtures/39-image-build.txt starts with `VERDICT: built`.

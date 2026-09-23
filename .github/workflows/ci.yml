@@ -183,7 +183,7 @@ jobs:
   # on the stage directly before it. Without one, GitHub's implicit `success()` requires EVERY
   # ancestor, transitively, to have succeeded -- so one skipped job anywhere upstream (fmt on a
   # fixture-only PR; docker/mutants on every PR) silently skips everything below it, and ci-ok
-  # reports green with nothing tested. Observed on #14: auto-merge skipped behind a green ci-ok.
+  # reports green with nothing tested. Observed on #14: a job skipped behind a green ci-ok.
   # `ci-explicit-status-on-chained-jobs` in plan-ledger.sh holds this.
 
   # ----------------------------------------------------------------------- stage 1: no compilation
@@ -784,25 +784,13 @@ jobs:
           echo "all required jobs succeeded or were legitimately skipped"
 
 
-  auto-merge:
-    name: enable auto-merge
-    # Automation, not approval: a green PR opened by the agent merges without a human round trip.
-    # This does NOT bypass review -- GitHub still enforces whatever branch protection requires; it
-    # only removes the "someone must come back and click merge" step once conditions are met.
-    needs: ci-ok
-    if: >-
-      !cancelled() && needs.ci-ok.result == 'success'
-      && github.event_name == 'pull_request' && github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr merge --auto --squash "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}"
-
+  # NO auto-merge job, deliberately. One existed until #14, and the first time it actually ran it
+  # merged #14 as `github-actions` -- and GitHub never starts workflow runs from a push made with
+  # GITHUB_TOKEN (its loop guard). So main's merge commit 0a669db got NO ci run: nothing tested it,
+  # no image was published for it, and a `v*` tag on it would have been refused by `release`.
+  # Auto-merge is instead enabled by the PR's author identity (repo setting "Allow auto-merge", then
+  # `gh pr merge --auto --squash` or the Claude GitHub integration), whose merge is an ordinary push
+  # that runs this workflow. `ci-no-github-token-merge` in plan-ledger.sh holds this.
 
   # ---------------------------------------------------------------------------------------------
   release:
