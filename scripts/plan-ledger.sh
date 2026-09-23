@@ -244,6 +244,30 @@ if bad:
     sys.exit("expensive jobs not gated by gate-cheap: " + " ".join(bad))
 '
 
+# No job past stage 1 may lean on GitHub's IMPLICIT `success()`. It requires every ancestor,
+# transitively, to have succeeded, so one legitimately skipped job upstream (fmt on a fixture-only
+# PR, docker/mutants on every PR) silently skips everything below -- and ci-ok goes green with
+# nothing tested. Found on #14's first full run: auto-merge skipped behind a green ci-ok, and the
+# same rule would have skipped clippy and every test on a fixture-only change. Any job needing more
+# than `changes` must state its status test (`!cancelled()` or `always()`) in its own `if:`.
+check ci-explicit-status-on-chained-jobs yes \
+  "every chained CI job states !cancelled()/always(); none relies on implicit success()" \
+  python3 -c '
+import sys, yaml
+jobs = yaml.safe_load(open(".github/workflows/ci.yml"))["jobs"]
+bad = []
+for name, job in jobs.items():
+    needs = job.get("needs", [])
+    needs = [needs] if isinstance(needs, str) else needs
+    if not needs or needs == ["changes"]:
+        continue
+    cond = str(job.get("if", ""))
+    if "cancelled()" not in cond and "always()" not in cond:
+        bad.append(name)
+if bad:
+    sys.exit("chained jobs relying on implicit success(): " + " ".join(bad))
+'
+
 # Has the container image ever actually been BUILT?
 #
 # Flips to MET when reference/fixtures/39-image-build.txt starts with `VERDICT: built`.

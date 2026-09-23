@@ -178,6 +178,13 @@ jobs:
   # Rust job) and GitHub skips everything downstream of a skipped job. A gate always reports, and
   # fails only on a real failure or cancellation, so "skipped" never blocks and never passes off
   # a failure as a skip.
+  #
+  # EVERY job past stage 1 therefore states its own status test: `!cancelled()` plus a success check
+  # on the stage directly before it. Without one, GitHub's implicit `success()` requires EVERY
+  # ancestor, transitively, to have succeeded -- so one skipped job anywhere upstream (fmt on a
+  # fixture-only PR; docker/mutants on every PR) silently skips everything below it, and ci-ok
+  # reports green with nothing tested. Observed on #14: auto-merge skipped behind a green ci-ok.
+  # `ci-explicit-status-on-chained-jobs` in plan-ledger.sh holds this.
 
   # ----------------------------------------------------------------------- stage 1: no compilation
   fmt:
@@ -298,7 +305,9 @@ jobs:
   clippy:
     name: clippy
     needs: [changes, gate-cheap]
-    if: needs.changes.outputs.any_crate == 'true'
+    if: >-
+      !cancelled() && needs.gate-cheap.result == 'success'
+      && needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -312,7 +321,9 @@ jobs:
   msrv:
     name: MSRV (1.94)
     needs: [changes, gate-cheap]
-    if: needs.changes.outputs.any_crate == 'true'
+    if: >-
+      !cancelled() && needs.gate-cheap.result == 'success'
+      && needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -347,7 +358,9 @@ jobs:
   test-unit:
     name: tests (no database)
     needs: [changes, gate-static]
-    if: needs.changes.outputs.any_crate == 'true'
+    if: >-
+      !cancelled() && needs.gate-static.result == 'success'
+      && needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -363,7 +376,9 @@ jobs:
   test-db:
     name: tests (Postgres required)
     needs: [changes, test-unit]
-    if: needs.changes.outputs.any_crate == 'true'
+    if: >-
+      !cancelled() && needs.test-unit.result == 'success'
+      && needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -404,7 +419,9 @@ jobs:
   build-bins:
     name: build (once)
     needs: [changes, test-unit]
-    if: needs.changes.outputs.any_crate == 'true'
+    if: >-
+      !cancelled() && needs.test-unit.result == 'success'
+      && needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -429,7 +446,9 @@ jobs:
   binary-smoke:
     name: binary smoke (composed binary)
     needs: [changes, build-bins, test-db]
-    if: needs.changes.outputs.any_crate == 'true'
+    if: >-
+      !cancelled() && needs.build-bins.result == 'success'
+      && needs.test-db.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -473,7 +492,9 @@ jobs:
   lane-l:
     name: lane L (SDK smokes + schemathesis)
     needs: [changes, build-bins, binary-smoke]
-    if: needs.changes.outputs.any_crate == 'true'
+    if: >-
+      !cancelled() && needs.binary-smoke.result == 'success'
+      && needs.build-bins.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -592,7 +613,9 @@ jobs:
     # secret, and the cheapest guarantee is that no PR event can start this job at all. The
     # manifest is 18 GETs and one `DELETE /v0/auth/me` probe; nothing is created on the reference
     # account, so a READ-ONLY key is sufficient and is what should be configured.
-    if: github.event_name == 'workflow_dispatch' && inputs.conformance
+    if: >-
+      !cancelled() && needs.lane-l.result == 'success' && needs.build-bins.result == 'success'
+      && github.event_name == 'workflow_dispatch' && inputs.conformance
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: conformance
@@ -655,7 +678,9 @@ jobs:
     name: mutation testing
     # Mutating code whose own tests fail measures nothing: gated on test-unit.
     needs: test-unit
-    if: github.event_name == 'workflow_dispatch' && inputs.mutants
+    if: >-
+      !cancelled() && needs.test-unit.result == 'success'
+      && github.event_name == 'workflow_dispatch' && inputs.mutants
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -680,7 +705,9 @@ jobs:
   cold-cache:
     name: cold cache (reproducibility)
     needs: test-unit
-    if: github.event_name == 'workflow_dispatch' && inputs.cold_cache
+    if: >-
+      !cancelled() && needs.test-unit.result == 'success'
+      && github.event_name == 'workflow_dispatch' && inputs.cold_cache
     runs-on: ubuntu-latest
     timeout-minutes: 90
     services:
@@ -763,7 +790,9 @@ jobs:
     # This does NOT bypass review -- GitHub still enforces whatever branch protection requires; it
     # only removes the "someone must come back and click merge" step once conditions are met.
     needs: ci-ok
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    if: >-
+      !cancelled() && needs.ci-ok.result == 'success'
+      && github.event_name == 'pull_request' && github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

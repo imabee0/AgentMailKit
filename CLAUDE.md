@@ -132,7 +132,9 @@ conformance (Lane R), mutation testing and the cold-cache run are `workflow_disp
 → Postgres suite + release build → binary smoke → SDK lane → publish), each stage behind the last.
 `plan-ledger.sh` fails on a second workflow file, any `schedule:` (`ci-single-unified-workflow`), or
 a compiling/Postgres/image job not behind `gate-cheap` (`ci-cheap-gates-expensive`) — user
-decisions, asked for repeatedly. Never undo any of them. Locally, `./scripts/check.sh` still gates.
+decisions, asked for repeatedly. Never undo any of them. Every chained job states `!cancelled()` in
+its `if:` (`ci-explicit-status-on-chained-jobs`): GitHub's implicit `success()` skips a job when
+ANY ancestor was skipped, which once left `ci-ok` green with nothing tested behind it. Locally, `./scripts/check.sh` still gates.
 
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
 writing to `amk-types`, to `docs/PLAN.md`, outside its dispatched `.amk-scope`, or introducing a
