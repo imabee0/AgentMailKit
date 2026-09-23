@@ -208,6 +208,42 @@ check ci-single-unified-workflow yes \
     ! grep -rqE "^[[:space:]]*schedule:" .github || exit 1
     grep -q "^  ci-ok:" .github/workflows/ci.yml'
 
+# Cheap gates expensive. The user's rule (2026-09-23): nothing costly starts until everything cheap
+# has passed, so a formatting slip or a leaked secret costs seconds, not a Postgres suite, a release
+# build and an SDK lane. Asserted on the graph, not on job names: every job that compiles
+# (setup-rust / cargo), stands up Postgres, or builds an image must reach `gate-cheap` through
+# `needs:`. The exemptions are `fmt` and `guards`: stage-1 checks that load the toolchain only for
+# rustfmt / `cargo metadata`. They are named, not inferred -- "whatever gate-cheap needs" would let
+# anyone exempt a job by wiring it into gate-cheap -- and they are held to never building, testing
+# or standing up Postgres, so the exemption cannot quietly grow into the thing it exempts.
+check ci-cheap-gates-expensive yes \
+  "every compiling / Postgres / image job waits on gate-cheap (cheap checks first)" \
+  python3 -c '
+import sys, yaml
+jobs = yaml.safe_load(open(".github/workflows/ci.yml"))["jobs"]
+def needs(j):
+    v = jobs[j].get("needs", [])
+    return [v] if isinstance(v, str) else v
+def reaches(j, seen=()):
+    return any(n == "gate-cheap" or (n not in seen and reaches(n, seen + (j,))) for n in needs(j))
+if "gate-cheap" not in jobs:
+    sys.exit("no gate-cheap job")
+CHEAP = ("fmt", "guards")
+bad = []
+for name, job in jobs.items():
+    text = yaml.safe_dump(job)
+    if name in CHEAP:
+        if "services" in job or any(c in text for c in ("cargo build", "cargo test", "cargo clippy")):
+            bad.append(name + "(exempt but costly)")
+        continue
+    costly = ("setup-rust" in text or "cargo " in text or "services" in job
+              or "build-push-action" in text)
+    if costly and not reaches(name):
+        bad.append(name)
+if bad:
+    sys.exit("expensive jobs not gated by gate-cheap: " + " ".join(bad))
+'
+
 # Has the container image ever actually been BUILT?
 #
 # Flips to MET when reference/fixtures/39-image-build.txt starts with `VERDICT: built`.

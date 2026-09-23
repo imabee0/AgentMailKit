@@ -128,8 +128,11 @@ Long form and the failures that bought each: `docs/OPERATING-RULES.md`.
 **CI/CD is ONE GitHub Actions workflow: `.github/workflows/ci.yml`.** It is the gate (`ci-ok` is
 the single required check), the image publish and the `v*` release. It never runs on a timer:
 conformance (Lane R), mutation testing and the cold-cache run are `workflow_dispatch` inputs.
-`plan-ledger.sh`'s `ci-single-unified-workflow` fails on a second workflow file or any `schedule:` —
-a user decision, asked for repeatedly. Never add either. Locally, `./scripts/check.sh` still gates.
+**Cheap gates expensive:** jobs run as a staged ladder (no-compile checks → clippy/MSRV → unit tests
+→ Postgres suite + release build → binary smoke → SDK lane → publish), each stage behind the last.
+`plan-ledger.sh` fails on a second workflow file, any `schedule:` (`ci-single-unified-workflow`), or
+a compiling/Postgres/image job not behind `gate-cheap` (`ci-cheap-gates-expensive`) — user
+decisions, asked for repeatedly. Never undo any of them. Locally, `./scripts/check.sh` still gates.
 
 Rules 2 and 3 are enforced by a hook, not honour: `scripts/hooks/guard.sh` blocks an implementer
 writing to `amk-types`, to `docs/PLAN.md`, outside its dispatched `.amk-scope`, or introducing a

@@ -14,6 +14,8 @@
 # both halves -- one workflow file, no `schedule:` -- so a second workflow or a cron is a failure.
 #
 # Design notes live next to the thing they explain; the short version:
+#   cheap first      a ladder of stages; each costs more than the last and starts only once
+#                    everything cheaper has passed (see the STAGES block under `jobs:`)
 #   affected-only    scripts/affected-crates.sh, reverse-dependency closure, fails OPEN
 #   build once       one release build, uploaded, consumed by every downstream job and the release
 #   promote by tag   a `v*` tag re-tags main's image by digest; it never rebuilds it
@@ -155,9 +157,29 @@ jobs:
             echo "any_crate=true" >> "$GITHUB_OUTPUT"
           fi
 
+
   # ---------------------------------------------------------------------------------------------
-  # fmt / clippy / test-unit / test-db / guards / build-bins all depend only on `changes`, so they
-  # start together. Nothing here waits on anything it does not actually need.
+  # STAGES. Expensive work is gated by cheap work: a stage starts only when every stage before it
+  # has passed, so a formatting slip or a leaked secret costs seconds, not a Postgres-backed test
+  # run, a release build and an SDK/schemathesis lane. Within a stage, jobs run in parallel.
+  #
+  #   0  changes                                   what changed (seconds)
+  #   1  fmt guards secrets-scan dockerfile-lint   no compilation at all      -> gate-cheap
+  #      supply-chain
+  #   2  clippy msrv                               type-check only, no codegen -> gate-static
+  #   3  test-unit                                 debug build + pure-logic tests
+  #   4  test-db build-bins                        Postgres suite; the one release build
+  #   5  binary-smoke                              the composed binary against Postgres
+  #   6  lane-l                                    both SDKs + schemathesis
+  #   7  docker (main) / release (v* tag)          publish, only after everything above
+  #   on demand: conformance after lane-l; mutants and cold-cache after test-unit
+  #
+  # The gate-* jobs exist because a stage can be legitimately SKIPPED (a docs-only PR skips every
+  # Rust job) and GitHub skips everything downstream of a skipped job. A gate always reports, and
+  # fails only on a real failure or cancellation, so "skipped" never blocks and never passes off
+  # a failure as a skip.
+
+  # ----------------------------------------------------------------------- stage 1: no compilation
   fmt:
     name: fmt
     needs: changes
@@ -172,9 +194,110 @@ jobs:
       # Always whole-workspace: formatting is not a per-crate property and the check is seconds.
       - run: cargo fmt --all -- --check
 
+
+  guards:
+    name: guards (always, whole repo)
+    needs: changes
+    # NO `if:`. shape-provenance asserts the dependency graph and plan-ledger asserts repo-wide
+    # obligations; both need full visibility and neither is scoped by what changed. Making these
+    # conditional is precisely the "weakening coverage" the audit called out.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: ./.github/actions/setup-rust
+        with: { shared-key: guards }
+      - run: ./scripts/shape-provenance.sh
+      - run: ./scripts/plan-ledger.sh
+      - run: ./scripts/hooks/guard.test.sh
+      - run: ./scripts/affected-crates.test.sh
+
+
+  secrets-scan:
+    name: secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # gitleaks-action requires a paid GITLEAKS_LICENSE on organization repos
+      # (`imabee0` is an org). The CLI binary does not.
+      - name: gitleaks
+        env:
+          GITLEAKS_VERSION: "8.28.0"
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -C /tmp -xzf /tmp/gitleaks.tgz gitleaks
+          /tmp/gitleaks version
+          /tmp/gitleaks detect --source . --verbose --redact --exit-code 1
+
+
+  dockerfile-lint:
+    name: dockerfile lint
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # On PRs the `docker` job below does not run (it publishes, and publishing from an unmerged
+      # branch would put an unreviewed digest in the registry) -- so without this, a Dockerfile
+      # change reached main having had nothing check it at all.
+      - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+
+  supply-chain:
+    name: cargo-deny (${{ matrix.checks }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    # A CVE disclosed overnight against a pinned transitive dependency must be VISIBLE on the next
+    # run but must not fail an unrelated PR -- so advisories report without blocking, while bans,
+    # licences and sources (which only change when this repo changes) block. deny.toml's allow-list
+    # was DERIVED from `cargo metadata`, so a new licence here is a real supply-chain change.
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
+
+
+  gate-cheap:
+    name: "gate 1: cheap checks"
+    # Always reports (see STAGES). `!cancelled()`, not `always()`: a cancelled run stops here.
+    if: ${{ !cancelled() }}
+    needs: [changes, fmt, guards, secrets-scan, dockerfile-lint, supply-chain]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verdict
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "::error::the cheap checks failed -- nothing more expensive will run"
+          exit 1
+      - run: echo "the cheap checks passed or were legitimately skipped"
+
+
+  # ----------------------------------------------------------------- stage 2: type-check, no codegen
   clippy:
     name: clippy
-    needs: changes
+    needs: [changes, gate-cheap]
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -185,9 +308,45 @@ jobs:
         with: { shared-key: clippy }
       - run: cargo clippy ${{ needs.changes.outputs.crates }} --all-targets -- -D warnings
 
+
+  msrv:
+    name: MSRV (1.94)
+    needs: [changes, gate-cheap]
+    if: needs.changes.outputs.any_crate == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      # `rust-version = "1.94"` in Cargo.toml is a CLAIM. rust-toolchain.toml pins 1.94.1, so every
+      # other job builds with that exact compiler and a 1.94.1-only assumption would land
+      # unnoticed. This job is `cargo +1.94` (the floor) -- where the claim becomes a test.
+      - run: rustup toolchain install 1.94 --profile minimal
+      - uses: ./.github/actions/setup-rust
+        with: { shared-key: msrv }
+      - run: cargo +1.94 check --workspace --all-targets
+
+
+  gate-static:
+    name: "gate 2: static analysis"
+    # Always reports (see STAGES). `!cancelled()`, not `always()`: a cancelled run stops here.
+    if: ${{ !cancelled() }}
+    needs: [gate-cheap, clippy, msrv]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verdict
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: |
+          echo "::error::clippy and MSRV failed -- nothing more expensive will run"
+          exit 1
+      - run: echo "clippy and MSRV passed or were legitimately skipped"
+
+
+  # --------------------------------------------------------------- stage 3: build + pure-logic tests
   test-unit:
     name: tests (no database)
-    needs: changes
+    needs: [changes, gate-static]
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -199,9 +358,11 @@ jobs:
       # with no database at all. The DB-backed half is `test-db`, which requires one.
       - run: cargo test ${{ needs.changes.outputs.crates }}
 
+
+  # ------------------------------------------------------ stage 4: Postgres suite + the release build
   test-db:
     name: tests (Postgres required)
-    needs: changes
+    needs: [changes, test-unit]
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -239,67 +400,10 @@ jobs:
           echo "amk-prefixed databases seen by the run: $n"
           [ "${n:-0}" -ge 1 ] || { echo "::error::AMK_REQUIRE_DB was set but no test database was ever created"; exit 1; }
 
-  guards:
-    name: guards (always, whole repo)
-    needs: changes
-    # NO `if:`. shape-provenance asserts the dependency graph and plan-ledger asserts repo-wide
-    # obligations; both need full visibility and neither is scoped by what changed. Making these
-    # conditional is precisely the "weakening coverage" the audit called out.
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      - uses: ./.github/actions/setup-rust
-        with: { shared-key: guards }
-      - run: ./scripts/shape-provenance.sh
-      - run: ./scripts/plan-ledger.sh
-      - run: ./scripts/hooks/guard.test.sh
-      - run: ./scripts/affected-crates.test.sh
 
-  supply-chain:
-    name: cargo-deny (${{ matrix.checks }})
-    needs: changes
-    if: needs.changes.outputs.rust == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        checks: [advisories, bans licenses sources]
-    # A CVE disclosed overnight against a pinned transitive dependency must be VISIBLE on the next
-    # run but must not fail an unrelated PR -- so advisories report without blocking, while bans,
-    # licences and sources (which only change when this repo changes) block. deny.toml's allow-list
-    # was DERIVED from `cargo metadata`, so a new licence here is a real supply-chain change.
-    continue-on-error: ${{ matrix.checks == 'advisories' }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check ${{ matrix.checks }}
-
-  msrv:
-    name: MSRV (1.94)
-    needs: changes
-    if: needs.changes.outputs.any_crate == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      # `rust-version = "1.94"` in Cargo.toml is a CLAIM. rust-toolchain.toml pins 1.94.1, so every
-      # other job builds with that exact compiler and a 1.94.1-only assumption would land
-      # unnoticed. This job is `cargo +1.94` (the floor) -- where the claim becomes a test.
-      - run: rustup toolchain install 1.94 --profile minimal
-      - uses: ./.github/actions/setup-rust
-        with: { shared-key: msrv }
-      - run: cargo +1.94 check --workspace --all-targets
-
-  # ---------------------------------------------------------------------------------------------
   build-bins:
     name: build (once)
-    needs: changes
+    needs: [changes, test-unit]
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -320,9 +424,11 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+
+  # ------------------------------------------------------------- stage 5: the composed binary
   binary-smoke:
     name: binary smoke (composed binary)
-    needs: [changes, build-bins]
+    needs: [changes, build-bins, test-db]
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -362,9 +468,11 @@ jobs:
           # rather than quietly verifying nothing -- the same rule the script itself enforces.
           [ "$rc" -eq 0 ] || exit 1
 
+
+  # --------------------------------------------------------- stage 6: both SDKs + schemathesis
   lane-l:
     name: lane L (SDK smokes + schemathesis)
-    needs: [changes, build-bins]
+    needs: [changes, build-bins, binary-smoke]
     if: needs.changes.outputs.any_crate == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -407,57 +515,20 @@ jobs:
           ./scripts/p1-gate.sh
           echo "p1-gate Lane L exited $?"
 
-  # ---------------------------------------------------------------------------------------------
-  dockerfile-lint:
-    name: dockerfile lint
-    needs: changes
-    if: needs.changes.outputs.docker == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with: { persist-credentials: false }
-      # On PRs the `docker` job below does not run (it publishes, and publishing from an unmerged
-      # branch would put an unreviewed digest in the registry) -- so without this, a Dockerfile
-      # change reached main having had nothing check it at all.
-      - uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
-        with:
-          dockerfile: Dockerfile
-          failure-threshold: warning
-
-  secrets-scan:
-    name: secret scan
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      # gitleaks-action requires a paid GITLEAKS_LICENSE on organization repos
-      # (`imabee0` is an org). The CLI binary does not.
-      - name: gitleaks
-        env:
-          GITLEAKS_VERSION: "8.28.0"
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/gitleaks.tgz \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          tar -C /tmp -xzf /tmp/gitleaks.tgz gitleaks
-          /tmp/gitleaks version
-          /tmp/gitleaks detect --source . --verbose --redact --exit-code 1
-
-  # ---------------------------------------------------------------------------------------------
+  # ------------------------------------------------------- stage 7: publish (main only)
   docker:
     name: image (build once, push by digest)
-    needs: [changes, test-db, guards]
+    needs: [changes, gate-cheap, gate-static, test-unit, test-db, build-bins, binary-smoke, lane-l]
     # Only on main, and on EVERY main push: a `v*` tag promotes the image of the commit it points at,
     # so every main commit must have one. A docs-only push rebuilds nothing -- every layer is a GHA
     # cache hit -- and yields the same digest. Publishing from an unmerged branch would put an
     # unreviewed digest in the registry, so PRs get `dockerfile-lint` instead.
-    # `!cancelled()` + no failure: test-db is legitimately SKIPPED on a docs-only push.
+    # Last rung: runs only after every stage has passed. `needs.gate-cheap.result == 'success'`
+    # is explicit because gate-cheap always runs; the Rust stages may be legitimately SKIPPED on
+    # a docs-only push, so for them the test is "nothing failed", not "everything succeeded".
     if: >-
-      !cancelled() && !contains(needs.*.result, 'failure')
+      !cancelled() && needs.gate-cheap.result == 'success'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
       && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -508,12 +579,15 @@ jobs:
           build-args: |
             SOURCE_DATE_EPOCH=${{ needs.changes.outputs.source_date_epoch }}
 
+
   # ---------------------------------------------------------------------------------------------
   # ON DEMAND. Actions -> ci -> Run workflow, tick the box. Never on a timer, never on a PR.
 
   conformance:
     name: lane R (dual-target diff vs api.agentmail.to)
-    needs: build-bins
+    # After lane L: our own SDK/schemathesis lane must pass before spending real requests on
+    # someone else's production API.
+    needs: [build-bins, lane-l]
     # workflow_dispatch only: a PR-triggered run -- a fork's above all -- must never reach this
     # secret, and the cheapest guarantee is that no PR event can start this job at all. The
     # manifest is 18 GETs and one `DELETE /v0/auth/me` probe; nothing is created on the reference
@@ -576,8 +650,11 @@ jobs:
           REF_KEY="$AGENTMAIL_API_KEY" CAND_BASE="http://127.0.0.1:8111" CAND_KEY="$CAND_KEY" \
             python3 conformance/dual_target.py conformance/manifest.json
 
+
   mutants:
     name: mutation testing
+    # Mutating code whose own tests fail measures nothing: gated on test-unit.
+    needs: test-unit
     if: github.event_name == 'workflow_dispatch' && inputs.mutants
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -599,8 +676,10 @@ jobs:
           path: mutants.out/
           if-no-files-found: warn
 
+
   cold-cache:
     name: cold cache (reproducibility)
+    needs: test-unit
     if: github.event_name == 'workflow_dispatch' && inputs.cold_cache
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -626,6 +705,7 @@ jobs:
       - run: ./scripts/shape-provenance.sh && ./scripts/plan-ledger.sh
 
   # ---------------------------------------------------------------------------------------------
+
   ci-ok:
     name: ci-ok
     # THE ONE REQUIRED CHECK. Branch protection names this and nothing else, so adding a job above
@@ -634,6 +714,8 @@ jobs:
     if: always()
     needs:
       - changes
+      - gate-cheap
+      - gate-static
       - fmt
       - clippy
       - test-unit
@@ -674,6 +756,7 @@ jobs:
           fi
           echo "all required jobs succeeded or were legitimately skipped"
 
+
   auto-merge:
     name: enable auto-merge
     # Automation, not approval: a green PR opened by the agent merges without a human round trip.
@@ -690,6 +773,7 @@ jobs:
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr merge --auto --squash "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}"
+
 
   # ---------------------------------------------------------------------------------------------
   release:
