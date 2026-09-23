@@ -31,7 +31,7 @@ hickory-resolver = { version = "=0.26.1", default-features = false, features = [
 # outbound send -- see `install_crypto_provider`. `ring` is the choice because it is already built
 # here and needs no C toolchain at image-build time. Pinned exactly to the resolved version, like
 # every other dependency in this workspace.
-rustls = { version = "=0.23.43", default-features = false, features = ["ring", "std"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["ring", "std"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

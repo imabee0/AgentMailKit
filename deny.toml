@@ -7,8 +7,9 @@
 # graph query cargo-deny does not express. This file covers what nothing covered: advisories,
 # licences, duplicate/wildcard bans and source registries.
 #
-# Runs nightly, not per-PR. A CVE disclosed against a pinned transitive dependency must not fail
-# an unrelated pull request — but it must be visible within 24 hours.
+# Runs on every PR and main push (`supply-chain` in `.github/workflows/ci.yml`). Advisories there
+# report without blocking: a CVE disclosed against a pinned transitive dependency must not fail an
+# unrelated pull request, but it must be visible on the next run. Bans/licences/sources block.
 
 [graph]
 all-features = true
@@ -54,7 +55,7 @@ allow = [
 [bans]
 # Duplicate versions warn rather than deny: the workspace pins exactly (asserted by
 # `plan-ledger.sh`'s `deps-pinned-exactly`), so a duplicate is a transitive resolution we do not
-# directly control. Worth seeing; not worth failing a nightly on.
+# directly control. Worth seeing; not worth failing a run on.
 multiple-versions = "warn"
 # A wildcard dependency contradicts the exact-pinning rule outright, so it fails.
 wildcards = "deny"
